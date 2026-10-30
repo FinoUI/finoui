@@ -25,12 +25,16 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust
-        # This action's "stable" entry point is a branch, so this SHA is the
-        # stable toolchain as of the pin; update it to follow new releases.
-        # 该 action 的 "stable" 入口是分支，这里固定的是当时的 stable 工具链；
-        # 想跟随新版本发布时需要更新这个 SHA。
+        # Only the action's implementation is pinned. Its toolchain is named
+        # explicitly because it otherwise derives it from @rev, which is a SHA
+        # here; the installed version still comes from rust-toolchain.toml and
+        # follows new stable releases.
+        # 这里只固定 action 本身的实现。由于改用 SHA 后 action 会把 @rev 当作
+        # 工具链名，所以必须显式指定 toolchain；实际安装的版本仍由
+        # rust-toolchain.toml 决定，会跟随新的 stable 发布。
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           components: clippy, rustfmt
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
