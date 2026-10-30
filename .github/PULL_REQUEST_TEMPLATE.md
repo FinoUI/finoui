@@ -1,17 +1,12 @@
 <!--
-标题 / Title：使用一个 Gitmoji 和中英文简明摘要。
-Use one Gitmoji followed by a concise Chinese and English summary.
+标题 / Title：使用一个 Gitmoji 和简明摘要，可使用中文或英文。
+Use one Gitmoji followed by a concise summary in either Chinese or English.
 -->
 
 ## 摘要 / Summary
 
-### 中文
-
-<!-- 说明目标、主要变更和关联架构。 -->
-
-### English
-
-<!-- Describe the goal, main changes, and related architecture. -->
+<!-- 说明目标、主要变更和关联架构，可使用中文或英文。 -->
+<!-- Describe the goal, main changes, and related architecture in either Chinese or English. -->
 
 ## 关联 Issue / Linked issue
 
@@ -21,12 +16,6 @@ Use one Gitmoji followed by a concise Chinese and English summary.
 Closes #
 
 ## 变更内容 / Changes
-
-### 中文
-
--
-
-### English
 
 -
 
@@ -41,7 +30,6 @@ Closes #
 
 ## 提交前检查 / Checklist
 
-- [ ] 正文和标题包含中英文。 / The title and body include Chinese and English.
 - [ ] 本 PR 只包含一个可独立审查和回退的变更范围。 / This PR contains one independently reviewable and revertable scope.
 - [ ] `docs/en` 与 `docs/zh-cn` 已同步；无文档变更时不适用。 / `docs/en` and `docs/zh-cn` are synchronized, or no documentation changed.
 - [ ] 公共 API 未泄漏平台实现类型。 / Public APIs do not leak platform implementation types.

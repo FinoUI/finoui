@@ -1,13 +1,13 @@
 name: ✨ 功能建议 / Feature request
 description: 提议范围明确、可验收的新能力 / Propose a scoped capability with executable acceptance criteria
-title: "✨ <中文摘要 / English summary>"
+title: "✨ <摘要 / summary>"
 labels: [enhancement]
 body:
   - type: markdown
     attributes:
       value: |
-        **中文：** 每个 Issue 只定义一个目标。正文使用中英文，范围、非目标和验收条件应能支持独立实施与回退。
-        **English:** Define one goal per issue. Write in Chinese and English, with scope, non-goals, and acceptance criteria that support independent implementation and reversion.
+        **中文：** 每个 Issue 只定义一个目标。可使用中文或英文，范围、非目标和验收条件应能支持独立实施与回退。
+        **English:** Define one goal per issue. Use either Chinese or English, with scope, non-goals, and acceptance criteria that support independent implementation and reversion.
   - type: textarea
     id: problem
     attributes:
@@ -49,5 +49,5 @@ body:
     attributes:
       label: 提交前检查 / Before submitting
       options:
-        - label: 我已搜索现有 Issue，并提供中英文内容。 / I searched existing issues and provided Chinese and English content.
+        - label: 我已搜索现有 Issue。 / I searched existing issues.
           required: true
