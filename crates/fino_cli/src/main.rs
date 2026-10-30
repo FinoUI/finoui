@@ -53,12 +53,15 @@ enum InspectKind {
     Reactive,
     Trace,
     Layout,
+    #[value(name = "display_list")]
     DisplayList,
     Screenshot,
     Resources,
 }
 
 impl From<InspectKind> for SnapshotKind {
+    /// Maps CLI protocol names to the core snapshot capability enum.
+    /// 将 CLI 协议名映射到核心快照能力枚举。
     fn from(kind: InspectKind) -> Self {
         match kind {
             InspectKind::Dom => Self::Dom,
@@ -93,6 +96,8 @@ struct CheckReport {
     checks: Vec<CheckResult>,
 }
 
+/// Runs the command behind the panic-to-structured-error boundary.
+/// 在 panic 转结构化错误的边界内运行命令。
 fn main() -> ExitCode {
     let format = panic_output_format();
     match catch_tool_panic(run) {
@@ -101,6 +106,8 @@ fn main() -> ExitCode {
     }
 }
 
+/// Dispatches generic checks and inspection while respecting the selected output format.
+/// 分发通用检查与产物检查，并遵循所选输出格式。
 fn run() -> ExitCode {
     match Cli::parse().command {
         Command::Check { format } => {
@@ -130,11 +137,15 @@ fn run() -> ExitCode {
     }
 }
 
+/// Converts an unwinding tool failure into a diagnostic instead of aborting silently.
+/// 将展开中的工具故障转换为诊断，避免静默中断。
 fn catch_tool_panic(operation: impl FnOnce() -> ExitCode) -> Result<ExitCode, ToolError> {
     std::panic::catch_unwind(AssertUnwindSafe(operation))
         .map_err(|payload| ToolError::tool_panic(panic_payload(payload)))
 }
 
+/// Recovers JSON panic formatting from either supported `--format` spelling.
+/// 从两种受支持的 `--format` 写法恢复 JSON panic 输出格式。
 fn panic_output_format() -> OutputFormat {
     if std::env::args_os().any(|argument| argument == "json" || argument == "--format=json") {
         OutputFormat::Json
@@ -143,6 +154,8 @@ fn panic_output_format() -> OutputFormat {
     }
 }
 
+/// Preserves standard string panic payloads and labels non-string payloads explicitly.
+/// 保留标准字符串 panic 信息，并显式标记非字符串 payload。
 fn panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_owned()
@@ -153,6 +166,8 @@ fn panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+/// Prints bounded human counts instead of exposing the complete artifact payload.
+/// 输出有界的人类可读计数，而不是完整产物内容。
 fn print_inspect_summary(kind: InspectKind, run: &Path, value: &Value) {
     println!("inspect {}: {}", inspect_name(kind), run.display());
     match kind {
@@ -183,6 +198,8 @@ fn print_inspect_summary(kind: InspectKind, run: &Path, value: &Value) {
     }
 }
 
+/// Uses the same protocol spelling in summaries and artifact filenames.
+/// 在摘要与产物文件名中使用相同协议名称。
 fn inspect_name(kind: InspectKind) -> &'static str {
     match kind {
         InspectKind::Dom => "dom",
@@ -200,8 +217,9 @@ fn array_len(value: &Value, field: &str) -> usize {
     value[field].as_array().map_or(0, Vec::len)
 }
 
+/// Validates tool prerequisites without inspecting or executing any workspace member.
+/// 验证工具前置条件，不检查或执行任何 workspace 成员。
 fn generic_check() -> CheckReport {
-    let manifest = std::path::Path::new("Cargo.toml");
     let inspect_artifacts = [
         SnapshotKind::Dom,
         SnapshotKind::A11y,
@@ -214,15 +232,7 @@ fn generic_check() -> CheckReport {
         .collect();
     let inspect_protocol_valid = unique_artifacts.len() == inspect_artifacts.len();
     let checks = vec![
-        CheckResult {
-            name: "workspace_manifest".to_owned(),
-            status: if manifest.is_file() {
-                Status::Passed
-            } else {
-                Status::Failed
-            },
-            message: (!manifest.is_file()).then(|| "Cargo.toml is not readable".to_owned()),
-        },
+        workspace_manifest_check(Path::new("Cargo.toml")),
         CheckResult {
             name: "scenario_protocol".to_owned(),
             status: if SCENARIO_SCHEMA == 1 {
@@ -255,6 +265,44 @@ fn generic_check() -> CheckReport {
     }
 }
 
+/// Parses Cargo's TOML and requires a non-empty string array of workspace members.
+/// 解析 Cargo TOML，并要求 workspace members 是非空字符串数组。
+fn workspace_manifest_check(path: &Path) -> CheckResult {
+    let validation = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))
+        .and_then(|source| {
+            let manifest = toml::from_str::<toml::Value>(&source)
+                .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+            let members = manifest
+                .get("workspace")
+                .and_then(|workspace| workspace.get("members"))
+                .and_then(toml::Value::as_array)
+                .ok_or_else(|| "workspace.members must be an array".to_owned())?;
+            if members.is_empty() {
+                return Err("workspace.members must not be empty".to_owned());
+            }
+            if members.iter().any(|member| {
+                member
+                    .as_str()
+                    .is_none_or(|member| member.trim().is_empty())
+            }) {
+                return Err("workspace.members must contain only non-empty strings".to_owned());
+            }
+            Ok(())
+        });
+    CheckResult {
+        name: "workspace_manifest".to_owned(),
+        status: if validation.is_ok() {
+            Status::Passed
+        } else {
+            Status::Failed
+        },
+        message: validation.err(),
+    }
+}
+
+/// Emits a structured or concise failure and reserves exit code 2 for tool errors.
+/// 输出结构化或简洁错误，并以退出码 2 表示工具错误。
 fn output_error(error: ToolError, format: OutputFormat) -> ExitCode {
     if format == OutputFormat::Json {
         eprintln!(
@@ -274,6 +322,8 @@ fn print_json(value: &impl Serialize) {
     );
 }
 
+/// Maps a completed failed check to exit code 1 without conflating tool errors.
+/// 将完成的失败检查映射为退出码 1，与工具错误区分。
 fn exit_status(failed: bool) -> ExitCode {
     if failed {
         ExitCode::from(1)
@@ -282,6 +332,8 @@ fn exit_status(failed: bool) -> ExitCode {
     }
 }
 
+/// Formats status values consistently in human-readable summaries.
+/// 在人类可读摘要中统一格式化状态值。
 fn status_name(status: Status) -> &'static str {
     match status {
         Status::Passed => "passed",
@@ -293,6 +345,8 @@ fn status_name(status: Status) -> &'static str {
 mod tests {
     use super::catch_tool_panic;
 
+    /// Ensures caught panics retain their payload in the structured error code and message.
+    /// 确保捕获的 panic 在结构化错误码与消息中保留原始信息。
     #[test]
     fn panic_boundary_preserves_original_message() {
         let error = match catch_tool_panic(|| panic!("generic cli regression panic")) {

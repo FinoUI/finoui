@@ -579,6 +579,8 @@ impl<B: HeadlessBackend + 'static> HeadlessHost<B> {
         self.record("error", json!({ "code": code, "message": message }));
     }
 
+    /// Requires exactly one semantic match and distinguishes missing from ambiguous targets.
+    /// 要求唯一语义匹配，并区分目标缺失与选择器歧义。
     fn find_one(&self, selector: &Selector) -> Result<B::Node, HeadlessError> {
         let matches = self.runtime.backend().find_all(selector);
         match matches.len() {
@@ -597,6 +599,8 @@ impl<B: HeadlessBackend + 'static> HeadlessHost<B> {
         }
     }
 
+    /// Blocks input and clock actions after disposal while snapshot reads remain available.
+    /// 释放后阻止输入与时钟动作，同时仍允许读取快照。
     fn ensure_active(&self) -> Result<(), HeadlessError> {
         if self.disposed {
             Err(HeadlessError::new(
@@ -608,6 +612,8 @@ impl<B: HeadlessBackend + 'static> HeadlessHost<B> {
         }
     }
 
+    /// Appends only newly observed backend operations using a monotonic log cursor.
+    /// 使用单调日志游标，仅追加新观测到的后端操作。
     fn sync_backend_trace(&mut self) {
         let operations = self.runtime.backend().operation_log();
         let backend = self.runtime.backend().backend_name();

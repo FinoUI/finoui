@@ -13,6 +13,8 @@ fn counter_scenario() -> Scenario {
     serde_json::from_str(include_str!("../scenarios/counter.json")).expect("valid counter scenario")
 }
 
+/// Verifies stable run identity, virtual time, semantic snapshots, and deterministic artifacts.
+/// 验证稳定运行标识、虚拟时间、语义快照与确定性产物。
 #[test]
 fn mock_scenario_writes_deterministic_snapshots_and_trace() {
     let temporary = tempfile::tempdir().expect("temporary directory");
@@ -85,6 +87,8 @@ fn mock_scenario_writes_deterministic_snapshots_and_trace() {
     assert_eq!(saved_result["snapshots"]["dom"], "dom.json");
 }
 
+/// Locks capture files to their step state so later clicks cannot replace history.
+/// 将捕获文件固定到步骤时点，防止后续点击覆盖历史状态。
 #[test]
 fn capture_steps_preserve_before_and_after_click_states() {
     let temporary = tempfile::tempdir().expect("temporary directory");
@@ -134,6 +138,8 @@ fn capture_steps_preserve_before_and_after_click_states() {
     );
 }
 
+/// Requires reactive cycles to fail the run while retaining diagnostic evidence.
+/// 要求响应式循环使运行失败，同时保留诊断证据。
 #[test]
 fn reactive_cycles_fail_the_scenario_and_preserve_artifacts() {
     let temporary = tempfile::tempdir().expect("temporary directory");
@@ -167,6 +173,8 @@ fn reactive_cycles_fail_the_scenario_and_preserve_artifacts() {
     assert!(run_dir.join("trace.json").exists());
 }
 
+/// Ensures unsupported capture capabilities fail explicitly without empty artifacts.
+/// 确保不支持的捕获能力显式失败，且不生成空产物。
 #[test]
 fn unsupported_snapshot_is_an_explicit_structured_failure() {
     let temporary = tempfile::tempdir().expect("temporary directory");
@@ -188,6 +196,8 @@ fn unsupported_snapshot_is_an_explicit_structured_failure() {
     assert!(run_dir.join("trace.json").exists());
 }
 
+/// Exercises every required final capability and checks independent artifact preservation.
+/// 逐项检查最终必需能力，并验证其他真实产物仍被保留。
 #[test]
 fn final_artifacts_check_every_required_snapshot_capability() {
     let temporary = tempfile::tempdir().expect("temporary directory");
@@ -221,6 +231,8 @@ fn final_artifacts_check_every_required_snapshot_capability() {
     }
 }
 
+/// Confirms failed assertions stop execution but still emit useful run artifacts.
+/// 确认断言失败会停止执行，同时仍输出有用的运行产物。
 #[test]
 fn failed_text_assertion_preserves_structured_artifacts() {
     let temporary = tempfile::tempdir().expect("temporary directory");

@@ -84,6 +84,8 @@ pub enum Step {
 }
 
 impl Step {
+    /// Supplies the protocol action label stored in ordered step results.
+    /// 提供写入有序步骤结果的协议动作名。
     fn action(&self) -> &'static str {
         match self {
             Self::AssertText(_) => "assert_text",
@@ -340,6 +342,8 @@ pub fn run_on_host<B: HeadlessBackend + 'static>(
     Ok(result)
 }
 
+/// Executes one action and returns artifact metadata only for capture steps.
+/// 执行单个动作，并仅为 capture 步骤返回产物元数据。
 fn execute_step<B: HeadlessBackend + 'static>(
     host: &mut HeadlessHost<B>,
     step: &Step,
@@ -364,6 +368,8 @@ fn execute_step<B: HeadlessBackend + 'static>(
     }
 }
 
+/// Validates every requested capability before persisting a point-in-time capture.
+/// 先验证本步全部能力，再持久化时点快照，避免部分空产物。
 fn capture_step<B: HeadlessBackend + 'static>(
     host: &mut HeadlessHost<B>,
     kinds: &[SnapshotKind],
@@ -396,6 +402,8 @@ fn capture_step<B: HeadlessBackend + 'static>(
     })
 }
 
+/// Rejects unavailable snapshot generation with backend, capability, and step context.
+/// 拒绝不可用的快照生成，并保留后端、能力与步骤上下文。
 fn ensure_snapshot_supported<B: HeadlessBackend + 'static>(
     host: &HeadlessHost<B>,
     kind: SnapshotKind,
@@ -422,6 +430,8 @@ fn ensure_snapshot_supported<B: HeadlessBackend + 'static>(
     })
 }
 
+/// Serializes only snapshot kinds that have real host or backend data sources.
+/// 仅序列化具有真实 Host 或后端数据来源的快照种类。
 fn write_snapshot<B: HeadlessBackend + 'static>(
     host: &mut HeadlessHost<B>,
     kind: SnapshotKind,
@@ -439,6 +449,8 @@ fn write_snapshot<B: HeadlessBackend + 'static>(
     }
 }
 
+/// Adds a unique failure to both the run result and trace without duplicating diagnostics.
+/// 将唯一错误同时加入运行结果与 trace，避免重复诊断。
 fn record_error<B: HeadlessBackend + 'static>(
     host: &mut HeadlessHost<B>,
     errors: &mut Vec<ToolError>,
@@ -457,6 +469,8 @@ fn record_error<B: HeadlessBackend + 'static>(
     errors.push(error);
 }
 
+/// Rejects unsupported protocol and nondeterministic environment values before mounting.
+/// 在挂载前拒绝不支持的协议与不确定的环境配置。
 fn validate_scenario(scenario: &Scenario) -> Result<(), ToolError> {
     if scenario.schema != SCENARIO_SCHEMA {
         return Err(ToolError::new(
@@ -485,6 +499,8 @@ fn validate_scenario(scenario: &Scenario) -> Result<(), ToolError> {
     Ok(())
 }
 
+/// Derives a reproducible run ID from canonical scenario content and backend identity.
+/// 根据规范化场景内容与后端身份派生可复现 run ID，不包含时间戳。
 fn stable_run_id(scenario: &Scenario, backend: &str) -> Result<String, ToolError> {
     let canonical = serde_json::to_vec(scenario).map_err(|error| {
         ToolError::new(
@@ -519,6 +535,8 @@ fn stable_run_id(scenario: &Scenario, backend: &str) -> Result<String, ToolError
     ))
 }
 
+/// Writes stable pretty JSON with a trailing newline and structured I/O errors.
+/// 写入带结尾换行的稳定格式化 JSON，并返回结构化 I/O 错误。
 fn write_json(path: &Path, value: &impl Serialize) -> Result<(), ToolError> {
     let mut json = serde_json::to_vec_pretty(value).map_err(|error| {
         ToolError::new(

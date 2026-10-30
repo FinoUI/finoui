@@ -59,6 +59,8 @@ enum OutputFormat {
     Json,
 }
 
+/// Runs the example-owned tool behind structured panic reporting.
+/// 在结构化 panic 报告边界内运行示例自有工具。
 fn main() -> ExitCode {
     let format = panic_output_format();
     match catch_tool_panic(run) {
@@ -67,6 +69,8 @@ fn main() -> ExitCode {
     }
 }
 
+/// Dispatches only counter checks and counter-mounted scenario execution.
+/// 仅分发计数器检查与显式计数器挂载的场景执行。
 fn run() -> ExitCode {
     match Cli::parse().command {
         Command::Check { format } => {
@@ -103,11 +107,15 @@ fn run() -> ExitCode {
     }
 }
 
+/// Preserves runner failures as structured diagnostics with their original payload.
+/// 将运行器故障保留为包含原始 payload 的结构化诊断。
 fn catch_tool_panic(operation: impl FnOnce() -> ExitCode) -> Result<ExitCode, ToolError> {
     std::panic::catch_unwind(AssertUnwindSafe(operation))
         .map_err(|payload| ToolError::tool_panic(panic_payload(payload)))
 }
 
+/// Selects JSON panic output for either accepted format argument spelling.
+/// 为两种受支持的格式参数写法选择 JSON panic 输出。
 fn panic_output_format() -> OutputFormat {
     if std::env::args_os().any(|argument| argument == "json" || argument == "--format=json") {
         OutputFormat::Json
@@ -116,6 +124,8 @@ fn panic_output_format() -> OutputFormat {
     }
 }
 
+/// Extracts standard panic text and explicitly identifies opaque payloads.
+/// 提取标准 panic 文本，并显式标识不透明 payload。
 fn panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_owned()
@@ -126,6 +136,8 @@ fn panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+/// Prints either the complete machine result or a bounded scenario summary.
+/// 输出完整机器结果或有界的场景摘要。
 fn output_scenario(result: &ScenarioResult, format: OutputFormat) {
     if format == OutputFormat::Json {
         print_json(result);
@@ -140,6 +152,8 @@ fn output_scenario(result: &ScenarioResult, format: OutputFormat) {
     }
 }
 
+/// Reports runner errors using the requested channel and returns the tool-error exit code.
+/// 按请求格式报告运行器错误，并返回工具错误退出码。
 fn output_error(error: ToolError, format: OutputFormat) -> ExitCode {
     if format == OutputFormat::Json {
         eprintln!(
@@ -159,6 +173,8 @@ fn print_json(value: &impl Serialize) {
     );
 }
 
+/// Distinguishes failed counter assertions from successful scenario completion.
+/// 区分计数器断言失败与场景成功完成。
 fn exit_status(failed: bool) -> ExitCode {
     if failed {
         ExitCode::from(1)
@@ -167,6 +183,8 @@ fn exit_status(failed: bool) -> ExitCode {
     }
 }
 
+/// Uses stable lowercase status labels in human runner output.
+/// 在人类可读的运行器输出中使用稳定小写状态名。
 fn status_name(status: Status) -> &'static str {
     match status {
         Status::Passed => "passed",
@@ -178,6 +196,8 @@ fn status_name(status: Status) -> &'static str {
 mod tests {
     use super::catch_tool_panic;
 
+    /// Ensures example runner panics retain their original text after conversion.
+    /// 确保示例运行器 panic 转换后仍保留原始文本。
     #[test]
     fn panic_boundary_preserves_original_message() {
         let error = match catch_tool_panic(|| panic!("counter runner regression panic")) {

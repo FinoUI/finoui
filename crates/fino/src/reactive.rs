@@ -104,6 +104,7 @@ pub struct ReactiveSnapshot {
 struct SignalRecord {
     name: String,
     writes: u64,
+    last_write_seq: u64,
 }
 
 #[derive(Debug)]
@@ -113,6 +114,7 @@ struct EffectRecord {
     dependencies: BTreeSet<usize>,
     last_reason: String,
     active: bool,
+    last_run_seq: u64,
 }
 
 #[derive(Debug, Default)]
@@ -122,7 +124,7 @@ pub(crate) struct ReactiveRegistry {
     signals: BTreeMap<usize, SignalRecord>,
     effects: BTreeMap<usize, EffectRecord>,
     errors: Vec<ReactiveError>,
-    pending_reason: Option<String>,
+    write_seq: u64,
 }
 
 impl ReactiveRegistry {
@@ -134,6 +136,7 @@ impl ReactiveRegistry {
             SignalRecord {
                 name: name.to_owned(),
                 writes: 0,
+                last_write_seq: 0,
             },
         );
         id
@@ -150,39 +153,56 @@ impl ReactiveRegistry {
                 dependencies: BTreeSet::new(),
                 last_reason: "pending".to_owned(),
                 active: true,
+                last_run_seq: 0,
             },
         );
         id
     }
 
+    /// Records a diagnostic dependency only for the effect currently being tracked.
+    /// 仅为当前被追踪的 Effect 记录诊断依赖。
     fn record_dependency(&mut self, effect: usize, signal: usize) {
         if let Some(effect) = self.effects.get_mut(&effect) {
             effect.dependencies.insert(signal);
         }
     }
 
+    /// Assigns a monotonic write sequence so effects can attribute their own causes.
+    /// 分配单调写入序列，使 Effect 能归因到自身依赖的变化。
     fn signal_written(&mut self, signal: usize) {
-        let reason = format!("signal-{signal} write");
         if let Some(record) = self.signals.get_mut(&signal) {
+            self.write_seq += 1;
             record.writes += 1;
-            self.pending_reason = Some(reason);
+            record.last_write_seq = self.write_seq;
         }
     }
 
+    /// Selects the newest post-run write from the effect's previous dependencies.
+    /// 从 Effect 上一轮依赖中选择最近一次写入，避免归因到无关 Signal。
     fn begin_effect(&mut self, effect: usize) {
+        let signals = &self.signals;
+        let write_seq = self.write_seq;
         if let Some(record) = self.effects.get_mut(&effect) {
             record.executions += 1;
-            record.dependencies.clear();
             record.last_reason = if record.executions == 1 {
                 "initial".to_owned()
             } else {
-                self.pending_reason
-                    .clone()
+                record
+                    .dependencies
+                    .iter()
+                    .filter_map(|id| signals.get(id).map(|signal| (signal.last_write_seq, *id)))
+                    .filter(|(sequence, _)| *sequence > record.last_run_seq)
+                    .max()
+                    .map(|(_, id)| format!("signal-{id} write"))
                     .unwrap_or_else(|| "reactive update".to_owned())
             };
+            record.dependencies.clear();
+            record.last_run_seq = write_seq;
         }
     }
 
+    /// Reports recursive entry once per consecutive cycle without exposing graph handles.
+    /// 对连续循环重入只报告一次，且不暴露响应式图句柄。
     fn report_cycle(&mut self, effect: usize) {
         let effect_id = format!("effect-{effect}");
         let error = ReactiveError {
@@ -195,12 +215,16 @@ impl ReactiveRegistry {
         }
     }
 
+    /// Marks owner cleanup in diagnostics without deleting historical execution evidence.
+    /// 在诊断中标记 Owner 清理，同时保留历史执行证据。
     fn deactivate_effect(&mut self, effect: usize) {
         if let Some(effect) = self.effects.get_mut(&effect) {
             effect.active = false;
         }
     }
 
+    /// Projects internal records into stable IDs and creation-ordered diagnostics.
+    /// 将内部记录映射为稳定 ID 与按创建顺序排列的诊断快照。
     fn snapshot(&self, component_executions: u64, disposed: bool) -> ReactiveSnapshot {
         ReactiveSnapshot {
             schema: 1,
@@ -398,6 +422,8 @@ struct EffectRunner {
 }
 
 impl EffectRunner {
+    /// Installs the diagnostic observer for one callback and restores the outer observer on unwind.
+    /// 为单次回调安装诊断观察者，并在展开时恢复外层观察者。
     fn run(&mut self, id: usize) {
         struct ResetEffect(Option<usize>);
         impl Drop for ResetEffect {
@@ -496,8 +522,16 @@ pub fn batch<T>(transaction: impl FnOnce() -> T) -> T {
     reactive_graph::effect::batch(transaction)
 }
 
-/// Temporarily disables dependency tracking for non-reactive reads.
-/// 暂时禁用依赖追踪，用于非响应式读取。
+/// Disables graph and diagnostic tracking, restoring both even when the read panics.
+/// 禁用图与诊断依赖追踪，并在正常返回或 panic 时都恢复原状态。
 pub fn untracked<T>(read: impl FnOnce() -> T) -> T {
+    struct RestoreEffect(Option<usize>);
+    impl Drop for RestoreEffect {
+        fn drop(&mut self) {
+            CURRENT_EFFECT.with(|current| current.set(self.0));
+        }
+    }
+
+    let _restore = RestoreEffect(CURRENT_EFFECT.with(|current| current.replace(None)));
     untrack(read)
 }

@@ -94,6 +94,8 @@ fn counter_selector() -> Selector {
     }
 }
 
+/// Records each smoke-check outcome while allowing later independent checks to run.
+/// 记录每项冒烟检查结果，同时允许后续独立检查继续执行。
 fn run_check(
     checks: &mut Vec<CounterCheckResult>,
     name: &str,
