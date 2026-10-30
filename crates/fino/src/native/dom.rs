@@ -376,6 +376,8 @@ impl NativeDom {
             }
         }
         self.layout_dirty = false;
+        self.signals.take_layout_dirty();
+        self.signals.commit_layout();
         let snapshot = LayoutSnapshot {
             schema: 1,
             window: self.window,
@@ -1070,6 +1072,31 @@ mod tests {
             "visual text change requests a frame"
         );
         assert!(!dom.take_frame_request(), "requests are coalesced");
+    }
+
+    /// Layout commits a generation and clears the shared dirty flag exactly once per pass.
+    /// 每次布局提交一个代次，并只清除一次共享 dirty 标记。
+    #[test]
+    fn layout_commits_generation_and_clears_dirty() {
+        let mut dom = dom();
+        let (_button, _prefix, value) = button_with_text(&mut dom);
+        assert_eq!(dom.signals().snapshot().layout_generation, 0);
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let committed = dom.signals().snapshot();
+        assert_eq!(committed.layout_generation, 1);
+        assert!(!committed.layout_dirty);
+
+        // A cached layout pass does not create a new committed generation.
+        // 缓存命中不会产生新的已提交代次。
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        assert_eq!(dom.signals().snapshot().layout_generation, 1);
+
+        dom.set_text(&value, "1");
+        assert!(dom.signals().snapshot().layout_dirty);
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let committed = dom.signals().snapshot();
+        assert_eq!(committed.layout_generation, 2);
+        assert!(!committed.layout_dirty);
     }
 
     /// Layout and display-list snapshots contain real window-tagged geometry.

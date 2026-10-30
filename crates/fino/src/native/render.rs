@@ -176,7 +176,7 @@ impl GlyphAtlas {
         atlas
     }
 
-    fn reset(&mut self) {
+    fn reset(&mut self, stats: &mut RenderStats) {
         self.data.fill(0);
         self.data[0] = 255;
         self.next_x = 1;
@@ -184,6 +184,7 @@ impl GlyphAtlas {
         self.row_height = 1;
         self.cache.clear();
         self.dirty = true;
+        stats.atlas_resets += 1;
     }
 
     fn white_uv() -> [f32; 2] {
@@ -194,6 +195,7 @@ impl GlyphAtlas {
         &mut self,
         key: GlyphKey,
         glyph: &crate::text::PositionedGlyph,
+        stats: &mut RenderStats,
     ) -> Option<(AtlasGlyph, bool)> {
         if let Some(existing) = self.cache.get(&key) {
             return Some((*existing, false));
@@ -207,7 +209,7 @@ impl GlyphAtlas {
             self.row_height = 1;
         }
         if self.next_y + height >= ATLAS_SIZE {
-            self.reset();
+            self.reset(stats);
         }
         let x = self.next_x;
         let y = self.next_y;
@@ -231,6 +233,21 @@ impl GlyphAtlas {
         self.cache.insert(key, atlas_glyph);
         Some((atlas_glyph, true))
     }
+}
+
+/// Crops the ink area out of a pixmap that carries transparent padding on all sides.
+/// 从四周带透明 padding 的 pixmap 中裁剪出实际 ink 区域。
+fn crop_padded_alpha(pixels: &[u8], pixmap_width: u32, width: u32, height: u32) -> Vec<u8> {
+    let stride = pixmap_width as usize * 4;
+    let padding = ATLAS_PADDING as usize;
+    let mut data = vec![0; (width * height) as usize];
+    for row in 0..height as usize {
+        for column in 0..width as usize {
+            let source = (row + padding) * stride + (column + padding) * 4 + 3;
+            data[row * width as usize + column] = pixels[source];
+        }
+    }
+    data
 }
 
 struct RasterGlyph {
@@ -304,22 +321,35 @@ fn rasterize_glyph(glyph: &crate::text::PositionedGlyph, size: f32) -> Option<Ra
         -bounds.y() + ATLAS_PADDING as f32,
     );
     pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, transform, None);
-    let mut data = vec![0; (width * height) as usize];
-    let pixels = pixmap.data();
-    let stride = pixmap.width() as usize * 4;
-    for row in 0..height as usize {
-        for column in 0..width as usize {
-            let source = row * stride + column * 4 + 3;
-            data[row * width as usize + column] = pixels[source];
-        }
-    }
+    let data = crop_padded_alpha(pixmap.data(), pixmap.width(), width, height);
     Some(RasterGlyph {
         width,
         height,
-        left: bounds.x() - ATLAS_PADDING as f32,
-        top: bounds.y() - ATLAS_PADDING as f32,
+        left: bounds.x(),
+        top: bounds.y(),
         data,
     })
+}
+
+fn request_adapter(
+    instance: &wgpu::Instance,
+    surface: Option<&wgpu::Surface<'_>>,
+) -> Result<wgpu::Adapter, RenderError> {
+    let mut last_error = None;
+    for power_preference in [wgpu::PowerPreference::LowPower, wgpu::PowerPreference::None] {
+        let request = instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference,
+            compatible_surface: surface,
+            force_fallback_adapter: false,
+        });
+        match pollster::block_on(request) {
+            Ok(adapter) => return Ok(adapter),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+    Err(RenderError::Adapter(
+        last_error.unwrap_or_else(|| "no adapter available".to_owned()),
+    ))
 }
 
 /// Shared application-level GPU and text resources.
@@ -350,15 +380,24 @@ impl SharedRenderContext {
         Self::with_instance(wgpu::Instance::default())
     }
 
-    /// Creates the shared context around an explicit wgpu instance.
-    /// 围绕显式 wgpu Instance 创建共享上下文。
+    /// Creates the shared context around an explicit wgpu instance for headless use.
+    /// 围绕显式 wgpu Instance 创建共享上下文，用于无头场景。
     pub fn with_instance(instance: wgpu::Instance) -> Result<Self, RenderError> {
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .map_err(|error| RenderError::Adapter(error.to_string()))?;
+        let adapter = request_adapter(&instance, None)?;
+        Self::from_adapter(instance, adapter)
+    }
+
+    /// Creates the shared context with an adapter compatible with a window surface.
+    /// 使用与窗口 Surface 兼容的 adapter 创建共享上下文。
+    pub fn with_surface(
+        instance: wgpu::Instance,
+        surface: &wgpu::Surface<'_>,
+    ) -> Result<Self, RenderError> {
+        let adapter = request_adapter(&instance, Some(surface))?;
+        Self::from_adapter(instance, adapter)
+    }
+
+    fn from_adapter(instance: wgpu::Instance, adapter: wgpu::Adapter) -> Result<Self, RenderError> {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("fino-native-device"),
             ..wgpu::DeviceDescriptor::default()
@@ -496,6 +535,11 @@ impl SharedRenderContext {
         surface: wgpu::Surface<'static>,
     ) -> Result<(), RenderError> {
         let capabilities = surface.get_capabilities(&self.adapter);
+        if capabilities.formats.is_empty() {
+            return Err(RenderError::Surface(
+                "surface is not compatible with the shared adapter".to_owned(),
+            ));
+        }
         let format = capabilities
             .formats
             .iter()
@@ -886,7 +930,9 @@ impl SharedRenderContext {
                             glyph_id: glyph.glyph_id,
                             size_quarters,
                         };
-                        if let Some((atlas, rasterized)) = self.atlas.ensure(key, glyph) {
+                        if let Some((atlas, rasterized)) =
+                            self.atlas.ensure(key, glyph, &mut self.stats)
+                        {
                             let x = (bounds.x + glyph.x) * dpr + atlas.left;
                             let y = (bounds.y + glyph.y) * dpr + atlas.top;
                             let (u0, v0) = (
@@ -953,6 +999,79 @@ mod tests {
     use crate::dom_api::{Attribute, DomBackend, Tag};
     use crate::native::{dom::NativeDom, geom::Size, id::WindowId};
 
+    /// Cropping must read the ink area from the padding offset on both axes.
+    /// 裁剪必须从两个轴上的 padding 偏移读取 ink 区域。
+    #[test]
+    fn padded_alpha_copy_reads_from_padding_offset() {
+        let width = 3_u32;
+        let height = 2_u32;
+        let padding = ATLAS_PADDING as usize;
+        let pixmap_width = width + ATLAS_PADDING * 2;
+        let pixmap_height = height + ATLAS_PADDING * 2;
+        let mut pixels = vec![0_u8; (pixmap_width * pixmap_height * 4) as usize];
+        for row in 0..height as usize {
+            for column in 0..width as usize {
+                let index = ((row + padding) * pixmap_width as usize + column + padding) * 4 + 3;
+                pixels[index] = (row * width as usize + column + 1) as u8;
+            }
+        }
+        let cropped = crop_padded_alpha(&pixels, pixmap_width, width, height);
+        assert_eq!(cropped, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    fn test_glyph() -> crate::text::PositionedGlyph {
+        let mut engine = TextEngine::new();
+        let shaped = engine.shape(&crate::text::TextSpec::counter("0"));
+        let layout = engine.layout(&shaped, crate::text::TextConstraints::unbounded());
+        layout
+            .glyphs()
+            .iter()
+            .find(|glyph| glyph.advance > 0.0)
+            .expect("visible test glyph")
+            .clone()
+    }
+
+    /// The retained bitmap must contain ink on all four outline edges.
+    /// 保留的位图必须在四条轮廓边缘上都包含 ink。
+    #[test]
+    fn rasterized_glyph_keeps_ink_on_all_edges() {
+        let glyph = test_glyph();
+        let raster = rasterize_glyph(&glyph, 32.0).expect("rasterized glyph");
+        let width = raster.width as usize;
+        let height = raster.height as usize;
+        assert!(width > 2 && height > 2);
+        let top = &raster.data[..width];
+        let bottom = &raster.data[(height - 1) * width..];
+        let left: Vec<_> = (0..height).map(|row| raster.data[row * width]).collect();
+        let right: Vec<_> = (0..height)
+            .map(|row| raster.data[row * width + width - 1])
+            .collect();
+        assert!(top.iter().any(|alpha| *alpha > 0), "top edge is empty");
+        assert!(
+            bottom.iter().any(|alpha| *alpha > 0),
+            "bottom edge is empty"
+        );
+        assert!(left.iter().any(|alpha| *alpha > 0), "left edge is empty");
+        assert!(right.iter().any(|alpha| *alpha > 0), "right edge is empty");
+    }
+
+    /// Capacity pressure resets the atlas and records the reset in shared stats.
+    /// 容量压力会重置 atlas，并在共享统计中记录重置次数。
+    #[test]
+    fn atlas_reset_increments_shared_stats() {
+        let glyph = test_glyph();
+        let mut atlas = GlyphAtlas::new();
+        atlas.next_y = ATLAS_SIZE;
+        let mut stats = RenderStats::default();
+        let key = GlyphKey {
+            font_ptr: glyph.font.data.as_ref().as_ptr() as usize,
+            glyph_id: glyph.glyph_id,
+            size_quarters: (glyph.font_size * 4.0).round() as u32,
+        };
+        assert!(atlas.ensure(key, &glyph, &mut stats).is_some());
+        assert_eq!(stats.atlas_resets, 1);
+    }
+
     /// Exercises the real wgpu pipeline, glyph atlas, and text rasterization offscreen.
     /// 离屏验证真实 wgpu Pipeline、glyph atlas 与文本光栅化。
     #[test]
@@ -982,7 +1101,9 @@ mod tests {
             .expect("offscreen render");
         assert_eq!(pixels.len(), 320 * 200 * 4);
         let painted = pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|pixel| pixel[0] > 32 || pixel[1] > 32 || pixel[2] > 32)
             .count();
         assert!(painted > 1_000, "painted pixels: {painted}");

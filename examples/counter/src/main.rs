@@ -6,11 +6,10 @@ use std::{panic::AssertUnwindSafe, path::PathBuf, process::ExitCode};
 use clap::{Parser, Subcommand, ValueEnum};
 use fino::scenario::{self, ScenarioResult, Status, ToolError};
 #[cfg(not(target_arch = "wasm32"))]
+use fino_counter::browser::run_web_scenario;
+#[cfg(not(target_arch = "wasm32"))]
 use fino_counter::runner::run_native_offscreen_scenario;
-use fino_counter::{
-    browser::run_web_scenario,
-    runner::{check_counter, run_mock_scenario},
-};
+use fino_counter::runner::{check_counter, run_mock_scenario};
 use serde::Serialize;
 
 #[derive(Parser)]
@@ -65,7 +64,9 @@ enum ScenarioCommand {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Backend {
     Mock,
+    #[cfg(not(target_arch = "wasm32"))]
     WebHeadless,
+    #[cfg(not(target_arch = "wasm32"))]
     NativeOffscreen,
 }
 
@@ -75,7 +76,9 @@ impl Backend {
     fn artifact_suffix(self) -> &'static str {
         match self {
             Self::Mock => "mock",
+            #[cfg(not(target_arch = "wasm32"))]
             Self::WebHeadless => "web",
+            #[cfg(not(target_arch = "wasm32"))]
             Self::NativeOffscreen => "native",
         }
     }
@@ -128,6 +131,7 @@ fn run() -> ExitCode {
             });
             let run = scenario::load_scenario(&path).and_then(|scenario| match backend {
                 Backend::Mock => run_mock_scenario(&scenario, &out),
+                #[cfg(not(target_arch = "wasm32"))]
                 Backend::WebHeadless => run_web_scenario(&path, &out),
                 #[cfg(not(target_arch = "wasm32"))]
                 Backend::NativeOffscreen => run_native_offscreen_scenario(&scenario, &out),

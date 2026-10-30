@@ -52,6 +52,7 @@ struct CounterHost {
     count: Option<Signal<i32>>,
     pointer: fino::native::Point,
     smoke: SmokeState,
+    smoke_initial_text: Option<String>,
     surface_presented: bool,
     failure: Option<String>,
 }
@@ -71,6 +72,7 @@ impl CounterHost {
             } else {
                 SmokeState::Disabled
             },
+            smoke_initial_text: None,
             surface_presented: false,
             failure: None,
         }
@@ -86,10 +88,6 @@ impl CounterHost {
         if self.window.is_some() {
             return Ok(());
         }
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
-            Box::new(event_loop.owned_display_handle()),
-        ));
-        let app = Application::with_instance(instance).map_err(|error| error.to_string())?;
         let attributes = Window::default_attributes()
             .with_title("Fino Counter — Native (PR3)")
             .with_inner_size(LogicalSize::new(640.0, 360.0))
@@ -101,14 +99,21 @@ impl CounterHost {
         );
         window.set_visible(true);
         window.focus_window();
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
+            Box::new(event_loop.owned_display_handle()),
+        ));
+        let surface = instance
+            .create_surface(Arc::clone(&window))
+            .map_err(|error| error.to_string())?;
+        let mut app =
+            Application::with_surface(instance, &surface).map_err(|error| error.to_string())?;
         let window_desc = WindowDesc {
             title: "Fino Counter — Native (PR3)".to_owned(),
             width: 640,
             height: 360,
         };
-        let mut app = app;
         let window_id = app.create_window(window_desc);
-        app.attach_surface(window_id, Arc::clone(&window))
+        app.install_surface(window_id, surface)
             .map_err(|error| error.to_string())?;
         let count = app.owner().signal_named("counter/count", 0_i32);
         let mount_count = count.clone();
@@ -205,6 +210,7 @@ impl CounterHost {
                     );
                     return;
                 }
+                self.smoke_initial_text = Some(text.clone());
                 let Some(bounds) = bounds else {
                     self.fail("smoke run has no button bounds".to_owned(), event_loop);
                     return;
@@ -246,6 +252,7 @@ impl CounterHost {
                     serde_json::to_string_pretty(&json!({
                         "native_smoke": "passed",
                         "window": window_id,
+                        "initial_text": self.smoke_initial_text,
                         "text": text,
                         "surface_presented": self.surface_presented,
                         "frame_requests": signals.frame_requests,
@@ -267,7 +274,7 @@ impl CounterHost {
         event_loop.exit();
     }
 
-    fn route_pointer(&mut self, action: PointerAction, window: &Arc<Window>) {
+    fn route_pointer(&mut self, action: PointerAction) {
         let Some(window_id) = self.window_id else {
             return;
         };
@@ -277,7 +284,6 @@ impl CounterHost {
             position,
             action,
         }));
-        window.request_redraw();
     }
 
     fn resize(&mut self, window: &Arc<Window>, size: winit::dpi::PhysicalSize<u32>) {
@@ -324,6 +330,7 @@ impl ApplicationHandler for CounterHost {
             WinitWindowEvent::ScaleFactorChanged { .. } => {
                 self.resize(&window, window.inner_size());
             }
+            WinitWindowEvent::Occluded(false) => window.request_redraw(),
             WinitWindowEvent::Focused(focused) => {
                 if let Some(window_id) = self.window_id {
                     let _ = self.app().route_input(InputEvent::Focus {
@@ -337,16 +344,19 @@ impl ApplicationHandler for CounterHost {
                 let logical = position.to_logical::<f32>(dpr as f64);
                 self.pointer = fino::native::Point::new(logical.x, logical.y);
             }
+            WinitWindowEvent::CursorLeft { .. } => {
+                self.route_pointer(PointerAction::Cancelled);
+            }
             WinitWindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } => self.route_pointer(PointerAction::Pressed, &window),
+            } => self.route_pointer(PointerAction::Pressed),
             WinitWindowEvent::MouseInput {
                 state: ElementState::Released,
                 button: MouseButton::Left,
                 ..
-            } => self.route_pointer(PointerAction::Released, &window),
+            } => self.route_pointer(PointerAction::Released),
             WinitWindowEvent::Ime(Ime::Commit(text)) => {
                 if let Some(window_id) = self.window_id {
                     let _ = self.app().route_input(InputEvent::Ime {
@@ -367,14 +377,12 @@ impl ApplicationHandler for CounterHost {
                         _ => return,
                     };
                     if let Some(window_id) = self.window_id {
-                        let outcome = self.app().route_input(InputEvent::Key(KeyInput {
+                        let _ = self.app().route_input(InputEvent::Key(KeyInput {
                             window: window_id,
                             key: key.to_owned(),
                             pressed: true,
+                            repeat: event.repeat,
                         }));
-                        if outcome.is_some_and(|outcome| outcome.handled) {
-                            window.request_redraw();
-                        }
                     }
                 }
             }

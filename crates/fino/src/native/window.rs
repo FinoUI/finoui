@@ -70,6 +70,9 @@ pub enum PointerAction {
     /// Primary button released.
     /// 主按钮释放。
     Released,
+    /// Pointer interaction cancelled by the platform.
+    /// 平台取消指针交互。
+    Cancelled,
 }
 
 /// Window-tagged pointer input.
@@ -115,6 +118,9 @@ pub struct KeyInput {
     /// Whether the key was pressed.
     /// 按键是否按下。
     pub pressed: bool,
+    /// Whether this is an OS key-repeat event.
+    /// 是否为操作系统按键重复事件。
+    pub repeat: bool,
 }
 
 /// Platform-neutral input carrying its target window.
@@ -237,6 +243,7 @@ pub struct WindowContext {
     last_layout: Option<LayoutSnapshot>,
     last_display_list: Option<DisplayList>,
     last_input: Option<Point>,
+    pressed_target: Option<NodeId>,
 }
 
 impl WindowContext {
@@ -265,6 +272,7 @@ impl WindowContext {
             last_layout: None,
             last_display_list: None,
             last_input: None,
+            pressed_target: None,
         }
     }
 
@@ -520,11 +528,15 @@ impl WindowContext {
             }
             InputEvent::Focus { focused, .. } => {
                 self.focus.window_focused = focused;
-                if !focused {
-                    self.focus.node = None;
+                if focused {
+                    if self.focus.node.is_none() {
+                        self.focus.node = self.root;
+                    }
+                } else {
+                    self.pressed_target = None;
                 }
                 self.accessibility.commits += 1;
-                self.accessibility.focused = self.focus.node;
+                self.sync_accessibility_focus();
                 InputOutcome {
                     window: self.id,
                     handled: true,
@@ -564,52 +576,67 @@ impl WindowContext {
 
     fn dispatch_pointer(&mut self, input: PointerInput) -> InputOutcome {
         self.last_input = Some(input.position);
-        if input.action == PointerAction::Moved {
-            return InputOutcome {
+        match input.action {
+            PointerAction::Moved => InputOutcome {
                 window: self.id,
                 handled: false,
                 target: None,
-            };
-        }
-        if input.action == PointerAction::Released {
-            return InputOutcome {
-                window: self.id,
-                handled: true,
-                target: self.focus.node,
-            };
-        }
-
-        // A pointer press always uses committed geometry from this window.
-        // 指针按下始终使用该窗口自己的已提交几何。
-        let _ = self.layout();
-        let target = self.runtime.backend().hit_test(self.id, input.position);
-        if let Some(node) = target {
-            self.focus.node = Some(node);
-            self.accessibility.commits += 1;
-            self.accessibility.focused = Some(node);
-        }
-        let listener =
-            target.and_then(|node| self.runtime.backend().listener(node, EventKind::Click));
-        let handled = if let Some(listener) = listener {
-            listener.call(
-                Event {
-                    kind: EventKind::Click,
-                },
-                &mut EventContext,
-            );
-            true
-        } else {
-            false
-        };
-        InputOutcome {
-            window: self.id,
-            handled,
-            target,
+            },
+            PointerAction::Cancelled => {
+                self.pressed_target = None;
+                InputOutcome {
+                    window: self.id,
+                    handled: true,
+                    target: None,
+                }
+            }
+            PointerAction::Pressed => {
+                // A press only records the candidate; activation waits for release on the same node.
+                // 按下仅记录候选目标；只有在同一节点释放才激活。
+                let _ = self.layout();
+                let target = self.runtime.backend().hit_test(self.id, input.position);
+                self.pressed_target = target;
+                if let Some(node) = target {
+                    self.focus.node = Some(node);
+                    self.accessibility.commits += 1;
+                    self.sync_accessibility_focus();
+                }
+                InputOutcome {
+                    window: self.id,
+                    handled: target.is_some(),
+                    target,
+                }
+            }
+            PointerAction::Released => {
+                let pressed = self.pressed_target.take();
+                let _ = self.layout();
+                let released = self.runtime.backend().hit_test(self.id, input.position);
+                let target = match (pressed, released) {
+                    (Some(pressed), Some(released)) if pressed == released => Some(pressed),
+                    _ => None,
+                };
+                let listener =
+                    target.and_then(|node| self.runtime.backend().listener(node, EventKind::Click));
+                let handled = listener.is_some();
+                if let Some(listener) = listener {
+                    listener.call(
+                        Event {
+                            kind: EventKind::Click,
+                        },
+                        &mut EventContext,
+                    );
+                }
+                InputOutcome {
+                    window: self.id,
+                    handled,
+                    target,
+                }
+            }
         }
     }
 
     fn dispatch_key(&mut self, input: KeyInput) -> InputOutcome {
-        if !input.pressed {
+        if !input.pressed || input.repeat || !self.focus.window_focused {
             return InputOutcome {
                 window: self.id,
                 handled: false,
@@ -639,6 +666,14 @@ impl WindowContext {
             handled: false,
             target: self.focus.node,
         }
+    }
+
+    fn sync_accessibility_focus(&mut self) {
+        self.accessibility.focused = if self.focus.window_focused {
+            self.focus.node
+        } else {
+            None
+        };
     }
 }
 
@@ -787,6 +822,23 @@ mod tests {
         (context, root)
     }
 
+    fn pointer(
+        context: &mut WindowContext,
+        position: Point,
+        action: PointerAction,
+    ) -> InputOutcome {
+        context.dispatch_input(InputEvent::Pointer(PointerInput {
+            window: context.id(),
+            position,
+            action,
+        }))
+    }
+
+    fn click(context: &mut WindowContext, position: Point) -> InputOutcome {
+        pointer(context, position, PointerAction::Pressed);
+        pointer(context, position, PointerAction::Released)
+    }
+
     /// Proves hit testing and click dispatch update one window's text only.
     /// 验证命中测试与点击分发只更新一个窗口的文本。
     #[test]
@@ -808,13 +860,16 @@ mod tests {
         let bounds = first
             .committed_bounds(first.id(), first_root)
             .expect("first button bounds");
-        let outcome = first.dispatch_input(InputEvent::Pointer(PointerInput {
-            window: first.id(),
-            position: bounds.center(),
-            action: PointerAction::Pressed,
-        }));
-        assert!(outcome.handled);
-        assert_eq!(outcome.target, Some(first_root));
+        let pressed = pointer(&mut first, bounds.center(), PointerAction::Pressed);
+        assert_eq!(pressed.target, Some(first_root));
+        assert_eq!(
+            first.text_content(first_root).as_deref(),
+            Some("Count: 0"),
+            "a press alone must not activate the button"
+        );
+        let released = pointer(&mut first, bounds.center(), PointerAction::Released);
+        assert!(released.handled);
+        assert_eq!(released.target, Some(first_root));
         assert_eq!(first.text_content(first_root).as_deref(), Some("Count: 1"));
         assert_eq!(
             second.text_content(second_root).as_deref(),
@@ -873,11 +928,7 @@ mod tests {
         let bounds = context
             .committed_bounds(context.id(), root)
             .expect("bounds");
-        context.dispatch_input(InputEvent::Pointer(PointerInput {
-            window: context.id(),
-            position: bounds.center(),
-            action: PointerAction::Pressed,
-        }));
+        click(&mut context, bounds.center());
         assert_eq!(context.text_content(root).as_deref(), Some("Count: 1"));
         count.set(7);
         assert_eq!(context.text_content(root).as_deref(), Some("Count: 7"));
@@ -895,6 +946,119 @@ mod tests {
         assert_eq!(context.surface_lost_count(), 1);
         context.layout();
         assert!(context.last_layout().is_some());
+    }
+
+    /// Activation requires press and release on the same button; drag-out and cancel do nothing.
+    /// 激活要求在同一按钮上按下并释放；拖出与取消不触发。
+    #[test]
+    fn pointer_activation_requires_press_and_release_on_same_button() {
+        let engine = Rc::new(RefCell::new(TextEngine::new()));
+        let app = Owner::new();
+        let count = app.signal_named("app/count", 0);
+        let (mut context, root) = mount_window(engine, WindowId::new(1), count.clone());
+        context.layout();
+        context.dispatch_input(InputEvent::Focus {
+            window: context.id(),
+            focused: true,
+        });
+        let bounds = context
+            .committed_bounds(context.id(), root)
+            .expect("button bounds");
+        let inside = bounds.center();
+        let outside = Point::new(bounds.right() + 50.0, bounds.center().y);
+
+        pointer(&mut context, inside, PointerAction::Pressed);
+        pointer(&mut context, outside, PointerAction::Released);
+        assert_eq!(count.get_untracked(), 0, "drag out must not click");
+
+        pointer(&mut context, outside, PointerAction::Pressed);
+        pointer(&mut context, inside, PointerAction::Released);
+        assert_eq!(count.get_untracked(), 0, "press outside must not click");
+
+        pointer(&mut context, inside, PointerAction::Pressed);
+        pointer(&mut context, inside, PointerAction::Cancelled);
+        assert_eq!(count.get_untracked(), 0, "cancel must not click");
+
+        pointer(&mut context, inside, PointerAction::Pressed);
+        pointer(&mut context, inside, PointerAction::Released);
+        assert_eq!(count.get_untracked(), 1, "press and release must click");
+
+        pointer(&mut context, inside, PointerAction::Pressed);
+        pointer(&mut context, outside, PointerAction::Moved);
+        pointer(&mut context, inside, PointerAction::Moved);
+        pointer(&mut context, inside, PointerAction::Released);
+        assert_eq!(
+            count.get_untracked(),
+            2,
+            "returning to the pressed button still activates"
+        );
+        assert_eq!(context.text_content(root).as_deref(), Some("Count: 2"));
+    }
+
+    /// Keyboard activation ignores OS repeat and remains available after focus blur/regain.
+    /// 键盘激活忽略系统重复，并在失焦/重新聚焦后仍可用。
+    #[test]
+    fn keyboard_activation_ignores_repeat_and_survives_focus_blur() {
+        let engine = Rc::new(RefCell::new(TextEngine::new()));
+        let app = Owner::new();
+        let count = app.signal_named("app/count", 0);
+        let (mut context, root) = mount_window(engine, WindowId::new(1), count.clone());
+        context.layout();
+        context.dispatch_input(InputEvent::Focus {
+            window: context.id(),
+            focused: true,
+        });
+        assert_eq!(context.accessibility().focused, Some(root));
+
+        let window = context.id();
+        let key = |key: &str, repeat: bool| KeyInput {
+            window,
+            key: key.to_owned(),
+            pressed: true,
+            repeat,
+        };
+        assert!(
+            context
+                .dispatch_input(InputEvent::Key(key("Enter", false)))
+                .handled
+        );
+        assert_eq!(count.get_untracked(), 1);
+        assert!(
+            !context
+                .dispatch_input(InputEvent::Key(key("Enter", true)))
+                .handled
+        );
+        assert_eq!(count.get_untracked(), 1, "OS repeat must not click again");
+
+        context.dispatch_input(InputEvent::Focus {
+            window: context.id(),
+            focused: false,
+        });
+        assert_eq!(
+            context.focus().node,
+            Some(root),
+            "blur keeps the focus node"
+        );
+        assert_eq!(context.accessibility().focused, None);
+        assert!(
+            !context
+                .dispatch_input(InputEvent::Key(key("Enter", false)))
+                .handled
+        );
+        assert_eq!(count.get_untracked(), 1);
+
+        context.dispatch_input(InputEvent::Focus {
+            window: context.id(),
+            focused: true,
+        });
+        assert_eq!(context.accessibility().focused, Some(root));
+        assert!(
+            context
+                .dispatch_input(InputEvent::Key(key(" ", false)))
+                .handled
+        );
+        assert_eq!(count.get_untracked(), 2);
+        assert_eq!(context.text_content(root).as_deref(), Some("Count: 2"));
     }
 
     /// Routes events by carried identity and ignores unknown windows.
@@ -928,13 +1092,20 @@ mod tests {
             .unwrap()
             .committed_bounds(first, first_root)
             .expect("bounds");
-        let outcome = manager
+        manager
             .route_input(InputEvent::Pointer(PointerInput {
                 window: first,
                 position: bounds.center(),
                 action: PointerAction::Pressed,
             }))
-            .expect("routed");
+            .expect("press routed");
+        let outcome = manager
+            .route_input(InputEvent::Pointer(PointerInput {
+                window: first,
+                position: bounds.center(),
+                action: PointerAction::Released,
+            }))
+            .expect("release routed");
         assert!(outcome.handled);
         assert_eq!(
             manager

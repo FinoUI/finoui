@@ -32,6 +32,20 @@ impl Application {
     /// 围绕 Host 持有的 wgpu Instance 创建应用。
     pub fn with_instance(instance: wgpu::Instance) -> Result<Self, RenderError> {
         let shared = SharedRenderContext::with_instance(instance)?;
+        Self::from_shared(shared)
+    }
+
+    /// Creates the application with an adapter compatible with the first window surface.
+    /// 使用与首个窗口 Surface 兼容的 adapter 创建应用。
+    pub fn with_surface(
+        instance: wgpu::Instance,
+        surface: &wgpu::Surface<'_>,
+    ) -> Result<Self, RenderError> {
+        let shared = SharedRenderContext::with_surface(instance, surface)?;
+        Self::from_shared(shared)
+    }
+
+    fn from_shared(shared: SharedRenderContext) -> Result<Self, RenderError> {
         let windows = WindowManager::new(shared.text_engine());
         Ok(Self {
             owner: Owner::new(),
@@ -64,8 +78,22 @@ impl Application {
         self.windows.create_window(desc)
     }
 
-    /// Attaches a winit surface to an existing window context.
-    /// 为现有窗口上下文挂载 winit Surface。
+    /// Installs an already created surface for an existing window context.
+    /// 为现有窗口上下文安装已创建的 Surface。
+    pub fn install_surface(
+        &mut self,
+        id: WindowId,
+        surface: wgpu::Surface<'static>,
+    ) -> Result<(), RenderError> {
+        let context = self
+            .windows
+            .window_mut(id)
+            .ok_or(RenderError::MissingWindow(id.value()))?;
+        self.shared.install_surface(context, surface)
+    }
+
+    /// Creates and attaches a new surface from a winit window.
+    /// 从 winit 窗口创建并挂载新的 Surface。
     pub fn attach_surface(&mut self, id: WindowId, window: Arc<Window>) -> Result<(), RenderError> {
         let context = self
             .windows

@@ -257,6 +257,7 @@ pub struct TextLayout {
     width: f32,
     height: f32,
     line_count: usize,
+    is_rtl: bool,
     glyphs: Vec<PositionedGlyph>,
 }
 
@@ -277,6 +278,12 @@ impl TextLayout {
     /// 返回已布局的行数。
     pub fn line_count(&self) -> usize {
         self.line_count
+    }
+
+    /// Returns whether the paragraph base direction is right-to-left.
+    /// 返回段落基础方向是否为从右到左。
+    pub fn is_rtl(&self) -> bool {
+        self.is_rtl
     }
 
     /// Returns positioned glyphs in visual order.
@@ -385,9 +392,18 @@ impl TextEngine {
         }
 
         self.stats.shape_calls += 1;
+        // Parley exposes only first-strong paragraph resolution. A leading LRM/RLM sets the
+        // explicit base level without adding an advance or glyph.
+        // Parley 仅公开 first-strong 段落方向解析；前置 LRM/RLM 可在不增加推进或 glyph 的
+        // 情况下设置显式基础方向。
+        let layout_text = match spec.direction {
+            TextDirection::Auto => spec.text.clone(),
+            TextDirection::Ltr => format!("\u{200E}{}", spec.text),
+            TextDirection::Rtl => format!("\u{200F}{}", spec.text),
+        };
         let mut builder =
             self.layout_context
-                .ranged_builder(&mut self.font_context, &spec.text, 1.0, true);
+                .ranged_builder(&mut self.font_context, &layout_text, 1.0, true);
         builder.push_default(StyleProperty::FontFamily(FontFamily::Source(Cow::Owned(
             spec.style.font_family.clone(),
         ))));
@@ -404,7 +420,7 @@ impl TextEngine {
         if let Ok(language) = Language::parse(&spec.locale) {
             builder.push_default(StyleProperty::Locale(Some(language)));
         }
-        let layout = builder.build(&spec.text);
+        let layout = builder.build(&layout_text);
         let shaped = ShapedText { key, layout };
         if self.cache.len() >= 32 {
             self.cache.remove(0);
@@ -428,7 +444,17 @@ impl TextEngine {
 
         let mut glyphs = Vec::new();
         let mut line_count = 0;
+        let mut width = 0.0_f32;
+        let mut height = 0.0_f32;
+        let max_height = constraints.max_height;
+        let is_rtl = layout.is_rtl();
         for line in layout.lines() {
+            let metrics = line.metrics();
+            if max_height.is_some_and(|budget| height + metrics.line_height > budget) {
+                break;
+            }
+            height += metrics.line_height;
+            width = width.max(metrics.advance - metrics.trailing_whitespace);
             line_count += 1;
             for item in line.items() {
                 let PositionedLayoutItem::GlyphRun(run) = item else {
@@ -452,9 +478,10 @@ impl TextEngine {
 
         TextLayout {
             constraints,
-            width: layout.width(),
-            height: layout.height(),
+            width,
+            height,
             line_count,
+            is_rtl,
             glyphs,
         }
     }
@@ -483,6 +510,75 @@ mod tests {
         let changed = engine.shape(&TextSpec::counter("Count: 1"));
         assert_eq!(engine.stats().shape_calls, 2);
         assert!(changed.width() > 0.0);
+    }
+
+    /// Applies explicit paragraph direction, including mixed-direction text.
+    /// 应用显式段落方向，包括混合方向文本。
+    #[test]
+    fn explicit_direction_controls_base_level() {
+        let mut engine = TextEngine::new();
+        let style = TextStyle::default();
+        let mixed = "abc \u{05D0}\u{05D1}\u{05D2}";
+        let rtl = TextSpec::new(
+            mixed,
+            style.clone(),
+            "en",
+            TextDirection::Rtl,
+            WhiteSpace::NoWrap,
+        );
+        let ltr = TextSpec::new(
+            mixed,
+            style.clone(),
+            "en",
+            TextDirection::Ltr,
+            WhiteSpace::NoWrap,
+        );
+        let rtl_shaped = engine.shape(&rtl);
+        let ltr_shaped = engine.shape(&ltr);
+        let rtl_layout = engine.layout(&rtl_shaped, TextConstraints::unbounded());
+        let ltr_layout = engine.layout(&ltr_shaped, TextConstraints::unbounded());
+        assert!(rtl_layout.is_rtl());
+        assert!(!ltr_layout.is_rtl());
+        assert!(!rtl_layout.glyphs().is_empty());
+        assert!(!ltr_layout.glyphs().is_empty());
+
+        let auto_rtl = TextSpec::new(
+            "\u{05D0}\u{05D1}\u{05D2}",
+            style.clone(),
+            "he",
+            TextDirection::Auto,
+            WhiteSpace::NoWrap,
+        );
+        let auto_rtl_shaped = engine.shape(&auto_rtl);
+        let auto_rtl_layout = engine.layout(&auto_rtl_shaped, TextConstraints::unbounded());
+        assert!(auto_rtl_layout.is_rtl());
+    }
+
+    /// Height budgets drop later lines and their glyphs instead of overflowing.
+    /// 高度预算会丢弃后续行及其 glyph，而不是溢出预算。
+    #[test]
+    fn max_height_truncates_lines_and_glyphs() {
+        let mut engine = TextEngine::new();
+        let spec = TextSpec::new(
+            "alpha beta gamma delta",
+            TextStyle::default(),
+            "en",
+            TextDirection::Ltr,
+            WhiteSpace::Normal,
+        );
+        let shaped = engine.shape(&spec);
+        let full = engine.layout(&shaped, TextConstraints::new(Some(60.0), None));
+        assert!(full.line_count() > 1);
+        let budget = full.height() * 0.5;
+        let clipped = engine.layout(&shaped, TextConstraints::new(Some(60.0), Some(budget)));
+        assert!(clipped.line_count() < full.line_count());
+        assert!(clipped.height() <= budget + f32::EPSILON);
+        assert!(clipped.glyphs().len() < full.glyphs().len());
+
+        let none = engine.layout(&shaped, TextConstraints::new(Some(60.0), Some(0.0)));
+        assert_eq!(none.line_count(), 0);
+        assert!(none.glyphs().is_empty());
+        assert_eq!(none.height(), 0.0);
     }
 
     /// Reuses a cached shaping result for identical specifications.
