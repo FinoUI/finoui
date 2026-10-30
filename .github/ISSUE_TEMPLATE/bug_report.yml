@@ -36,7 +36,7 @@ body:
     id: actual
     attributes:
       label: 实际结果 / Actual result
-      description: 包含完整错误文本和首个失败位置。 / Include the complete error text and first failure location.
+      description: 包含完整错误文本和首个失败位置；删除凭据、令牌和个人数据。 / Include the complete error text and first failure location; redact credentials, tokens, and personal data.
     validations:
       required: true
   - type: textarea
@@ -50,7 +50,7 @@ body:
     id: artifacts
     attributes:
       label: 日志与产物 / Logs and artifacts
-      description: 附上相关 trace、JSON、快照或截图；不要粘贴无关日志。 / Attach relevant traces, JSON, snapshots, or screenshots; omit unrelated logs.
+      description: 附上相关 trace、JSON、快照或截图；提交前删除凭据、令牌和个人数据。 / Attach relevant traces, JSON, snapshots, or screenshots; redact credentials, tokens, and personal data before submitting.
   - type: checkboxes
     id: checks
     attributes:
