@@ -104,7 +104,7 @@ Scenarios use versioned JSON, with JSON Schema generated from the same Rust type
 }
 ```
 
-Cross-backend shared scenarios capture only logical snapshots supported by every backend. `layout`, `display_list`, and `screenshot` are added through backend-specific run parameters for NativeOffscreen or WebHeadless. Mock must still execute the core assertions, and unsupported capabilities must be reported explicitly rather than producing silently empty snapshots.
+Cross-backend shared scenarios capture only logical snapshots supported by every backend. `layout`, `display_list`, and `screenshot` are added through backend-specific run parameters for NativeOffscreen or WebHeadless. Mock must still execute the core assertions, and unsupported capabilities must be reported explicitly rather than producing silently empty snapshots. A `capture` action writes its snapshots immediately under `captures/step-{index}/`, so later steps cannot replace an earlier point-in-time state.
 
 Selector priority is fixed: `role + accessible name`, then stable `test_id`, then semantic queries. AI must not use unstable internal node IDs, absolute screen coordinates, or generated classes as default locators.
 
@@ -172,9 +172,9 @@ Each example owns its component, mount function, smoke checks, and scenario runn
 
 ```bash
 cargo run -p fino_counter -- check --format json
-cargo run -p fino_counter -- scenario run scenarios/counter.json --backend mock --out artifacts/runs/counter-mock --format json
-cargo run -p fino_counter -- scenario run scenarios/counter.json --backend web-headless --out artifacts/runs/counter-web --format json
-cargo run -p fino_counter -- scenario run scenarios/counter.json --backend native-offscreen --out artifacts/runs/counter-native --format json
+cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend mock --out artifacts/runs/counter-mock --format json
+cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend web-headless --out artifacts/runs/counter-web --format json
+cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend native-offscreen --out artifacts/runs/counter-native --format json
 ```
 
 The example calls the shared `fino::scenario` and `fino::headless` library interfaces. `fino inspect` reads the resulting artifacts without knowing which example produced them.

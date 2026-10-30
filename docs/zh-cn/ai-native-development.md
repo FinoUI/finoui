@@ -104,7 +104,7 @@ NativeOffscreen 直接创建纹理目标，不要求 winit Surface。确定性�
 }
 ```
 
-跨后端共享场景只捕获各后端都支持的逻辑快照。`layout`、`display_list` 与 `screenshot` 通过 NativeOffscreen／WebHeadless 的后端特定运行参数追加，不让 Mock 因没有布局或图像能力而跳过核心断言；不支持的能力必须显式报告，禁止静默生成空快照。
+跨后端共享场景只捕获各后端都支持的逻辑快照。`layout`、`display_list` 与 `screenshot` 通过 NativeOffscreen／WebHeadless 的后端特定运行参数追加，不让 Mock 因没有布局或图像能力而跳过核心断言；不支持的能力必须显式报告，禁止静默生成空快照。`capture` 动作立即把快照写入 `captures/step-{index}/`，后续步骤不能覆盖更早的时点状态。
 
 选择器优先级固定为 `role + accessible name`、稳定 `test_id`、语义查询。禁止 AI 依赖易变的内部 NodeId、屏幕绝对坐标或自动生成 class 作为默认定位方式。
 
@@ -172,9 +172,9 @@ fino bench --baseline main --format json
 
 ```bash
 cargo run -p fino_counter -- check --format json
-cargo run -p fino_counter -- scenario run scenarios/counter.json --backend mock --out artifacts/runs/counter-mock --format json
-cargo run -p fino_counter -- scenario run scenarios/counter.json --backend web-headless --out artifacts/runs/counter-web --format json
-cargo run -p fino_counter -- scenario run scenarios/counter.json --backend native-offscreen --out artifacts/runs/counter-native --format json
+cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend mock --out artifacts/runs/counter-mock --format json
+cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend web-headless --out artifacts/runs/counter-web --format json
+cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend native-offscreen --out artifacts/runs/counter-native --format json
 ```
 
 示例调用共享的 `fino::scenario` 与 `fino::headless` library 接口。`fino inspect` 只读取产物，不需要知道产物来自哪个示例。

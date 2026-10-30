@@ -1,0 +1,17 @@
+[package]
+name = "fino_counter"
+description = "Headless counter example and Cargo scenario runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fino = { path = "../../crates/fino" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+schemars.workspace = true
+tempfile.workspace = true

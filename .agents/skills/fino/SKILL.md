@@ -19,7 +19,7 @@ description: Use Fino's generic CLI and Cargo-based example runners for headless
 ```bash
 fino check --format json
 cargo run -p fino_counter -- check --format json
-cargo run -p fino_counter -- scenario run scenarios/counter.json --backend mock --out artifacts/runs/counter-mock --format json
+cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend mock --out artifacts/runs/counter-mock --format json
 fino inspect dom --run artifacts/runs/counter-mock --format json
 fino inspect a11y --run artifacts/runs/counter-mock --format json
 fino inspect reactive --run artifacts/runs/counter-mock --format json
