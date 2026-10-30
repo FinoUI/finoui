@@ -202,32 +202,28 @@ impl MockBackend {
         }
     }
 
-    /// Appends matches reachable from one attached root in document order.
-    /// 按文档顺序追加从某个已挂载根可达的匹配节点。
-    fn collect_matches(&self, node: MockNode, selector: &Selector, matches: &mut Vec<MockNode>) {
+    /// Appends one attached subtree in document order, never entering detached storage.
+    /// 按文档顺序追加单个已挂载子树，不进入已分离的存储。
+    fn collect_reachable(&self, node: MockNode, nodes: &mut Vec<MockNode>) {
         let Some(data) = self.nodes.get(&node) else {
             return;
         };
-        let children = match data {
-            MockNodeData::Element {
-                tag,
-                attributes,
-                children,
-                ..
-            } => {
-                if *tag == Tag::Button
-                    && selector.role == Role::Button
-                    && attributes.get(&Attribute::AriaLabel) == Some(&selector.name)
-                {
-                    matches.push(node);
-                }
-                children
+        nodes.push(node);
+        if let MockNodeData::Element { children, .. } = data {
+            for child in children {
+                self.collect_reachable(*child, nodes);
             }
-            MockNodeData::Text { .. } => return,
-        };
-        for child in children {
-            self.collect_matches(*child, selector, matches);
         }
+    }
+
+    /// Collects every node reachable from attached roots in document order.
+    /// 按文档顺序收集从已挂载根可达的全部节点。
+    fn reachable_nodes(&self) -> Vec<MockNode> {
+        let mut nodes = Vec::new();
+        for root in &self.roots {
+            self.collect_reachable(*root, &mut nodes);
+        }
+        nodes
     }
 }
 
@@ -400,11 +396,20 @@ impl HeadlessBackend for MockBackend {
     /// Resolves semantic selectors only from nodes reachable from attached roots.
     /// 仅从已挂载根可达的节点解析语义选择器，绝不使用节点 ID。
     fn find_all(&self, selector: &Selector) -> Vec<Self::Node> {
-        let mut matches = Vec::new();
-        for root in &self.roots {
-            self.collect_matches(*root, selector, &mut matches);
-        }
-        matches
+        self.reachable_nodes()
+            .into_iter()
+            .filter(|node| {
+                matches!(
+                    self.nodes.get(node),
+                    Some(MockNodeData::Element {
+                        tag: Tag::Button,
+                        attributes,
+                        ..
+                    }) if selector.role == Role::Button
+                        && attributes.get(&Attribute::AriaLabel) == Some(&selector.name)
+                )
+            })
+            .collect()
     }
 
     /// Returns descendant text only when the requested node still exists.
@@ -496,18 +501,18 @@ impl HeadlessBackend for MockBackend {
         }
     }
 
-    /// Projects semantic elements into roles, names, actions, and current text.
-    /// 将语义元素映射为角色、名称、动作与当前文本。
+    /// Projects only reachable semantic elements into roles, names, actions, and text.
+    /// 仅将可达的语义元素映射为角色、名称、动作与当前文本。
     fn a11y_snapshot(&self) -> A11ySnapshot {
         let nodes = self
-            .nodes
-            .iter()
-            .filter_map(|(node, data)| match data {
-                MockNodeData::Element {
+            .reachable_nodes()
+            .into_iter()
+            .filter_map(|node| match self.nodes.get(&node) {
+                Some(MockNodeData::Element {
                     tag: Tag::Button,
                     attributes,
                     ..
-                } => Some(A11yNodeSnapshot {
+                }) => Some(A11yNodeSnapshot {
                     id: format!("node-{}", node.0),
                     role: Role::Button,
                     name: attributes
@@ -517,7 +522,7 @@ impl HeadlessBackend for MockBackend {
                     focusable: true,
                     actions: vec!["click".to_owned()],
                     states: BTreeMap::new(),
-                    text: self.text_content(node).unwrap_or_default(),
+                    text: self.text_content(&node).unwrap_or_default(),
                 }),
                 _ => None,
             })

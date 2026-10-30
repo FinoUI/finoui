@@ -237,6 +237,14 @@ fn detached_button_is_unreachable_and_keeps_its_listener() {
             .code,
         "UI_SELECTOR_NOT_FOUND"
     );
+    assert!(host.a11y_snapshot().nodes.is_empty());
+    let dom = host.dom_snapshot();
+    assert_eq!(dom.roots, vec!["node-1".to_owned()]);
+    assert!(
+        dom.nodes
+            .iter()
+            .any(|node| node.id == "node-1" && node.tag.as_deref() == Some("button"))
+    );
     assert_eq!(host.runtime().backend().listener_count(), 1);
     assert!(
         host.runtime()
@@ -279,7 +287,22 @@ fn replacement_button_is_not_ambiguous_with_a_detached_twin() {
     });
     let selector = reachability_probe_selector();
 
-    assert_eq!(host.runtime().backend().find_all(&selector).len(), 1);
+    let matches = host.runtime().backend().find_all(&selector);
+    assert_eq!(matches.len(), 1);
+    let a11y = host.a11y_snapshot();
+    assert_eq!(a11y.nodes.len(), 1);
+    assert_eq!(a11y.nodes[0].id, format!("node-{}", matches[0].0));
+    assert_eq!(a11y.nodes[0].name, "Reachability probe");
+    assert_eq!(a11y.nodes[0].text, "Count: new");
+    assert_eq!(a11y.nodes[0].actions, vec!["click".to_owned()]);
+    let dom = host.dom_snapshot();
+    let buttons: Vec<_> = dom
+        .nodes
+        .iter()
+        .filter(|node| node.tag.as_deref() == Some("button"))
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(buttons, ["node-1", "node-3"]);
     host.assert_text(&selector, "Count: new")
         .expect("replacement text is unambiguous");
     host.click(&selector).expect("replacement click");
