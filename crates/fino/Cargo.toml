@@ -6,10 +6,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Enables the real browser DOM backend for wasm32 builds.
+# 为 wasm32 构建启用真实浏览器 DOM 后端。
+web = ["dep:js-sys", "dep:wasm-bindgen", "dep:web-sys"]
+
 [dependencies]
+js-sys = { workspace = true, optional = true }
 reactive_graph.workspace = true
 schemars.workspace = true
 send_wrapper.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+wasm-bindgen = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true }

@@ -535,6 +535,43 @@ fn mount_identifier_is_metadata_not_a_core_registry_lookup() {
     );
 }
 
+/// Exposes the same run artifacts in memory for hosts without a filesystem.
+/// 为无文件系统 Host 暴露同一运行产物的内存版本。
+#[test]
+fn collected_run_returns_artifacts_without_a_filesystem() {
+    let scenario = counter_scenario();
+    let host = HeadlessHost::new(MockBackend::new(), Environment::default());
+    let run = fino::scenario::run_on_host_collect(
+        &scenario,
+        Path::new("artifacts/runs/counter-memory"),
+        host,
+        mount_counter,
+    )
+    .expect("collected run");
+
+    assert_eq!(run.result.status, Status::Passed);
+    assert_eq!(run.result.run_dir, "artifacts/runs/counter-memory");
+    for artifact in [
+        "dom.json",
+        "a11y.json",
+        "reactive.json",
+        "trace.json",
+        "captures/step-4/dom.json",
+        "result.json",
+    ] {
+        assert!(run.artifacts.contains_key(artifact), "missing {artifact}");
+    }
+    let dom: Value =
+        serde_json::from_slice(&run.artifacts["dom.json"]).expect("collected DOM JSON");
+    assert!(
+        dom["nodes"]
+            .as_array()
+            .expect("dom nodes")
+            .iter()
+            .any(|node| node["text"] == "1")
+    );
+}
+
 #[test]
 fn scenario_types_generate_a_versioned_json_schema() {
     let schema = schemars::schema_for!(Scenario);

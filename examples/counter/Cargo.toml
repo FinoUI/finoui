@@ -6,11 +6,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 fino = { path = "../../crates/fino" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fino = { path = "../../crates/fino", features = ["web"] }
+wasm-bindgen.workspace = true
 
 [dev-dependencies]
 schemars.workspace = true

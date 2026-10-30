@@ -11,6 +11,16 @@ use fino::{
 /// 计数器示例拥有的冒烟检查与场景调用。
 pub mod runner;
 
+/// Native browser orchestration for the wasm counter.
+/// wasm 计数器的原生浏览器编排。
+#[cfg(not(target_arch = "wasm32"))]
+pub mod browser;
+
+/// wasm browser entry points that mount the shared counter on `document.body`.
+/// 将共享计数器挂载到 `document.body` 的 wasm 浏览器入口。
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+
 /// Mounts one button with static prefix text and one signal-bound text node.
 /// 挂载一个按钮，包含静态前缀文本与一个 Signal 绑定的文本节点。
 pub fn mount_counter<B: DomBackend + 'static>(runtime: &mut Runtime<B>, owner: &Owner) -> B::Node {

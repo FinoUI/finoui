@@ -4,6 +4,10 @@
 /// Non-rendering deterministic mock backend.
 /// 无渲染的确定性 Mock 后端。
 pub mod backend_mock;
+/// Real browser DOM backend for wasm32 targets.
+/// wasm32 目标的真实浏览器 DOM 后端。
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub mod backend_web;
 /// Backend-neutral DOM contracts.
 /// 后端无关 DOM 契约。
 pub mod dom_api;

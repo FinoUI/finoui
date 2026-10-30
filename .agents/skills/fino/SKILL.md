@@ -20,11 +20,23 @@ description: Use Fino's generic CLI and Cargo-based example runners for headless
 fino check --format json
 cargo run -p fino_counter -- check --format json
 cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend mock --out artifacts/runs/counter-mock --format json
+cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend web-headless --out artifacts/runs/counter-web --format json
 fino inspect dom --run artifacts/runs/counter-mock --format json
 fino inspect a11y --run artifacts/runs/counter-mock --format json
 fino inspect reactive --run artifacts/runs/counter-mock --format json
 fino inspect trace --run artifacts/runs/counter-mock --format json
 ```
+
+The `web-headless` runner builds the wasm bundle and drives headless Chromium. It requires `wasm32-unknown-unknown`, `wasm-bindgen-cli` 0.2.129, and `npm ci --prefix examples/counter/web` plus `npx --prefix examples/counter/web playwright install chromium`. It fails explicitly when they are missing.
+`web-headless` 运行器构建 wasm 包并驱动无头 Chromium，需要 `wasm32-unknown-unknown`、`wasm-bindgen-cli` 0.2.129，以及执行 `npm ci --prefix examples/counter/web` 和 `npx --prefix examples/counter/web playwright install chromium`。缺少时显式失败。
+
+```bash
+cargo test -p fino_counter --test web_browser -- --ignored
+node --test examples/counter/web/lib/*.test.mjs
+```
+
+Run the browser test when changing the web backend; it is ignored in the default suite because it launches Chromium. The Node test covers driver path resolution, `/pkg/` traversal containment, and stale-artifact cleanup.
+修改 Web 后端时运行该浏览器测试；它因启动 Chromium 而默认被忽略。Node 测试覆盖驱动路径解析、`/pkg/` 路径穿越约束与旧产物清理。
 
 Run the same unchanged scenario on later backends through the example package, then inspect the resulting `run_dir`. Do not move the example's mount or checks into `fino_cli`.
 

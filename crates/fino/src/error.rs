@@ -51,6 +51,20 @@ impl ToolError {
         }
     }
 
+    /// Creates a structured failure attributed to one backend for caller-owned tools.
+    /// 为调用方自有工具创建归属于某个后端的结构化失败。
+    ///
+    /// ```
+    /// use fino::error::ToolError;
+    ///
+    /// let error = ToolError::for_backend("UI_WASM_BUILD", "build failed", "web-headless");
+    /// assert_eq!(error.code.as_ref(), "UI_WASM_BUILD");
+    /// assert_eq!(error.backend.as_deref(), Some("web-headless"));
+    /// ```
+    pub fn for_backend(code: &str, message: impl Into<String>, backend: &str) -> Self {
+        Self::new(code, message).at_backend(backend)
+    }
+
     pub(crate) fn at_backend(mut self, backend: &str) -> Self {
         self.backend = Some(backend.into());
         self
