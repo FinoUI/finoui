@@ -317,7 +317,13 @@ pub fn run_on_host<B: HeadlessBackend + 'static>(
     for kind in REQUIRED_SNAPSHOTS {
         match ensure_snapshot_supported(&host, kind, None, backend) {
             Ok(()) => write_snapshot(&mut host, kind, &run_dir.join(kind.artifact_name()))?,
-            Err(error) => record_error(&mut host, &mut errors, error),
+            Err(error) => {
+                // Remove only this kind's managed artifact so a reused directory cannot
+                // expose a previous run's snapshot as the current result.
+                // 只删除该能力对应的受管产物，避免复用的目录把上一次运行的快照当成当前结果。
+                remove_artifact(&run_dir.join(kind.artifact_name()))?;
+                record_error(&mut host, &mut errors, error);
+            }
         }
     }
 
@@ -533,6 +539,19 @@ fn stable_run_id(scenario: &Scenario, backend: &str) -> Result<String, ToolError
         "{}-{hex}",
         if name.is_empty() { "scenario" } else { name }
     ))
+}
+
+/// Removes one managed artifact, treating an already absent file as success.
+/// 删除单个受管产物，文件本就不存在时视为成功。
+fn remove_artifact(path: &Path) -> Result<(), ToolError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ToolError::new(
+            "UI_ARTIFACT_IO",
+            format!("failed to remove {}: {error}", path.display()),
+        )),
+    }
 }
 
 /// Writes stable pretty JSON with a trailing newline and structured I/O errors.

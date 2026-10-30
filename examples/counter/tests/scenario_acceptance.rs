@@ -1,8 +1,9 @@
-use std::{fs, path::Path};
+use std::{cell::Cell, fs, path::Path, rc::Rc};
 
 use fino::{
     backend_mock::MockBackend,
-    headless::{Environment, HeadlessHost, SnapshotKind},
+    dom_api::{Attribute, DomBackend, EventKind, Role, Selector, Tag},
+    headless::{Environment, HeadlessBackend, HeadlessHost, SnapshotKind},
     inspect::inspect_artifact,
     scenario::{Scenario, Status, Step, run_on_host},
 };
@@ -11,6 +12,13 @@ use serde_json::Value;
 
 fn counter_scenario() -> Scenario {
     serde_json::from_str(include_str!("../scenarios/counter.json")).expect("valid counter scenario")
+}
+
+fn reachability_probe_selector() -> Selector {
+    Selector {
+        role: Role::Button,
+        name: "Reachability probe".to_owned(),
+    }
 }
 
 /// Verifies stable run identity, virtual time, semantic snapshots, and deterministic artifacts.
@@ -196,6 +204,92 @@ fn unsupported_snapshot_is_an_explicit_structured_failure() {
     assert!(run_dir.join("trace.json").exists());
 }
 
+/// Excludes a detached button from semantic actions while retaining its listener.
+/// 将已分离的按钮排除在语义动作之外，同时保留其监听器。
+#[test]
+fn detached_button_is_unreachable_and_keeps_its_listener() {
+    let mut host = HeadlessHost::new(MockBackend::new(), Environment::default());
+    let button = host.mount("test/detach", |runtime, owner| {
+        let button = runtime.backend_mut().create_element(Tag::Button);
+        runtime.backend_mut().set_attribute(
+            &button,
+            Attribute::AriaLabel,
+            Some("Reachability probe"),
+        );
+        let label = runtime.backend_mut().create_text("Count: 1");
+        runtime.backend_mut().insert_before(&button, &label, None);
+        runtime.listen(owner, &button, EventKind::Click, |_event, _context| {});
+        runtime.backend_mut().remove(&button);
+        button
+    });
+    let selector = reachability_probe_selector();
+
+    assert!(host.runtime().backend().find_all(&selector).is_empty());
+    assert_eq!(
+        host.assert_text(&selector, "Count: 1")
+            .expect_err("detached text is unreachable")
+            .code,
+        "UI_SELECTOR_NOT_FOUND"
+    );
+    assert_eq!(
+        host.click(&selector)
+            .expect_err("detached clicks are unreachable")
+            .code,
+        "UI_SELECTOR_NOT_FOUND"
+    );
+    assert_eq!(host.runtime().backend().listener_count(), 1);
+    assert!(
+        host.runtime()
+            .backend()
+            .listener(&button, EventKind::Click)
+            .is_some()
+    );
+
+    host.dispose();
+    assert_eq!(host.runtime().backend().listener_count(), 0);
+}
+
+/// Resolves only the replacement button when a detached twin shares its label.
+/// 当已分离的同名按钮存在时，只解析替换后的按钮。
+#[test]
+fn replacement_button_is_not_ambiguous_with_a_detached_twin() {
+    let clicks = Rc::new(Cell::new(0));
+    let new_clicks = Rc::clone(&clicks);
+    let mut host = HeadlessHost::new(MockBackend::new(), Environment::default());
+    host.mount("test/replace", move |runtime, owner| {
+        let old = runtime.backend_mut().create_element(Tag::Button);
+        runtime
+            .backend_mut()
+            .set_attribute(&old, Attribute::AriaLabel, Some("Reachability probe"));
+        let old_label = runtime.backend_mut().create_text("Count: old");
+        runtime.backend_mut().insert_before(&old, &old_label, None);
+        runtime.listen(owner, &old, EventKind::Click, |_event, _context| {});
+        runtime.backend_mut().remove(&old);
+
+        let new = runtime.backend_mut().create_element(Tag::Button);
+        runtime
+            .backend_mut()
+            .set_attribute(&new, Attribute::AriaLabel, Some("Reachability probe"));
+        let new_label = runtime.backend_mut().create_text("Count: new");
+        runtime.backend_mut().insert_before(&new, &new_label, None);
+        runtime.listen(owner, &new, EventKind::Click, move |_event, _context| {
+            new_clicks.set(new_clicks.get() + 1);
+        });
+        new
+    });
+    let selector = reachability_probe_selector();
+
+    assert_eq!(host.runtime().backend().find_all(&selector).len(), 1);
+    host.assert_text(&selector, "Count: new")
+        .expect("replacement text is unambiguous");
+    host.click(&selector).expect("replacement click");
+    assert_eq!(clicks.get(), 1);
+    assert_eq!(host.runtime().backend().listener_count(), 2);
+
+    host.dispose();
+    assert_eq!(host.runtime().backend().listener_count(), 0);
+}
+
 /// Exercises every required final capability and checks independent artifact preservation.
 /// 逐项检查最终必需能力，并验证其他真实产物仍被保留。
 #[test]
@@ -229,6 +323,154 @@ fn final_artifacts_check_every_required_snapshot_capability() {
         assert!(!run_dir.join(kind.artifact_name()).exists(), "{kind:?}");
         assert!(run_dir.join("result.json").exists(), "{kind:?}");
     }
+}
+
+/// Removes the stale managed snapshot when a rerun loses a required capability.
+/// 重跑失去某项必需能力时，删除上一次留下的受管快照。
+#[test]
+fn failed_rerun_removes_only_the_stale_required_snapshot() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let scenario = counter_scenario();
+    let required = [
+        SnapshotKind::Dom,
+        SnapshotKind::A11y,
+        SnapshotKind::Reactive,
+        SnapshotKind::Trace,
+    ];
+
+    for kind in required {
+        let run_dir = temporary.path().join(kind.name());
+        let first = run_mock_scenario(&scenario, &run_dir).expect("successful first run");
+        assert_eq!(first.status, Status::Passed, "{kind:?}");
+        assert!(run_dir.join(kind.artifact_name()).exists(), "{kind:?}");
+
+        let mut backend = MockBackend::new();
+        backend.set_snapshot_supported(kind, false);
+        let host = HeadlessHost::new(backend, scenario.environment.clone());
+        let second =
+            run_on_host(&scenario, &run_dir, host, mount_counter).expect("completed failed rerun");
+
+        assert_eq!(second.status, Status::Failed, "{kind:?}");
+        assert!(
+            second.errors.iter().any(|error| {
+                error.code.as_ref() == "UI_SNAPSHOT_UNSUPPORTED"
+                    && error.capability.as_deref() == Some(kind.name())
+            }),
+            "{kind:?}"
+        );
+        assert!(!run_dir.join(kind.artifact_name()).exists(), "{kind:?}");
+        assert_eq!(
+            inspect_artifact(&run_dir, kind)
+                .expect_err("stale snapshot is gone")
+                .code
+                .as_ref(),
+            "UI_ARTIFACT_NOT_FOUND",
+            "{kind:?}"
+        );
+        for other in required.into_iter().filter(|other| *other != kind) {
+            assert!(
+                run_dir.join(other.artifact_name()).exists(),
+                "{kind:?} keeps {other:?}"
+            );
+        }
+        assert!(
+            run_dir.join("captures/step-4/dom.json").exists(),
+            "{kind:?}"
+        );
+        assert!(run_dir.join("result.json").exists(), "{kind:?}");
+    }
+}
+
+/// Treats an already absent stale snapshot as success during a failed rerun.
+/// 失败重跑时，把本就不存在的旧快照视为删除成功。
+#[test]
+fn absent_stale_snapshot_does_not_fail_the_rerun() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let run_dir = temporary.path().join("already-absent");
+    let scenario = counter_scenario();
+    run_mock_scenario(&scenario, &run_dir).expect("successful first run");
+    fs::remove_file(run_dir.join(SnapshotKind::A11y.artifact_name())).expect("remove artifact");
+
+    let mut backend = MockBackend::new();
+    backend.set_snapshot_supported(SnapshotKind::A11y, false);
+    let host = HeadlessHost::new(backend, scenario.environment.clone());
+    let result =
+        run_on_host(&scenario, &run_dir, host, mount_counter).expect("completed failed rerun");
+
+    assert_eq!(result.status, Status::Failed);
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|error| error.code.as_ref() == "UI_SNAPSHOT_UNSUPPORTED")
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .all(|error| error.code.as_ref() != "UI_ARTIFACT_IO")
+    );
+}
+
+/// Reports a stale snapshot removal failure instead of leaving it readable.
+/// 旧快照删除失败时返回结构化错误，而不是让它继续可读。
+#[test]
+fn stale_snapshot_removal_failure_is_reported_as_artifact_io() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let run_dir = temporary.path().join("blocked-removal");
+    let scenario = counter_scenario();
+    run_mock_scenario(&scenario, &run_dir).expect("successful first run");
+    let stale = run_dir.join(SnapshotKind::A11y.artifact_name());
+    fs::remove_file(&stale).expect("remove stale artifact");
+    fs::create_dir(&stale).expect("block managed artifact removal");
+    fs::write(stale.join("keep.txt"), b"keep").expect("blocking content");
+
+    let mut backend = MockBackend::new();
+    backend.set_snapshot_supported(SnapshotKind::A11y, false);
+    let host = HeadlessHost::new(backend, scenario.environment.clone());
+    let error = run_on_host(&scenario, &run_dir, host, mount_counter).expect_err("removal failure");
+
+    assert_eq!(error.code.as_ref(), "UI_ARTIFACT_IO");
+    assert!(
+        error.message.contains("failed to remove"),
+        "{}",
+        error.message
+    );
+}
+
+/// Leaves prior captures unreported and untouched when a capture capability disappears.
+/// 捕获能力消失时，不报告也不改写之前的捕获产物。
+#[test]
+fn failed_capture_rerun_does_not_report_or_rewrite_stale_capture_artifacts() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let run_dir = temporary.path().join("capture-rerun");
+    let mut scenario = counter_scenario();
+    scenario
+        .steps
+        .insert(0, Step::Capture(vec![SnapshotKind::Dom]));
+
+    let first = run_mock_scenario(&scenario, &run_dir).expect("successful capture run");
+    assert_eq!(first.captures.len(), 2);
+    let capture_path = run_dir.join("captures/step-0/dom.json");
+    let first_capture = fs::read_to_string(&capture_path).expect("first capture");
+
+    scenario.steps[0] = Step::Capture(vec![SnapshotKind::Layout]);
+    let result = run_mock_scenario(&scenario, &run_dir).expect("completed failed rerun");
+
+    assert_eq!(result.status, Status::Failed);
+    assert!(result.captures.is_empty());
+    assert_eq!(result.errors[0].step, Some(0));
+    assert_eq!(result.errors[0].capability.as_deref(), Some("layout"));
+    assert!(!run_dir.join("captures/step-0/layout.json").exists());
+    assert_eq!(
+        fs::read_to_string(&capture_path).expect("retained capture"),
+        first_capture
+    );
+    let saved: Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("result.json")).expect("saved result"),
+    )
+    .expect("result JSON");
+    assert_eq!(saved["captures"].as_array().map(Vec::len), Some(0));
 }
 
 /// Confirms failed assertions stop execution but still emit useful run artifacts.

@@ -138,6 +138,9 @@ pub struct MockBackend {
     next_node: u64,
     next_listener: u64,
     nodes: BTreeMap<MockNode, MockNodeData>,
+    /// Attached forest roots; removed or nested nodes leave this set.
+    /// 当前作为森林根挂载的节点；被移除或嵌套的节点会离开该集合。
+    roots: BTreeSet<MockNode>,
     listeners: BTreeMap<u64, ListenerRegistration>,
     operations: Vec<BackendOp>,
     unsupported_snapshots: BTreeSet<SnapshotKind>,
@@ -198,6 +201,34 @@ impl MockBackend {
             None => false,
         }
     }
+
+    /// Appends matches reachable from one attached root in document order.
+    /// 按文档顺序追加从某个已挂载根可达的匹配节点。
+    fn collect_matches(&self, node: MockNode, selector: &Selector, matches: &mut Vec<MockNode>) {
+        let Some(data) = self.nodes.get(&node) else {
+            return;
+        };
+        let children = match data {
+            MockNodeData::Element {
+                tag,
+                attributes,
+                children,
+                ..
+            } => {
+                if *tag == Tag::Button
+                    && selector.role == Role::Button
+                    && attributes.get(&Attribute::AriaLabel) == Some(&selector.name)
+                {
+                    matches.push(node);
+                }
+                children
+            }
+            MockNodeData::Text { .. } => return,
+        };
+        for child in children {
+            self.collect_matches(*child, selector, matches);
+        }
+    }
 }
 
 impl DomBackend for MockBackend {
@@ -215,6 +246,7 @@ impl DomBackend for MockBackend {
                 children: Vec::new(),
             },
         );
+        self.roots.insert(node);
         self.operations.push(BackendOp::CreateElement(tag));
         node
     }
@@ -228,6 +260,7 @@ impl DomBackend for MockBackend {
                 parent: None,
             },
         );
+        self.roots.insert(node);
         self.operations.push(BackendOp::CreateText);
         node
     }
@@ -264,6 +297,7 @@ impl DomBackend for MockBackend {
             .get_mut(child)
             .expect("inserted child must exist")
             .set_parent(Some(*parent));
+        self.roots.remove(child);
         self.operations.push(BackendOp::Insert);
     }
 
@@ -279,6 +313,7 @@ impl DomBackend for MockBackend {
             .get_mut(node)
             .expect("removed node must exist")
             .set_parent(None);
+        self.roots.remove(node);
         self.operations.push(BackendOp::Remove);
     }
 
@@ -362,24 +397,14 @@ impl HeadlessBackend for MockBackend {
             )
     }
 
-    /// Resolves semantic selectors from tag and ARIA metadata, never node IDs.
-    /// 根据标签与 ARIA 元数据解析语义选择器，绝不使用节点 ID。
+    /// Resolves semantic selectors only from nodes reachable from attached roots.
+    /// 仅从已挂载根可达的节点解析语义选择器，绝不使用节点 ID。
     fn find_all(&self, selector: &Selector) -> Vec<Self::Node> {
-        self.nodes
-            .iter()
-            .filter_map(|(node, data)| match data {
-                MockNodeData::Element {
-                    tag: Tag::Button,
-                    attributes,
-                    ..
-                } if selector.role == Role::Button
-                    && attributes.get(&Attribute::AriaLabel) == Some(&selector.name) =>
-                {
-                    Some(*node)
-                }
-                _ => None,
-            })
-            .collect()
+        let mut matches = Vec::new();
+        for root in &self.roots {
+            self.collect_matches(*root, selector, &mut matches);
+        }
+        matches
     }
 
     /// Returns descendant text only when the requested node still exists.
