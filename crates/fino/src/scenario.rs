@@ -1,7 +1,12 @@
 //! Versioned backend-neutral JSON scenarios with an explicit caller-supplied mount.
 //! 使用调用方显式提供的 mount，执行版本化后端无关 JSON 场景。
 
-use std::{collections::BTreeMap, fmt::Write as _, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fmt::Write as _,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -250,9 +255,50 @@ pub fn load_scenario(path: &Path) -> Result<Scenario, ToolError> {
 pub fn run_on_host<B: HeadlessBackend + 'static>(
     scenario: &Scenario,
     run_dir: &Path,
-    mut host: HeadlessHost<B>,
+    host: HeadlessHost<B>,
     mount: impl FnOnce(&mut Runtime<B>, &Owner) -> B::Node,
 ) -> Result<ScenarioResult, ToolError> {
+    let mut sink = FsArtifactSink::new(run_dir);
+    execute_on_host(scenario, run_dir, host, mount, &mut sink).map(|run| run.result)
+}
+
+/// One completed scenario execution with artifacts held in memory.
+/// 一次完成的场景执行，产物保存在内存中。
+#[derive(Clone, Debug)]
+pub struct ScenarioRun {
+    /// Stable machine-readable scenario result.
+    /// 稳定的机器可读场景结果。
+    pub result: ScenarioResult,
+    /// Artifact bytes keyed by path relative to the run directory.
+    /// 以相对运行目录的路径为键的产物字节。
+    pub artifacts: BTreeMap<String, Vec<u8>>,
+}
+
+/// Runs the JSON protocol without touching the filesystem and returns every artifact.
+/// 不接触文件系统地运行 JSON 协议，并返回全部产物。
+///
+/// This is the entry point for hosts without a filesystem, such as a wasm module in
+/// a browser. The caller decides where to persist the returned bytes.
+/// 这是无文件系统 Host（例如浏览器中的 wasm 模块）的入口；返回的字节由调用方决定写到哪里。
+pub fn run_on_host_collect<B: HeadlessBackend + 'static>(
+    scenario: &Scenario,
+    run_dir: &Path,
+    host: HeadlessHost<B>,
+    mount: impl FnOnce(&mut Runtime<B>, &Owner) -> B::Node,
+) -> Result<ScenarioRun, ToolError> {
+    let mut sink = MemoryArtifactSink::default();
+    execute_on_host(scenario, run_dir, host, mount, &mut sink)
+}
+
+/// Executes the protocol into an artifact sink shared by filesystem and browser hosts.
+/// 将协议执行到文件系统与浏览器 Host 共用的产物接收器。
+fn execute_on_host<B: HeadlessBackend + 'static>(
+    scenario: &Scenario,
+    run_dir: &Path,
+    mut host: HeadlessHost<B>,
+    mount: impl FnOnce(&mut Runtime<B>, &Owner) -> B::Node,
+    sink: &mut impl ArtifactSink,
+) -> Result<ScenarioRun, ToolError> {
     validate_scenario(scenario)?;
     let backend = host.runtime().backend().backend_name();
     if host.environment() != &scenario.environment {
@@ -262,12 +308,7 @@ pub fn run_on_host<B: HeadlessBackend + 'static>(
         ));
     }
     let run_id = stable_run_id(scenario, backend)?;
-    fs::create_dir_all(run_dir).map_err(|error| {
-        ToolError::new(
-            "UI_ARTIFACT_IO",
-            format!("failed to create {}: {error}", run_dir.display()),
-        )
-    })?;
+    sink.prepare()?;
 
     host.mount(&scenario.mount, mount);
     let mut steps = Vec::new();
@@ -275,7 +316,7 @@ pub fn run_on_host<B: HeadlessBackend + 'static>(
     let mut errors = Vec::new();
 
     for (index, step) in scenario.steps.iter().enumerate() {
-        match execute_step(&mut host, step, index, backend, run_dir) {
+        match execute_step(&mut host, step, index, backend, sink) {
             Ok(capture) => {
                 if let Some(capture) = capture {
                     captures.push(capture);
@@ -316,12 +357,12 @@ pub fn run_on_host<B: HeadlessBackend + 'static>(
     };
     for kind in REQUIRED_SNAPSHOTS {
         match ensure_snapshot_supported(&host, kind, None, backend) {
-            Ok(()) => write_snapshot(&mut host, kind, &run_dir.join(kind.artifact_name()))?,
+            Ok(()) => sink.write(kind.artifact_name(), &snapshot_bytes(&mut host, kind)?)?,
             Err(error) => {
                 // Remove only this kind's managed artifact so a reused directory cannot
                 // expose a previous run's snapshot as the current result.
                 // 只删除该能力对应的受管产物，避免复用的目录把上一次运行的快照当成当前结果。
-                remove_artifact(&run_dir.join(kind.artifact_name()))?;
+                sink.remove(kind.artifact_name())?;
                 record_error(&mut host, &mut errors, error);
             }
         }
@@ -344,8 +385,143 @@ pub fn run_on_host<B: HeadlessBackend + 'static>(
         counters: host.execution_counters(),
         errors,
     };
-    write_json(&run_dir.join("result.json"), &result)?;
-    Ok(result)
+    sink.write("result.json", &json_bytes(&result, "result.json")?)?;
+    Ok(ScenarioRun {
+        result,
+        artifacts: sink.artifacts().clone(),
+    })
+}
+
+/// Destination for scenario artifacts, backed by a filesystem or by memory.
+/// 场景产物目的地的抽象，由文件系统或内存实现。
+trait ArtifactSink {
+    /// Creates the run directory, if the sink has one.
+    /// 若接收器有运行目录，则创建它。
+    fn prepare(&mut self) -> Result<(), ToolError>;
+    /// Creates one directory for point-in-time captures.
+    /// 为时点捕获创建一个目录。
+    fn create_dir(&mut self, relative: &str) -> Result<(), ToolError>;
+    /// Writes one artifact and records its bytes.
+    /// 写入一个产物并记录其字节。
+    fn write(&mut self, relative: &str, bytes: &[u8]) -> Result<(), ToolError>;
+    /// Removes one stale managed artifact.
+    /// 删除一个过期的受管产物。
+    fn remove(&mut self, relative: &str) -> Result<(), ToolError>;
+    /// Returns every written artifact in path order.
+    /// 按路径顺序返回全部已写入产物。
+    fn artifacts(&self) -> &BTreeMap<String, Vec<u8>>;
+}
+
+/// Filesystem sink used by native headless runs.
+/// 原生无头运行使用的文件系统接收器。
+struct FsArtifactSink {
+    root: PathBuf,
+    artifacts: BTreeMap<String, Vec<u8>>,
+}
+
+impl FsArtifactSink {
+    fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_owned(),
+            artifacts: BTreeMap::new(),
+        }
+    }
+
+    fn path(&self, relative: &str) -> PathBuf {
+        self.root.join(relative)
+    }
+}
+
+impl ArtifactSink for FsArtifactSink {
+    fn prepare(&mut self) -> Result<(), ToolError> {
+        fs::create_dir_all(&self.root).map_err(|error| {
+            ToolError::new(
+                "UI_ARTIFACT_IO",
+                format!("failed to create {}: {error}", self.root.display()),
+            )
+        })
+    }
+
+    fn create_dir(&mut self, relative: &str) -> Result<(), ToolError> {
+        let path = self.path(relative);
+        fs::create_dir_all(&path).map_err(|error| {
+            ToolError::new(
+                "UI_ARTIFACT_IO",
+                format!("failed to create {}: {error}", path.display()),
+            )
+        })
+    }
+
+    fn write(&mut self, relative: &str, bytes: &[u8]) -> Result<(), ToolError> {
+        let path = self.path(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                ToolError::new(
+                    "UI_ARTIFACT_IO",
+                    format!("failed to create {}: {error}", parent.display()),
+                )
+            })?;
+        }
+        fs::write(&path, bytes).map_err(|error| {
+            ToolError::new(
+                "UI_ARTIFACT_IO",
+                format!("failed to write {}: {error}", path.display()),
+            )
+        })?;
+        self.artifacts.insert(relative.to_owned(), bytes.to_vec());
+        Ok(())
+    }
+
+    fn remove(&mut self, relative: &str) -> Result<(), ToolError> {
+        let path = self.path(relative);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ToolError::new(
+                    "UI_ARTIFACT_IO",
+                    format!("failed to remove {}: {error}", path.display()),
+                ));
+            }
+        }
+        self.artifacts.remove(relative);
+        Ok(())
+    }
+
+    fn artifacts(&self) -> &BTreeMap<String, Vec<u8>> {
+        &self.artifacts
+    }
+}
+
+/// In-memory sink used where no filesystem exists, such as wasm in a browser.
+/// 在无文件系统环境（例如浏览器中的 wasm）使用的内存接收器。
+#[derive(Default)]
+struct MemoryArtifactSink {
+    artifacts: BTreeMap<String, Vec<u8>>,
+}
+
+impl ArtifactSink for MemoryArtifactSink {
+    fn prepare(&mut self) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    fn create_dir(&mut self, _relative: &str) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    fn write(&mut self, relative: &str, bytes: &[u8]) -> Result<(), ToolError> {
+        self.artifacts.insert(relative.to_owned(), bytes.to_vec());
+        Ok(())
+    }
+
+    fn remove(&mut self, relative: &str) -> Result<(), ToolError> {
+        self.artifacts.remove(relative);
+        Ok(())
+    }
+
+    fn artifacts(&self) -> &BTreeMap<String, Vec<u8>> {
+        &self.artifacts
+    }
 }
 
 /// Executes one action and returns artifact metadata only for capture steps.
@@ -355,7 +531,7 @@ fn execute_step<B: HeadlessBackend + 'static>(
     step: &Step,
     index: usize,
     backend: &str,
-    run_dir: &Path,
+    sink: &mut impl ArtifactSink,
 ) -> Result<Option<CaptureArtifacts>, ToolError> {
     match step {
         Step::AssertText(assertion) => host
@@ -370,7 +546,7 @@ fn execute_step<B: HeadlessBackend + 'static>(
             .advance_frames(*frames)
             .map_err(|error| ToolError::from_headless(error, index, backend))
             .map(|_| None),
-        Step::Capture(kinds) => capture_step(host, kinds, index, backend, run_dir).map(Some),
+        Step::Capture(kinds) => capture_step(host, kinds, index, backend, sink).map(Some),
     }
 }
 
@@ -381,25 +557,20 @@ fn capture_step<B: HeadlessBackend + 'static>(
     kinds: &[SnapshotKind],
     index: usize,
     backend: &str,
-    run_dir: &Path,
+    sink: &mut impl ArtifactSink,
 ) -> Result<CaptureArtifacts, ToolError> {
     for kind in kinds {
         ensure_snapshot_supported(host, *kind, Some(index), backend)?;
     }
 
-    let capture_dir = run_dir.join("captures").join(format!("step-{index}"));
-    fs::create_dir_all(&capture_dir).map_err(|error| {
-        ToolError::new(
-            "UI_ARTIFACT_IO",
-            format!("failed to create {}: {error}", capture_dir.display()),
-        )
-        .at_step(index, backend)
-    })?;
+    let capture_dir = format!("captures/step-{index}");
+    sink.create_dir(&capture_dir)
+        .map_err(|error| error.at_step(index, backend))?;
     let mut artifacts = BTreeMap::new();
     for kind in kinds {
-        let relative = format!("captures/step-{index}/{}", kind.artifact_name());
+        let relative = format!("{capture_dir}/{}", kind.artifact_name());
         host.record_capture(*kind, &relative);
-        write_snapshot(host, *kind, &run_dir.join(&relative))?;
+        sink.write(&relative, &snapshot_bytes(host, *kind)?)?;
         artifacts.insert(kind.name().to_owned(), relative);
     }
     Ok(CaptureArtifacts {
@@ -438,16 +609,15 @@ fn ensure_snapshot_supported<B: HeadlessBackend + 'static>(
 
 /// Serializes only snapshot kinds that have real host or backend data sources.
 /// 仅序列化具有真实 Host 或后端数据来源的快照种类。
-fn write_snapshot<B: HeadlessBackend + 'static>(
+fn snapshot_bytes<B: HeadlessBackend + 'static>(
     host: &mut HeadlessHost<B>,
     kind: SnapshotKind,
-    path: &Path,
-) -> Result<(), ToolError> {
+) -> Result<Vec<u8>, ToolError> {
     match kind {
-        SnapshotKind::Dom => write_json(path, &host.dom_snapshot()),
-        SnapshotKind::A11y => write_json(path, &host.a11y_snapshot()),
-        SnapshotKind::Reactive => write_json(path, &host.reactive_snapshot()),
-        SnapshotKind::Trace => write_json(path, &host.trace_snapshot()),
+        SnapshotKind::Dom => json_bytes(&host.dom_snapshot(), kind.artifact_name()),
+        SnapshotKind::A11y => json_bytes(&host.a11y_snapshot(), kind.artifact_name()),
+        SnapshotKind::Reactive => json_bytes(&host.reactive_snapshot(), kind.artifact_name()),
+        SnapshotKind::Trace => json_bytes(&host.trace_snapshot(), kind.artifact_name()),
         _ => Err(ToolError::new(
             "UI_SNAPSHOT_UNSUPPORTED",
             format!("backend cannot generate {} snapshots", kind.name()),
@@ -541,33 +711,15 @@ fn stable_run_id(scenario: &Scenario, backend: &str) -> Result<String, ToolError
     ))
 }
 
-/// Removes one managed artifact, treating an already absent file as success.
-/// 删除单个受管产物，文件本就不存在时视为成功。
-fn remove_artifact(path: &Path) -> Result<(), ToolError> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(ToolError::new(
-            "UI_ARTIFACT_IO",
-            format!("failed to remove {}: {error}", path.display()),
-        )),
-    }
-}
-
-/// Writes stable pretty JSON with a trailing newline and structured I/O errors.
-/// 写入带结尾换行的稳定格式化 JSON，并返回结构化 I/O 错误。
-fn write_json(path: &Path, value: &impl Serialize) -> Result<(), ToolError> {
+/// Serializes stable pretty JSON with a trailing newline.
+/// 序列化带结尾换行的稳定格式化 JSON。
+fn json_bytes(value: &impl Serialize, label: &str) -> Result<Vec<u8>, ToolError> {
     let mut json = serde_json::to_vec_pretty(value).map_err(|error| {
         ToolError::new(
             "UI_ARTIFACT_SERIALIZATION",
-            format!("failed to serialize {}: {error}", path.display()),
+            format!("failed to serialize {label}: {error}"),
         )
     })?;
     json.push(b'\n');
-    fs::write(path, json).map_err(|error| {
-        ToolError::new(
-            "UI_ARTIFACT_IO",
-            format!("failed to write {}: {error}", path.display()),
-        )
-    })
+    Ok(json)
 }

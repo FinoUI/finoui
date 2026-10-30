@@ -40,3 +40,32 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Run pre-commit hooks
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+
+  wasm-web:
+    name: wasm browser scenario
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The CLI version must match the wasm-bindgen crate exactly.
+      # CLI 版本必须与 wasm-bindgen crate 完全一致。
+      - name: Install wasm-bindgen
+        run: |
+          curl -sSfL https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.129/wasm-bindgen-0.2.129-x86_64-unknown-linux-musl.tar.gz | tar xz
+          sudo mv wasm-bindgen-0.2.129-x86_64-unknown-linux-musl/wasm-bindgen /usr/local/bin/
+      # Playwright owns Chromium download and system dependencies.
+      # Chromium 下载与系统依赖由 Playwright 负责。
+      - name: Install Playwright
+        run: |
+          npm ci --prefix examples/counter/web
+          npx --prefix examples/counter/web playwright install --with-deps chromium
+      - name: Run wasm browser scenario
+        run: cargo test -p fino_counter --test web_browser -- --ignored --nocapture

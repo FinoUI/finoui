@@ -179,6 +179,17 @@ cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.jso
 
 示例调用共享的 `fino::scenario` 与 `fino::headless` library 接口。`fino inspect` 只读取产物，不需要知道产物来自哪个示例。
 
+`web-headless` 运行器在示例内完成 wasm 构建、`wasm-bindgen` 绑定生成、无头 Chromium 启动和同一场景执行。它写入 `browser.json`，记录真实点击、焦点、键盘激活、节点身份、`nodeValue` 更新次数、`innerHTML` 赋值次数和批量提交次数。环境前置条件：
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.129
+npm ci --prefix examples/counter/web
+npx --prefix examples/counter/web playwright install chromium
+```
+
+缺少 Node.js、Playwright、Chromium 或版本匹配的 `wasm-bindgen` 时，运行器返回结构化失败，不跳过浏览器步骤。`WASM_BINDGEN`、`NODE` 与 `FINO_CHROMIUM` 可覆盖对应可执行文件路径。
+
 ### Agent Skill
 
 仓库提供 `.agents/skills/fino/SKILL.md`，记录命令选择、基于 Cargo 的示例工作流、JSON 输出约定和产物导航。Skill 不包含场景实现、挂载注册表或业务逻辑；Agent 直接调用 CLI 与 Cargo 命令，不解析人类终端文本。

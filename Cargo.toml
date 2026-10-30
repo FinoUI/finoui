@@ -18,6 +18,7 @@ repository = "https://github.com/FinoUI/finoui"
 
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
+js-sys = "=0.3.106"
 reactive_graph = { version = "0.2.14", features = ["effects"] }
 schemars = "1"
 send_wrapper = "0.6"
@@ -27,3 +28,15 @@ sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
 toml = "1"
+wasm-bindgen = "=0.2.129"
+web-sys = { version = "=0.3.106", features = [
+    "Document",
+    "Element",
+    "Event",
+    "EventTarget",
+    "HtmlElement",
+    "Node",
+    "NodeList",
+    "Text",
+    "Window",
+] }

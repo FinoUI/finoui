@@ -179,6 +179,17 @@ cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.jso
 
 The example calls the shared `fino::scenario` and `fino::headless` library interfaces. `fino inspect` reads the resulting artifacts without knowing which example produced them.
 
+The `web-headless` runner performs the wasm build, `wasm-bindgen` binding generation, headless Chromium launch, and unchanged scenario execution inside the example. It writes `browser.json` with checks for real clicks, focus, keyboard activation, node identity, `nodeValue` update counts, `innerHTML` assignment counts, and batch commit counts. Prerequisites:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.129
+npm ci --prefix examples/counter/web
+npx --prefix examples/counter/web playwright install chromium
+```
+
+When Node.js, Playwright, Chromium, or a matching `wasm-bindgen` is missing, the runner returns a structured failure instead of skipping the browser step. `WASM_BINDGEN`, `NODE`, and `FINO_CHROMIUM` override the corresponding executable paths.
+
 ### Agent Skill
 
 The repository provides `.agents/skills/fino/SKILL.md`. It records command selection, Cargo-based example workflows, JSON output conventions, and artifact navigation. The Skill contains no scenario implementation, mount registry, or business logic; agents call the CLI and Cargo commands directly rather than parsing human terminal output.

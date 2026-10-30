@@ -5,7 +5,10 @@ use std::{panic::AssertUnwindSafe, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use fino::scenario::{self, ScenarioResult, Status, ToolError};
-use fino_counter::runner::{check_counter, run_mock_scenario};
+use fino_counter::{
+    browser::run_web_scenario,
+    runner::{check_counter, run_mock_scenario},
+};
 use serde::Serialize;
 
 #[derive(Parser)]
@@ -42,7 +45,7 @@ enum ScenarioCommand {
         #[arg(long, value_enum)]
         backend: Backend,
         #[arg(long)]
-        out: PathBuf,
+        out: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
     },
@@ -51,6 +54,18 @@ enum ScenarioCommand {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Backend {
     Mock,
+    WebHeadless,
+}
+
+impl Backend {
+    /// Supplies the short artifact directory suffix used by the documented commands.
+    /// 提供文档命令使用的短产物目录后缀。
+    fn artifact_suffix(self) -> &'static str {
+        match self {
+            Self::Mock => "mock",
+            Self::WebHeadless => "web",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -92,10 +107,17 @@ fn run() -> ExitCode {
                     format,
                 },
         } => {
-            let Backend::Mock = backend;
-            match scenario::load_scenario(&path)
-                .and_then(|scenario| run_mock_scenario(&scenario, &out))
-            {
+            let out = out.unwrap_or_else(|| {
+                PathBuf::from(format!(
+                    "artifacts/runs/counter-{}",
+                    backend.artifact_suffix()
+                ))
+            });
+            let run = scenario::load_scenario(&path).and_then(|scenario| match backend {
+                Backend::Mock => run_mock_scenario(&scenario, &out),
+                Backend::WebHeadless => run_web_scenario(&path, &out),
+            });
+            match run {
                 Ok(result) => {
                     let failed = result.status == Status::Failed;
                     output_scenario(&result, format);
