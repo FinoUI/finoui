@@ -1050,6 +1050,33 @@ mod tests {
         assert_eq!(dom.text_content(button).as_deref(), Some("Count: 1"));
     }
 
+    /// NoWrap trailing space separates adjacent text siblings instead of collapsing to zero.
+    /// NoWrap 的尾部空格会分隔相邻文本兄弟节点，而不是收缩为零。
+    #[test]
+    fn no_wrap_trailing_space_separates_text_siblings() {
+        let mut dom = dom();
+        let (_button, prefix, value) = button_with_text(&mut dom);
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let prefix_rect = dom
+            .committed_bounds(dom.window(), prefix)
+            .expect("prefix bounds");
+        let value_rect = dom
+            .committed_bounds(dom.window(), value)
+            .expect("value bounds");
+
+        let mut engine = TextEngine::new();
+        let no_space = engine.shape(&TextSpec::counter("Count:"));
+        let no_space = engine.layout(&no_space, TextConstraints::unbounded());
+        assert!(
+            prefix_rect.width > no_space.width(),
+            "prefix must include the trailing space"
+        );
+        assert!(
+            (value_rect.x - (prefix_rect.x + prefix_rect.width)).abs() < 0.01,
+            "value must start after the prefix including its trailing space"
+        );
+    }
+
     /// Unchanged content and accessibility-only writes do not request frames.
     /// 未变化内容与仅无障碍写入不请求帧。
     #[test]

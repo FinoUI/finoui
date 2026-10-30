@@ -6,14 +6,14 @@ use std::{error::Error, sync::Arc};
 use fino::{
     native::{
         Application, InputEvent, KeyInput, PointerAction, PointerInput, RenderStatus, Size,
-        WindowDesc, WindowId,
+        WindowContext, WindowDesc, WindowId,
     },
     reactive::Signal,
 };
 use serde_json::json;
 use winit::{
     application::ApplicationHandler,
-    dpi::LogicalSize,
+    dpi::{LogicalSize, PhysicalSize},
     event::{ElementState, Ime, MouseButton, WindowEvent as WinitWindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, NamedKey},
@@ -113,6 +113,9 @@ impl CounterHost {
             height: 360,
         };
         let window_id = app.create_window(window_desc);
+        if let Some(context) = app.window_mut(window_id) {
+            apply_initial_viewport(context, window.inner_size(), window.scale_factor());
+        }
         app.install_surface(window_id, surface)
             .map_err(|error| error.to_string())?;
         let count = app.owner().signal_named("counter/count", 0_i32);
@@ -304,6 +307,20 @@ impl CounterHost {
     }
 }
 
+/// Applies the real window geometry and DPR before the first surface configuration.
+/// 在首次配置 Surface 前应用真实窗口几何与 DPR。
+fn apply_initial_viewport(
+    context: &mut WindowContext,
+    physical: PhysicalSize<u32>,
+    scale_factor: f64,
+) {
+    let logical = physical.to_logical::<f32>(scale_factor);
+    context.resize(
+        Size::new(logical.width.max(1.0), logical.height.max(1.0)),
+        scale_factor as f32,
+    );
+}
+
 impl ApplicationHandler for CounterHost {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.ensure_window(event_loop) {
@@ -403,5 +420,32 @@ impl ApplicationHandler for CounterHost {
         if context.take_frame_request() {
             window.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use fino::{
+        native::{Size, WindowContext, WindowDesc, WindowId},
+        text::TextEngine,
+    };
+
+    use super::{PhysicalSize, apply_initial_viewport};
+
+    /// The first surface configuration must use the real physical size and scale factor.
+    /// 首次 Surface 配置必须使用真实物理尺寸与缩放因子。
+    #[test]
+    fn initial_viewport_uses_physical_size_and_scale_factor() {
+        let mut context = WindowContext::new(
+            WindowId::new(1),
+            WindowDesc::default(),
+            Rc::new(RefCell::new(TextEngine::new())),
+        );
+        apply_initial_viewport(&mut context, PhysicalSize::new(1000, 600), 2.0);
+        assert_eq!(context.viewport(), Size::new(500.0, 300.0));
+        assert_eq!(context.dpr(), 2.0);
     }
 }

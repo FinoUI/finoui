@@ -447,6 +447,7 @@ impl TextEngine {
         let mut width = 0.0_f32;
         let mut height = 0.0_f32;
         let max_height = constraints.max_height;
+        let keep_trailing_space = shaped.key.white_space == WhiteSpace::NoWrap;
         let is_rtl = layout.is_rtl();
         for line in layout.lines() {
             let metrics = line.metrics();
@@ -454,7 +455,12 @@ impl TextEngine {
                 break;
             }
             height += metrics.line_height;
-            width = width.max(metrics.advance - metrics.trailing_whitespace);
+            let line_width = if keep_trailing_space {
+                metrics.advance
+            } else {
+                metrics.advance - metrics.trailing_whitespace
+            };
+            width = width.max(line_width);
             line_count += 1;
             for item in line.items() {
                 let PositionedLayoutItem::GlyphRun(run) = item else {
@@ -552,6 +558,46 @@ mod tests {
         let auto_rtl_shaped = engine.shape(&auto_rtl);
         let auto_rtl_layout = engine.layout(&auto_rtl_shaped, TextConstraints::unbounded());
         assert!(auto_rtl_layout.is_rtl());
+    }
+
+    /// NoWrap preserves trailing space width, while wrapped text excludes it from the width.
+    /// NoWrap 保留尾部空格宽度，普通换行文本则从宽度中排除尾部空格。
+    #[test]
+    fn no_wrap_keeps_trailing_space_width() {
+        let mut engine = TextEngine::new();
+        let with_space = engine.shape(&TextSpec::counter("Count: "));
+        let without_space = engine.shape(&TextSpec::counter("Count:"));
+        let with_space = engine.layout(&with_space, TextConstraints::unbounded());
+        let without_space = engine.layout(&without_space, TextConstraints::unbounded());
+        assert!(
+            with_space.width() > without_space.width(),
+            "NoWrap must include the trailing space advance"
+        );
+
+        let style = TextStyle::default();
+        let normal = TextSpec::new(
+            "Count: ",
+            style.clone(),
+            "en",
+            TextDirection::Ltr,
+            WhiteSpace::Normal,
+        );
+        let normal_without = TextSpec::new(
+            "Count:",
+            style,
+            "en",
+            TextDirection::Ltr,
+            WhiteSpace::Normal,
+        );
+        let normal = engine.shape(&normal);
+        let normal_without = engine.shape(&normal_without);
+        let normal = engine.layout(&normal, TextConstraints::new(Some(1_000.0), None));
+        let normal_without =
+            engine.layout(&normal_without, TextConstraints::new(Some(1_000.0), None));
+        assert!(
+            (normal.width() - normal_without.width()).abs() < f32::EPSILON,
+            "wrapped text must exclude trailing whitespace from width"
+        );
     }
 
     /// Height budgets drop later lines and their glyphs instead of overflowing.
