@@ -18,13 +18,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      # Third-party actions are pinned to full commit SHAs so their code cannot
+      # change under us; bump the SHA and the trailing version comment together.
+      # 第三方 action 固定到完整 commit SHA，避免上游代码被替换；
+      # 升级时同时更新 SHA 和末尾的版本注释。
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        # This action's "stable" entry point is a branch, so this SHA is the
+        # stable toolchain as of the pin; update it to follow new releases.
+        # 该 action 的 "stable" 入口是分支，这里固定的是当时的 stable 工具链；
+        # 想跟随新版本发布时需要更新这个 SHA。
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt
       - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Run pre-commit hooks
-        uses: pre-commit/action@v3.0.1
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
