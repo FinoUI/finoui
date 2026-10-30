@@ -104,7 +104,7 @@ NativeOffscreen 直接创建纹理目标，不要求 winit Surface。确定性�
 }
 ```
 
-跨后端共享场景只捕获各后端都支持的逻辑快照。`layout`、`display_list` 与 `screenshot` 通过 NativeOffscreen／WebHeadless 的后端特定运行参数追加，不让 Mock 因没有布局或图像能力而跳过核心断言；不支持的能力必须显式报告，禁止静默生成空快照。
+跨后端共享场景只捕获各后端都支持的逻辑快照。`layout`、`display_list` 与 `screenshot` 通过 NativeOffscreen／WebHeadless 的后端特定运行参数追加，不让 Mock 因没有布局或图像能力而跳过核心断言；不支持的能力必须显式报告，禁止静默生成空快照。`capture` 动作立即把快照写入 `captures/step-{index}/`，后续步骤不能覆盖更早的时点状态。
 
 选择器优先级固定为 `role + accessible name`、稳定 `test_id`、语义查询。禁止 AI 依赖易变的内部 NodeId、屏幕绝对坐标或自动生成 class 作为默认定位方式。
 

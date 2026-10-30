@@ -177,7 +177,7 @@ impl ReactiveRegistry {
                 "initial".to_owned()
             } else {
                 self.pending_reason
-                    .take()
+                    .clone()
                     .unwrap_or_else(|| "reactive update".to_owned())
             };
         }
@@ -238,6 +238,24 @@ impl ReactiveRegistry {
 
 /// An owner for signals, effects, and registered cleanup work.
 /// 管理 Signal、Effect 与注册清理工作的 Owner。
+///
+/// ```
+/// use fino::reactive::{Owner, batch};
+///
+/// let owner = Owner::new();
+/// let count = owner.signal(0);
+/// let observed = count.clone();
+/// owner.effect(move || {
+///     observed.get();
+/// });
+/// batch(|| {
+///     for value in 1..=100 {
+///         count.set(value);
+///     }
+/// });
+/// assert_eq!(owner.snapshot().effects[0].executions, 2);
+/// owner.dispose();
+/// ```
 #[derive(Clone, Debug)]
 pub struct Owner {
     inner: reactive_graph::owner::Owner,
@@ -330,6 +348,17 @@ impl Owner {
 
     /// Disposes effects and cleanup callbacks; repeated calls are safe.
     /// 释放 Effect 与清理回调，可安全重复调用。
+    ///
+    /// ```
+    /// use fino::reactive::Owner;
+    ///
+    /// let owner = Owner::new();
+    /// let count = owner.signal(0);
+    /// owner.dispose();
+    /// owner.dispose();
+    /// count.set(1);
+    /// assert!(owner.is_disposed());
+    /// ```
     pub fn dispose(&self) {
         if !self.disposed.replace(true) {
             self.inner.cleanup();
@@ -446,6 +475,23 @@ impl<T: 'static> Signal<T> {
 
 /// Runs a transaction using `reactive_graph`'s nested, de-duplicating effect batch.
 /// 使用 `reactive_graph` 支持嵌套与 Effect 去重的事务执行批处理。
+///
+/// ```
+/// use fino::reactive::{Owner, batch};
+///
+/// let owner = Owner::new();
+/// let count = owner.signal(0);
+/// let observed = count.clone();
+/// owner.effect(move || {
+///     observed.get();
+/// });
+/// batch(|| {
+///     count.set(1);
+///     count.set(2);
+/// });
+/// assert_eq!(owner.snapshot().effects[0].executions, 2);
+/// owner.dispose();
+/// ```
 pub fn batch<T>(transaction: impl FnOnce() -> T) -> T {
     reactive_graph::effect::batch(transaction)
 }

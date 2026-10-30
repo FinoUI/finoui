@@ -95,6 +95,18 @@ mod tests {
         }
     }
 
+    fn initial_text_target(operations: &[BackendOp]) -> MockNode {
+        let targets: Vec<_> = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                BackendOp::SetText { node, value } if value == "0" => Some(*node),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(targets.len(), 1, "one initial text binding target");
+        targets[0]
+    }
+
     #[test]
     fn clicks_update_only_the_bound_text_once() {
         let _guard = lock();
@@ -107,15 +119,7 @@ mod tests {
             runtime.backend().text_content(&button).as_deref(),
             Some("Count: 0")
         );
-        assert!(
-            runtime
-                .backend()
-                .operations()
-                .contains(&BackendOp::SetText {
-                    node: MockNode(3),
-                    value: "0".to_owned(),
-                })
-        );
+        let text_target = initial_text_target(runtime.backend().operations());
         let initial_operations = runtime.backend().operations().len();
 
         click(&runtime, &button);
@@ -134,17 +138,12 @@ mod tests {
         let operations = backend.operations();
         let updates: Vec<_> = operations[initial_operations..]
             .iter()
-            .filter(|operation| matches!(operation, BackendOp::SetText { .. }))
+            .filter_map(|operation| match operation {
+                BackendOp::SetText { node, value } => Some((*node, value.as_str())),
+                _ => None,
+            })
             .collect();
-        assert_eq!(updates.len(), 2);
-        assert!(updates.contains(&&BackendOp::SetText {
-            node: MockNode(3),
-            value: "1".to_owned(),
-        }));
-        assert!(updates.contains(&&BackendOp::SetText {
-            node: MockNode(3),
-            value: "2".to_owned(),
-        }));
+        assert_eq!(updates, [(text_target, "1"), (text_target, "2")]);
         assert!(
             operations[initial_operations..]
                 .iter()
@@ -163,6 +162,7 @@ mod tests {
         let mut runtime = Runtime::new(MockBackend::new());
         let owner = runtime.create_owner();
         let (button, count) = mount_counter_with_state(&mut runtime, &owner);
+        let text_target = initial_text_target(runtime.backend().operations());
         let initial_operations = runtime.backend().operations().len();
 
         batch(|| {
@@ -178,15 +178,12 @@ mod tests {
         let backend = runtime.backend();
         let updates: Vec<_> = backend.operations()[initial_operations..]
             .iter()
-            .filter(|operation| matches!(operation, BackendOp::SetText { .. }))
+            .filter_map(|operation| match operation {
+                BackendOp::SetText { node, value } => Some((*node, value.as_str())),
+                _ => None,
+            })
             .collect();
-        assert_eq!(
-            updates,
-            [&BackendOp::SetText {
-                node: MockNode(3),
-                value: "100".to_owned(),
-            }]
-        );
+        assert_eq!(updates, [(text_target, "100")]);
         assert_eq!(owner.snapshot().effects[0].executions, 2);
         assert_eq!(runtime.component_executions().get(), 1);
     }
@@ -217,6 +214,35 @@ mod tests {
             runtime.backend().text_content(&button).as_deref(),
             Some("Count: 0")
         );
+    }
+
+    #[test]
+    fn every_effect_keeps_the_latest_batch_reason() {
+        let _guard = lock();
+        let owner = Owner::new();
+        let signal = owner.signal_named("test/shared-reason", 0_i32);
+        let first_signal = signal.clone();
+        owner.effect_named("test/first-reason", move || {
+            first_signal.get();
+        });
+        let second_signal = signal.clone();
+        owner.effect_named("test/second-reason", move || {
+            second_signal.get();
+        });
+
+        batch(|| {
+            for value in 1..=100 {
+                signal.set(value);
+            }
+        });
+
+        let snapshot = owner.snapshot();
+        assert_eq!(snapshot.effects.len(), 2);
+        for effect in snapshot.effects {
+            assert_eq!(effect.executions, 2);
+            assert_eq!(effect.last_reason, "signal-1 write");
+        }
+        owner.dispose();
     }
 
     #[test]

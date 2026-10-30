@@ -1,7 +1,7 @@
 //! Cargo runner for counter-owned checks and scenarios.
 //! 计数器示例自有检查与场景的 Cargo 运行器。
 
-use std::{path::PathBuf, process::ExitCode};
+use std::{panic::AssertUnwindSafe, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use fino::scenario::{self, ScenarioResult, Status, ToolError};
@@ -60,6 +60,14 @@ enum OutputFormat {
 }
 
 fn main() -> ExitCode {
+    let format = panic_output_format();
+    match catch_tool_panic(run) {
+        Ok(code) => code,
+        Err(error) => output_error(error, format),
+    }
+}
+
+fn run() -> ExitCode {
     match Cli::parse().command {
         Command::Check { format } => {
             let report = check_counter();
@@ -92,6 +100,29 @@ fn main() -> ExitCode {
                 Err(error) => output_error(error, format),
             }
         }
+    }
+}
+
+fn catch_tool_panic(operation: impl FnOnce() -> ExitCode) -> Result<ExitCode, ToolError> {
+    std::panic::catch_unwind(AssertUnwindSafe(operation))
+        .map_err(|payload| ToolError::tool_panic(panic_payload(payload)))
+}
+
+fn panic_output_format() -> OutputFormat {
+    if std::env::args_os().any(|argument| argument == "json" || argument == "--format=json") {
+        OutputFormat::Json
+    } else {
+        OutputFormat::Human
+    }
+}
+
+fn panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_owned()
     }
 }
 
@@ -140,5 +171,20 @@ fn status_name(status: Status) -> &'static str {
     match status {
         Status::Passed => "passed",
         Status::Failed => "failed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::catch_tool_panic;
+
+    #[test]
+    fn panic_boundary_preserves_original_message() {
+        let error = match catch_tool_panic(|| panic!("counter runner regression panic")) {
+            Ok(_) => panic!("operation should not succeed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code.as_ref(), "UI_TOOL_PANIC");
+        assert!(error.message.contains("counter runner regression panic"));
     }
 }

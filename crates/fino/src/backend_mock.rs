@@ -1,7 +1,7 @@
 //! Non-rendering in-memory backend with a deterministic tree and operation log.
 //! 具有确定性树与操作日志的无渲染内存后端。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -134,6 +134,7 @@ pub struct MockBackend {
     nodes: BTreeMap<MockNode, MockNodeData>,
     listeners: BTreeMap<u64, ListenerRegistration>,
     operations: Vec<BackendOp>,
+    unsupported_snapshots: BTreeSet<SnapshotKind>,
 }
 
 impl MockBackend {
@@ -141,6 +142,16 @@ impl MockBackend {
     /// 创建空 Mock 后端。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Configures a snapshot capability for backend-contract regression tests.
+    /// 配置快照能力，用于后端契约回归测试。
+    pub fn set_snapshot_supported(&mut self, kind: SnapshotKind, supported: bool) {
+        if supported {
+            self.unsupported_snapshots.remove(&kind);
+        } else {
+            self.unsupported_snapshots.insert(kind);
+        }
     }
 
     /// Returns the complete ordered operation log.
@@ -321,10 +332,14 @@ impl HeadlessBackend for MockBackend {
     }
 
     fn supports_snapshot(&self, kind: SnapshotKind) -> bool {
-        matches!(
-            kind,
-            SnapshotKind::Dom | SnapshotKind::A11y | SnapshotKind::Reactive | SnapshotKind::Trace
-        )
+        !self.unsupported_snapshots.contains(&kind)
+            && matches!(
+                kind,
+                SnapshotKind::Dom
+                    | SnapshotKind::A11y
+                    | SnapshotKind::Reactive
+                    | SnapshotKind::Trace
+            )
     }
 
     fn find_all(&self, selector: &Selector) -> Vec<Self::Node> {

@@ -62,6 +62,36 @@ fn inspect_reads_only_the_requested_existing_artifact() {
 }
 
 #[test]
+fn human_inspect_prints_a_summary_instead_of_raw_json() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let run_dir = temporary.path().join("run");
+    fs::create_dir_all(&run_dir).expect("run directory");
+    fs::write(
+        run_dir.join("dom.json"),
+        serde_json::to_vec(&json!({
+            "schema": 1,
+            "roots": ["root"],
+            "nodes": [{"text": "do-not-print-the-payload"}]
+        }))
+        .expect("artifact JSON"),
+    )
+    .expect("DOM artifact");
+
+    let output = fino()
+        .args(["inspect", "dom", "--run"])
+        .arg(&run_dir)
+        .output()
+        .expect("human inspect output");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("human output UTF-8");
+    assert!(stdout.contains("dom"));
+    assert!(stdout.contains("nodes: 1"));
+    assert!(!stdout.contains("do-not-print-the-payload"));
+    assert!(!stdout.contains("\"schema\": 1"));
+}
+
+#[test]
 fn generic_cli_does_not_expose_a_scenario_runner() {
     let output = fino()
         .arg("scenario")

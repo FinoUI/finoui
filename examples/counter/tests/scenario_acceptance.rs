@@ -1,11 +1,12 @@
 use std::{fs, path::Path};
 
 use fino::{
-    headless::SnapshotKind,
+    backend_mock::MockBackend,
+    headless::{Environment, HeadlessHost, SnapshotKind},
     inspect::inspect_artifact,
-    scenario::{Scenario, Status, Step},
+    scenario::{Scenario, Status, Step, run_on_host},
 };
-use fino_counter::runner::run_mock_scenario;
+use fino_counter::{mount_counter, runner::run_mock_scenario};
 use serde_json::Value;
 
 fn counter_scenario() -> Scenario {
@@ -28,6 +29,9 @@ fn mock_scenario_writes_deterministic_snapshots_and_trace() {
     assert_eq!(first.counters.component_executions, 1);
     assert_eq!(first.counters.effect_executions, 2);
     assert_eq!(first.counters.frame, 1);
+    assert_eq!(first.counters.virtual_time_ms, 16);
+    assert_eq!(first.captures.len(), 1);
+    assert_eq!(first.captures[0].step, 4);
     assert!(first.steps.iter().all(|step| step.status == Status::Passed));
     assert!(first.errors.is_empty());
 
@@ -39,15 +43,20 @@ fn mock_scenario_writes_deterministic_snapshots_and_trace() {
 
     let dom = inspect_artifact(&first_dir, SnapshotKind::Dom).expect("DOM inspection");
     let dom_text = serde_json::to_string(&dom).expect("DOM JSON");
-    assert_eq!(dom["nodes"][1]["text"], "Count: ");
-    assert_eq!(dom["nodes"][2]["text"], "1");
+    let dom_nodes = dom["nodes"].as_array().expect("DOM nodes");
+    assert!(dom_nodes.iter().any(|node| node["text"] == "Count: "));
+    assert!(dom_nodes.iter().any(|node| node["text"] == "1"));
     assert!(dom_text.contains("aria-label"));
     assert!(!dom_text.contains("0x"));
 
     let a11y = inspect_artifact(&first_dir, SnapshotKind::A11y).expect("a11y inspection");
-    assert_eq!(a11y["nodes"][0]["role"], "button");
-    assert_eq!(a11y["nodes"][0]["name"], "Increment counter");
-    assert_eq!(a11y["nodes"][0]["text"], "Count: 1");
+    let button = a11y["nodes"]
+        .as_array()
+        .expect("a11y nodes")
+        .iter()
+        .find(|node| node["role"] == "button" && node["name"] == "Increment counter")
+        .expect("counter button semantics");
+    assert_eq!(button["text"], "Count: 1");
 
     let reactive =
         inspect_artifact(&first_dir, SnapshotKind::Reactive).expect("reactive inspection");
@@ -63,6 +72,9 @@ fn mock_scenario_writes_deterministic_snapshots_and_trace() {
             && event["details"]["details"]["set_text"]["value"] == "1"
     }));
     assert!(events.iter().any(|event| event["kind"] == "capture"));
+    assert!(events.iter().any(|event| {
+        event["kind"] == "advance_frames" && event["details"]["virtual_time_ms"] == 16
+    }));
     assert!(!trace.to_string().contains("timestamp"));
 
     let saved_result: Value = serde_json::from_str(
@@ -71,6 +83,88 @@ fn mock_scenario_writes_deterministic_snapshots_and_trace() {
     .expect("result JSON");
     assert_eq!(saved_result["run_id"], first.run_id);
     assert_eq!(saved_result["snapshots"]["dom"], "dom.json");
+}
+
+#[test]
+fn capture_steps_preserve_before_and_after_click_states() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let run_dir = temporary.path().join("captures");
+    let mut scenario = counter_scenario();
+    scenario
+        .steps
+        .insert(0, Step::Capture(vec![SnapshotKind::Dom]));
+
+    let result = run_mock_scenario(&scenario, &run_dir).expect("capture scenario run");
+
+    assert_eq!(result.status, Status::Passed);
+    assert_eq!(result.captures.len(), 2);
+    assert_eq!(
+        result.captures[0].artifacts["dom"],
+        "captures/step-0/dom.json"
+    );
+    assert_eq!(
+        result.captures[1].artifacts["dom"],
+        "captures/step-5/dom.json"
+    );
+    let before = inspect_artifact(&run_dir.join("captures/step-0"), SnapshotKind::Dom)
+        .expect("before-click capture");
+    let after = inspect_artifact(&run_dir.join("captures/step-5"), SnapshotKind::Dom)
+        .expect("after-click capture");
+    assert!(
+        before["nodes"]
+            .as_array()
+            .expect("before nodes")
+            .iter()
+            .any(|node| { node["kind"] == "text" && node["text"] == "0" })
+    );
+    assert!(
+        after["nodes"]
+            .as_array()
+            .expect("after nodes")
+            .iter()
+            .any(|node| { node["kind"] == "text" && node["text"] == "1" })
+    );
+    let final_dom = inspect_artifact(&run_dir, SnapshotKind::Dom).expect("final DOM");
+    assert!(
+        final_dom["nodes"]
+            .as_array()
+            .expect("final nodes")
+            .iter()
+            .any(|node| { node["kind"] == "text" && node["text"] == "1" })
+    );
+}
+
+#[test]
+fn reactive_cycles_fail_the_scenario_and_preserve_artifacts() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let run_dir = temporary.path().join("cycle");
+    let scenario = counter_scenario();
+    let host = HeadlessHost::new(MockBackend::new(), Environment::default());
+
+    let result = run_on_host(&scenario, &run_dir, host, |runtime, owner| {
+        let root = mount_counter(runtime, owner);
+        let cyclic = owner.signal_named("test/scenario-cycle", 0_i32);
+        let effect_cyclic = cyclic.clone();
+        owner.effect_named("test/scenario-cycle-effect", move || {
+            let value = effect_cyclic.get();
+            if value == 0 {
+                effect_cyclic.set(1);
+            }
+        });
+        root
+    })
+    .expect("cycle run artifacts");
+
+    assert_eq!(result.status, Status::Failed);
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|error| error.code.as_ref() == "UI_REACTIVE_CYCLE")
+    );
+    assert!(run_dir.join("result.json").exists());
+    assert!(run_dir.join("reactive.json").exists());
+    assert!(run_dir.join("trace.json").exists());
 }
 
 #[test]
@@ -88,8 +182,43 @@ fn unsupported_snapshot_is_an_explicit_structured_failure() {
     assert_eq!(result.errors[0].step, Some(4));
     assert_eq!(result.errors[0].capability.as_deref(), Some("layout"));
     assert!(!run_dir.join("layout.json").exists());
+    assert!(!run_dir.join("captures/step-4").exists());
+    assert!(result.captures.is_empty());
     assert!(run_dir.join("dom.json").exists());
     assert!(run_dir.join("trace.json").exists());
+}
+
+#[test]
+fn final_artifacts_check_every_required_snapshot_capability() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let mut scenario = counter_scenario();
+    scenario.steps.clear();
+
+    for kind in [
+        SnapshotKind::Dom,
+        SnapshotKind::A11y,
+        SnapshotKind::Reactive,
+        SnapshotKind::Trace,
+    ] {
+        let run_dir = temporary.path().join(kind.name());
+        let mut backend = MockBackend::new();
+        backend.set_snapshot_supported(kind, false);
+        let host = HeadlessHost::new(backend, scenario.environment.clone());
+        let result = run_on_host(&scenario, &run_dir, host, mount_counter)
+            .expect("final capability failure artifacts");
+
+        assert_eq!(result.status, Status::Failed, "{kind:?}");
+        assert!(
+            result.errors.iter().any(|error| {
+                error.code.as_ref() == "UI_SNAPSHOT_UNSUPPORTED"
+                    && error.capability.as_deref() == Some(kind.name())
+                    && error.step.is_none()
+            }),
+            "{kind:?}"
+        );
+        assert!(!run_dir.join(kind.artifact_name()).exists(), "{kind:?}");
+        assert!(run_dir.join("result.json").exists(), "{kind:?}");
+    }
 }
 
 #[test]

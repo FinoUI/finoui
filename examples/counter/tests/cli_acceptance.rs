@@ -52,5 +52,11 @@ fn cargo_check_and_scenario_commands_form_a_json_loop() {
 
     let dom = inspect_artifact(&run_dir, SnapshotKind::Dom).expect("DOM inspection");
     assert_eq!(dom["schema"], 1);
-    assert_eq!(dom["nodes"][2]["text"], "1");
+    assert!(
+        dom["nodes"]
+            .as_array()
+            .expect("dom nodes")
+            .iter()
+            .any(|node| node["text"] == "1")
+    );
 }

@@ -4,7 +4,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::headless::HeadlessError;
+use crate::{headless::HeadlessError, reactive::ReactiveError};
 
 /// Machine-readable tool failure without producer-specific context.
 /// 不含生产者特定上下文的机器可读工具错误。
@@ -31,6 +31,15 @@ pub struct ToolError {
 }
 
 impl ToolError {
+    /// Converts a caught tool-entry panic while preserving its original payload.
+    /// 转换工具入口捕获的 panic，并保留原始 panic 信息。
+    pub fn tool_panic(payload: impl Into<String>) -> Self {
+        Self::new(
+            "UI_TOOL_PANIC",
+            format!("tool panicked: {}", payload.into()),
+        )
+    }
+
     pub(crate) fn new(code: &str, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
@@ -42,14 +51,24 @@ impl ToolError {
         }
     }
 
-    pub(crate) fn at_step(mut self, step: usize, backend: &str) -> Self {
-        self.step = Some(step);
+    pub(crate) fn at_backend(mut self, backend: &str) -> Self {
         self.backend = Some(backend.into());
         self
     }
 
+    pub(crate) fn at_step(mut self, step: usize, backend: &str) -> Self {
+        self.step = Some(step);
+        self.at_backend(backend)
+    }
+
     pub(crate) fn from_headless(error: HeadlessError, step: usize, backend: &str) -> Self {
         Self::new(&error.code, error.message).at_step(step, backend)
+    }
+
+    pub(crate) fn from_reactive(error: ReactiveError, backend: &str) -> Self {
+        let mut converted = Self::new(&error.code, error.message);
+        converted.backend = Some(backend.into());
+        converted
     }
 
     pub(crate) fn with_capability(mut self, capability: String) -> Self {

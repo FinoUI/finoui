@@ -62,7 +62,9 @@ pub enum ColorScheme {
 
 /// Snapshot capabilities known to the versioned scenario protocol.
 /// 版本化场景协议已知的快照能力。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotKind {
     /// Logical DOM tree.
@@ -92,6 +94,21 @@ pub enum SnapshotKind {
 }
 
 impl SnapshotKind {
+    /// Returns the stable capability name used in paths and diagnostics.
+    /// 返回路径与诊断使用的稳定能力名。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Dom => "dom",
+            Self::A11y => "a11y",
+            Self::Reactive => "reactive",
+            Self::Layout => "layout",
+            Self::DisplayList => "display_list",
+            Self::Screenshot => "screenshot",
+            Self::Resources => "resources",
+            Self::Trace => "trace",
+        }
+    }
+
     /// Returns the stable artifact filename.
     /// 返回稳定的产物文件名。
     pub fn artifact_name(self) -> &'static str {
@@ -291,6 +308,10 @@ impl HeadlessError {
     }
 }
 
+/// Fixed deterministic frame duration used by the PR1 virtual clock.
+/// PR1 虚拟时钟使用的固定确定性帧时长。
+pub const FRAME_DURATION_MS: u64 = 16;
+
 /// Minimum counters needed to detect accidental component or backend reruns.
 /// 检测意外组件重跑或后端重跑所需的最小计数。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -307,6 +328,9 @@ pub struct ExecutionCounters {
     /// Current virtual frame.
     /// 当前虚拟帧。
     pub frame: u64,
+    /// Deterministic virtual time in milliseconds.
+    /// 以毫秒表示的确定性虚拟时间。
+    pub virtual_time_ms: u64,
 }
 
 /// A deterministic host that runs real reactive and backend code without a display.
@@ -317,6 +341,7 @@ pub struct HeadlessHost<B: HeadlessBackend> {
     root: Option<B::Node>,
     environment: Environment,
     frame: u64,
+    virtual_time_ms: u64,
     disposed: bool,
     trace: Vec<TraceEvent>,
     backend_trace_cursor: usize,
@@ -334,6 +359,7 @@ impl<B: HeadlessBackend + 'static> HeadlessHost<B> {
             root: None,
             environment,
             frame: 0,
+            virtual_time_ms: 0,
             disposed: false,
             trace: Vec::new(),
             backend_trace_cursor: 0,
@@ -378,6 +404,12 @@ impl<B: HeadlessBackend + 'static> HeadlessHost<B> {
     /// 返回当前虚拟帧号。
     pub fn frame(&self) -> u64 {
         self.frame
+    }
+
+    /// Returns deterministic virtual time in milliseconds.
+    /// 返回以毫秒表示的确定性虚拟时间。
+    pub fn virtual_time_ms(&self) -> u64 {
+        self.virtual_time_ms
     }
 
     /// Clicks one uniquely matching semantic node.
@@ -443,10 +475,27 @@ impl<B: HeadlessBackend + 'static> HeadlessHost<B> {
     /// 显式推进指定数量的确定性帧。
     pub fn advance_frames(&mut self, frames: u64) -> Result<(), HeadlessError> {
         self.ensure_active()?;
-        self.frame += frames;
+        let next_frame = self.frame.checked_add(frames).ok_or_else(|| {
+            HeadlessError::new("UI_VIRTUAL_TIME_OVERFLOW", "virtual frame counter overflow")
+        })?;
+        let elapsed = frames.checked_mul(FRAME_DURATION_MS).ok_or_else(|| {
+            HeadlessError::new(
+                "UI_VIRTUAL_TIME_OVERFLOW",
+                "virtual frame duration overflow",
+            )
+        })?;
+        let next_time = self.virtual_time_ms.checked_add(elapsed).ok_or_else(|| {
+            HeadlessError::new("UI_VIRTUAL_TIME_OVERFLOW", "virtual clock overflow")
+        })?;
+        self.frame = next_frame;
+        self.virtual_time_ms = next_time;
         self.record(
             "advance_frames",
-            json!({ "frames": frames, "frame": self.frame }),
+            json!({
+                "frames": frames,
+                "frame": self.frame,
+                "virtual_time_ms": self.virtual_time_ms,
+            }),
         );
         Ok(())
     }
@@ -486,6 +535,7 @@ impl<B: HeadlessBackend + 'static> HeadlessHost<B> {
                 .sum(),
             backend_operations: self.backend_operation_count(),
             frame: self.frame,
+            virtual_time_ms: self.virtual_time_ms,
         }
     }
 
@@ -517,10 +567,10 @@ impl<B: HeadlessBackend + 'static> HeadlessHost<B> {
         }
     }
 
-    /// Records a structured capture action.
-    /// 记录结构化捕获动作。
-    pub fn record_capture(&mut self, kind: SnapshotKind) {
-        self.record("capture", json!({ "kind": kind }));
+    /// Records a structured capture action and its immutable relative artifact path.
+    /// 记录结构化捕获动作及其不可覆盖的相对产物路径。
+    pub fn record_capture(&mut self, kind: SnapshotKind, path: &str) {
+        self.record("capture", json!({ "kind": kind, "path": path }));
     }
 
     /// Records a structured step failure before artifacts are written.

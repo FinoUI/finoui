@@ -1,7 +1,7 @@
 //! Versioned backend-neutral JSON scenarios with an explicit caller-supplied mount.
 //! 使用调用方显式提供的 mount，执行版本化后端无关 JSON 场景。
 
-use std::{fmt::Write as _, fs, path::Path};
+use std::{collections::BTreeMap, fmt::Write as _, fs, path::Path};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,15 @@ use crate::{
 /// Current scenario protocol version.
 /// 当前场景协议版本。
 pub const SCENARIO_SCHEMA: u32 = 1;
+
+/// Artifacts required at the end of every completed scenario run.
+/// 每次完成的场景运行都需要的最终产物。
+pub const REQUIRED_SNAPSHOTS: [SnapshotKind; 4] = [
+    SnapshotKind::Dom,
+    SnapshotKind::A11y,
+    SnapshotKind::Reactive,
+    SnapshotKind::Trace,
+];
 
 /// One executable, versioned user-behavior scenario.
 /// 一个可执行的版本化用户行为场景。
@@ -66,11 +75,11 @@ pub enum Step {
     /// Click a semantic target.
     /// 点击语义目标。
     Click(Selector),
-    /// Advance deterministic virtual frames.
-    /// 推进确定性虚拟帧。
+    /// Advance deterministic virtual frames and time.
+    /// 推进确定性虚拟帧与虚拟时间。
     AdvanceFrames(u64),
-    /// Capture explicitly named snapshot capabilities.
-    /// 捕获明确指定的快照能力。
+    /// Capture and immediately persist explicitly named snapshots.
+    /// 捕获并立即持久化明确指定的快照。
     Capture(Vec<SnapshotKind>),
 }
 
@@ -116,8 +125,20 @@ pub struct StepResult {
     pub error: Option<ToolError>,
 }
 
-/// Core artifacts written for every completed scenario run.
-/// 每次完成场景运行都会写入的核心产物。
+/// Immediately persisted artifacts from one capture step.
+/// 单个捕获步骤立即持久化的产物。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CaptureArtifacts {
+    /// Zero-based capture step index.
+    /// 从 0 开始的捕获步骤索引。
+    pub step: usize,
+    /// Capability names mapped to immutable paths relative to `run_dir`.
+    /// 能力名映射到相对 `run_dir` 的不可覆盖路径。
+    pub artifacts: BTreeMap<String, String>,
+}
+
+/// Core artifacts written at the end of a completed scenario run.
+/// 场景运行结束时写入的核心产物。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SnapshotArtifacts {
     /// Logical DOM artifact path relative to `run_dir`.
@@ -159,8 +180,11 @@ pub struct ScenarioResult {
     /// Ordered step outcomes.
     /// 有序步骤结果。
     pub steps: Vec<StepResult>,
-    /// Core snapshot artifact paths.
-    /// 核心快照产物路径。
+    /// Point-in-time capture artifacts in step order.
+    /// 按步骤顺序排列的时点捕获产物。
+    pub captures: Vec<CaptureArtifacts>,
+    /// Final snapshot artifact paths.
+    /// 最终快照产物路径。
     pub snapshots: SnapshotArtifacts,
     /// Acceptance counters.
     /// 验收计数。
@@ -189,6 +213,38 @@ pub fn load_scenario(path: &Path) -> Result<Scenario, ToolError> {
 
 /// Runs the JSON protocol on a host using only the mount supplied by the caller.
 /// 仅使用调用方提供的 mount，在 Host 上运行 JSON 协议。
+///
+/// ```
+/// use fino::{
+///     backend_mock::{MockBackend, MockNode},
+///     dom_api::DomBackend,
+///     headless::{Environment, HeadlessHost, SnapshotKind},
+///     reactive::Owner,
+///     runtime::Runtime,
+///     scenario::{Scenario, Status, run_on_host},
+/// };
+///
+/// fn mount(runtime: &mut Runtime<MockBackend>, _owner: &Owner) -> MockNode {
+///     runtime.backend_mut().create_text("ready")
+/// }
+///
+/// let scenario = Scenario {
+///     schema: 1,
+///     name: "doctest/mount".to_owned(),
+///     mount: "doctest".to_owned(),
+///     environment: Environment::default(),
+///     steps: vec![],
+/// };
+/// let run_dir = std::env::temp_dir().join(format!(
+///     "fino-scenario-doctest-{}",
+///     std::process::id()
+/// ));
+/// let host = HeadlessHost::new(MockBackend::new(), Environment::default());
+/// let result = run_on_host(&scenario, &run_dir, host, mount).expect("scenario run");
+/// assert_eq!(result.status, Status::Passed);
+/// assert!(run_dir.join(SnapshotKind::Dom.artifact_name()).exists());
+/// std::fs::remove_dir_all(run_dir).expect("cleanup");
+/// ```
 pub fn run_on_host<B: HeadlessBackend + 'static>(
     scenario: &Scenario,
     run_dir: &Path,
@@ -213,29 +269,41 @@ pub fn run_on_host<B: HeadlessBackend + 'static>(
 
     host.mount(&scenario.mount, mount);
     let mut steps = Vec::new();
+    let mut captures = Vec::new();
     let mut errors = Vec::new();
 
     for (index, step) in scenario.steps.iter().enumerate() {
-        let outcome = execute_step(&mut host, step, index, backend);
-        match outcome {
-            Ok(()) => steps.push(StepResult {
-                index,
-                action: step.action().to_owned(),
-                status: Status::Passed,
-                error: None,
-            }),
+        match execute_step(&mut host, step, index, backend, run_dir) {
+            Ok(capture) => {
+                if let Some(capture) = capture {
+                    captures.push(capture);
+                }
+                steps.push(StepResult {
+                    index,
+                    action: step.action().to_owned(),
+                    status: Status::Passed,
+                    error: None,
+                });
+            }
             Err(error) => {
-                host.record_error(&error.code, &error.message);
+                record_error(&mut host, &mut errors, error.clone());
                 steps.push(StepResult {
                     index,
                     action: step.action().to_owned(),
                     status: Status::Failed,
-                    error: Some(error.clone()),
+                    error: Some(error),
                 });
-                errors.push(error);
                 break;
             }
         }
+    }
+
+    for reactive_error in host.reactive_snapshot().errors {
+        record_error(
+            &mut host,
+            &mut errors,
+            ToolError::from_reactive(reactive_error, backend),
+        );
     }
 
     let snapshots = SnapshotArtifacts {
@@ -244,13 +312,12 @@ pub fn run_on_host<B: HeadlessBackend + 'static>(
         reactive: SnapshotKind::Reactive.artifact_name().to_owned(),
         trace: SnapshotKind::Trace.artifact_name().to_owned(),
     };
-    write_json(&run_dir.join(&snapshots.dom), &host.dom_snapshot())?;
-    write_json(&run_dir.join(&snapshots.a11y), &host.a11y_snapshot())?;
-    write_json(
-        &run_dir.join(&snapshots.reactive),
-        &host.reactive_snapshot(),
-    )?;
-    write_json(&run_dir.join(&snapshots.trace), &host.trace_snapshot())?;
+    for kind in REQUIRED_SNAPSHOTS {
+        match ensure_snapshot_supported(&host, kind, None, backend) {
+            Ok(()) => write_snapshot(&mut host, kind, &run_dir.join(kind.artifact_name()))?,
+            Err(error) => record_error(&mut host, &mut errors, error),
+        }
+    }
 
     let result = ScenarioResult {
         schema: SCENARIO_SCHEMA,
@@ -264,6 +331,7 @@ pub fn run_on_host<B: HeadlessBackend + 'static>(
             Status::Failed
         },
         steps,
+        captures,
         snapshots,
         counters: host.execution_counters(),
         errors,
@@ -277,37 +345,116 @@ fn execute_step<B: HeadlessBackend + 'static>(
     step: &Step,
     index: usize,
     backend: &str,
-) -> Result<(), ToolError> {
+    run_dir: &Path,
+) -> Result<Option<CaptureArtifacts>, ToolError> {
     match step {
         Step::AssertText(assertion) => host
             .assert_text(&assertion.selector, &assertion.value)
-            .map_err(|error| ToolError::from_headless(error, index, backend)),
+            .map_err(|error| ToolError::from_headless(error, index, backend))
+            .map(|_| None),
         Step::Click(selector) => host
             .click(selector)
-            .map_err(|error| ToolError::from_headless(error, index, backend)),
+            .map_err(|error| ToolError::from_headless(error, index, backend))
+            .map(|_| None),
         Step::AdvanceFrames(frames) => host
             .advance_frames(*frames)
-            .map_err(|error| ToolError::from_headless(error, index, backend)),
-        Step::Capture(kinds) => {
-            for kind in kinds {
-                if !host.runtime().backend().supports_snapshot(*kind) {
-                    let capability = kind
-                        .artifact_name()
-                        .strip_suffix(".json")
-                        .expect("artifact suffix")
-                        .to_owned();
-                    return Err(ToolError::new(
-                        "UI_SNAPSHOT_UNSUPPORTED",
-                        format!("backend {backend} does not support {capability} snapshots"),
-                    )
-                    .at_step(index, backend)
-                    .with_capability(capability));
-                }
-                host.record_capture(*kind);
-            }
-            Ok(())
-        }
+            .map_err(|error| ToolError::from_headless(error, index, backend))
+            .map(|_| None),
+        Step::Capture(kinds) => capture_step(host, kinds, index, backend, run_dir).map(Some),
     }
+}
+
+fn capture_step<B: HeadlessBackend + 'static>(
+    host: &mut HeadlessHost<B>,
+    kinds: &[SnapshotKind],
+    index: usize,
+    backend: &str,
+    run_dir: &Path,
+) -> Result<CaptureArtifacts, ToolError> {
+    for kind in kinds {
+        ensure_snapshot_supported(host, *kind, Some(index), backend)?;
+    }
+
+    let capture_dir = run_dir.join("captures").join(format!("step-{index}"));
+    fs::create_dir_all(&capture_dir).map_err(|error| {
+        ToolError::new(
+            "UI_ARTIFACT_IO",
+            format!("failed to create {}: {error}", capture_dir.display()),
+        )
+        .at_step(index, backend)
+    })?;
+    let mut artifacts = BTreeMap::new();
+    for kind in kinds {
+        let relative = format!("captures/step-{index}/{}", kind.artifact_name());
+        host.record_capture(*kind, &relative);
+        write_snapshot(host, *kind, &run_dir.join(&relative))?;
+        artifacts.insert(kind.name().to_owned(), relative);
+    }
+    Ok(CaptureArtifacts {
+        step: index,
+        artifacts,
+    })
+}
+
+fn ensure_snapshot_supported<B: HeadlessBackend + 'static>(
+    host: &HeadlessHost<B>,
+    kind: SnapshotKind,
+    step: Option<usize>,
+    backend: &str,
+) -> Result<(), ToolError> {
+    let supported = matches!(
+        kind,
+        SnapshotKind::Dom | SnapshotKind::A11y | SnapshotKind::Reactive | SnapshotKind::Trace
+    ) && host.runtime().backend().supports_snapshot(kind);
+    if supported {
+        return Ok(());
+    }
+
+    let capability = kind.name().to_owned();
+    let error = ToolError::new(
+        "UI_SNAPSHOT_UNSUPPORTED",
+        format!("backend {backend} does not support {capability} snapshots"),
+    )
+    .with_capability(capability);
+    Err(match step {
+        Some(step) => error.at_step(step, backend),
+        None => error.at_backend(backend),
+    })
+}
+
+fn write_snapshot<B: HeadlessBackend + 'static>(
+    host: &mut HeadlessHost<B>,
+    kind: SnapshotKind,
+    path: &Path,
+) -> Result<(), ToolError> {
+    match kind {
+        SnapshotKind::Dom => write_json(path, &host.dom_snapshot()),
+        SnapshotKind::A11y => write_json(path, &host.a11y_snapshot()),
+        SnapshotKind::Reactive => write_json(path, &host.reactive_snapshot()),
+        SnapshotKind::Trace => write_json(path, &host.trace_snapshot()),
+        _ => Err(ToolError::new(
+            "UI_SNAPSHOT_UNSUPPORTED",
+            format!("backend cannot generate {} snapshots", kind.name()),
+        )),
+    }
+}
+
+fn record_error<B: HeadlessBackend + 'static>(
+    host: &mut HeadlessHost<B>,
+    errors: &mut Vec<ToolError>,
+    error: ToolError,
+) {
+    let duplicate = errors.iter().any(|existing| {
+        existing.code == error.code
+            && existing.message == error.message
+            && existing.step == error.step
+            && existing.capability == error.capability
+    });
+    if duplicate {
+        return;
+    }
+    host.record_error(&error.code, &error.message);
+    errors.push(error);
 }
 
 fn validate_scenario(scenario: &Scenario) -> Result<(), ToolError> {
