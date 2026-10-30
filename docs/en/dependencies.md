@@ -14,7 +14,7 @@ Only these differentiating capabilities require custom implementation:
 - Integration of Material, Effect, GpuSurface, and reactive uniforms.
 - AI scenario protocols, structured inspection, headless hosts, and development tooling.
 
-The project does not reinvent reactive-graph algorithms, Unicode and shaping, Flex/Grid algorithms, vector rasterization, GPU abstractions, window systems, accessibility platform bridges, RSX parsing, image decoding, MCP protocols, or general-purpose testing infrastructure by default.
+The project does not reinvent reactive-graph algorithms, Unicode and shaping, Flex/Grid algorithms, vector rasterization, GPU abstractions, window systems, accessibility platform bridges, RSX parsing, image decoding, CLI parsing, or general-purpose testing infrastructure by default.
 
 A proposed custom implementation must answer: does the existing library lack functionality, semantics, or performance? Can adaptation, composition, or a small upstream patch solve the problem? Only a reproducible blocker justifies custom implementation or a temporary fork.
 
@@ -32,9 +32,9 @@ A proposed custom implementation must answer: does the existing library lack fun
 | Accessibility | `accesskit` + `accesskit_winit` | Reuse the semantics schema, platform adapters, and consumer test capabilities |
 | Node storage | `slotmap` | Provides generational keys from the counter stage instead of requiring a hand-written arena safety layer |
 | Web | `web-sys` + `wasm-bindgen` + `wasm-bindgen-futures` | Use the real DOM and standard wasm boundary |
-| Serialization and schema | `serde` + `schemars` + `serde_json` | Share type definitions across scenarios, inspection snapshots, errors, and MCP parameters |
+| Serialization and schema | `serde` + `schemars` + `serde_json` | Share type definitions across scenarios, inspection snapshots, errors, and CLI parameters |
 | Diagnostics and observability | `thiserror` + `anyhow` + `tracing` | Use structured errors in libraries and contextual errors and traces in applications and tools |
-| MCP | `rmcp` | Serve only as a thin protocol adapter for `fino::cli`; restrict Tokio to tool processes |
+| CLI | `clap` | Keep command parsing in `fino_cli` and Cargo-based example runners, out of the core runtime |
 | Testing | `proptest` + `insta` + `trybuild` + `wasm-bindgen-test` + Criterion | Cover properties, snapshots, macro diagnostics, wasm, and performance regressions |
 
 Versions are managed centrally in the workspace. The verified combination of wgpu, Vello, and Parley is locked. Dependency updates land in separate PRs rather than being mixed with feature work.

@@ -14,7 +14,7 @@
 - Material、Effect、GpuSurface 与响应式 uniform 的集成。
 - AI 场景协议、结构化检查、无头 Host 与开发工具链。
 
-以下能力默认不重复造轮子：响应式图算法、Unicode 与 shaping、Flex/Grid 算法、向量光栅化、GPU 抽象、窗口系统、无障碍平台桥接、RSX 解析、图像解码、MCP 协议与通用测试设施。
+以下能力默认不重复造轮子：响应式图算法、Unicode 与 shaping、Flex/Grid 算法、向量光栅化、GPU 抽象、窗口系统、无障碍平台桥接、RSX 解析、图像解码、CLI 解析与通用测试设施。
 
 “自研”必须回答：现有库缺少的是功能、语义还是性能？能否通过适配、组合或向上游提交小补丁解决？只有可复现的阻断问题才进入自研或临时 fork。
 
@@ -32,9 +32,9 @@
 | 无障碍 | `accesskit` + `accesskit_winit` | 复用语义 schema、平台 adapter 与 consumer 测试能力 |
 | 节点存储 | `slotmap` | 计数器阶段即可提供 generational key，不先手写 arena 安全性 |
 | Web | `web-sys` + `wasm-bindgen` + `wasm-bindgen-futures` | 使用真实 DOM 与标准 wasm 边界 |
-| 序列化与 Schema | `serde` + `schemars` + `serde_json` | 场景、检查快照、错误和 MCP 参数共用类型来源 |
+| 序列化与 Schema | `serde` + `schemars` + `serde_json` | 场景、检查快照、错误和 CLI 参数共用类型来源 |
 | 诊断与观测 | `thiserror` + `anyhow` + `tracing` | 库使用结构化错误，应用与工具使用上下文错误和 trace |
-| MCP | `rmcp` | 只作为 `fino::cli` 的薄协议适配；Tokio 限制在工具进程 |
+| CLI | `clap` | 命令解析用于 `fino_cli` 和 Cargo 示例运行器，不进入核心 Runtime |
 | 测试 | `proptest` + `insta` + `trybuild` + `wasm-bindgen-test` + Criterion | 覆盖属性、快照、宏诊断、wasm 与性能回归 |
 
 版本统一在 Workspace 管理，并锁定 `wgpu`、Vello、Parley 之间经过验证的组合。依赖更新通过独立 PR 完成，不与功能开发混合。

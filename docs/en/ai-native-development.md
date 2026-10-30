@@ -41,7 +41,7 @@ Read machine-readable capabilities
 → Rerun and produce a verification report
 ```
 
-The goal is executable feedback for every generation, not bypassing validation. The CLI is the source of truth. MCP exposes the same capabilities to agents and must not contain a separate implementation of business logic.
+The goal is executable feedback for every generation, not bypassing validation. The CLI is the source of truth. An Agent Skill teaches agents the same workflows without duplicating business logic. MCP is deferred until external integrations, authorization, or cross-client requirements justify a thin adapter.
 
 ## Tool layering
 
@@ -54,9 +54,9 @@ fino::scenario: Action / Assert / Capture
         ↓
 fino::inspect + fino::test: structured state and validation
         ↓
-fino::cli: stable commands, JSON output, artifacts
+fino_cli: generic commands, JSON output, artifacts
         ↓
-fino::mcp: thin rmcp adapter
+.agents/skills/fino: workflow guidance only
         ↓
 Any AI agent / CI / human developer
 ```
@@ -149,40 +149,41 @@ Tool errors use a shared shape wherever possible:
 
 A `hint` is an investigation starting point and cannot replace trace evidence. Rust panics, wgpu validation failures, browser exceptions, and macro errors are converted into tool results that retain their original output and exit codes.
 
-## CLI, MCP, and application tooling
+## CLI, Skill, and application tooling
 
 ### Shared CLI
 
-`ui` is the working command name and may be replaced before implementation. The minimum command set is:
+`fino_cli` produces the `fino` command. It provides only generic project and tooling operations; it never discovers, mounts, checks, or depends on examples. Its minimum command set is:
 
 ```bash
-ui doctor --format json
-ui check --format json
-ui test --backend mock --format json
-ui scenario run scenarios/counter.json --backend web-headless --out artifacts/runs/counter-web
-ui scenario run scenarios/counter.json --backend native-offscreen --out artifacts/runs/counter-native
-ui inspect dom --run artifacts/runs/counter-web --format json
-ui inspect a11y --run artifacts/runs/counter-web --format json
-ui capture --backend native-offscreen --out artifacts/counter
-ui shader check --format json
-ui bench --baseline main --format json
-ui mcp
+fino doctor --format json
+fino check --format json
+fino inspect dom --run artifacts/runs/counter-web --format json
+fino inspect a11y --run artifacts/runs/counter-web --format json
+fino shader check --format json
+fino bench --baseline main --format json
 ```
 
-Output is human-readable by default. `--format json` and MCP calls use the same structured results. Large snapshots are written to artifacts, and commands return only summaries and paths rather than placing megabytes of DOM or Base64 images into context. Every scenario run returns a stable `run_id` and `run_dir`. `ui inspect --run` reads artifacts from a completed run; `ui inspect --session` reads an explicitly kept-alive debug session. Neither depends on hidden global application state.
+Output is human-readable by default, while `--format json` returns the same structured results used by agents. Large snapshots are written to artifacts, and commands return only summaries and paths rather than placing megabytes of DOM or Base64 images into context. Every scenario run returns a stable `run_id` and `run_dir`. `fino inspect --run` reads artifacts from a completed run; `fino inspect --session` reads an explicitly kept-alive debug session. Neither depends on hidden global application state.
 
-### High-level MCP tools
+### Examples run through Cargo
 
-```text
-ui_check
-ui_run_scenario
-ui_inspect
-ui_capture
-ui_shader_check
-ui_run_benchmark
+Each example owns its component, mount function, smoke checks, and scenario runner. Developers invoke that runner through Cargo; `fino_cli` never performs example-specific work:
+
+```bash
+cargo run -p fino_counter -- check --format json
+cargo run -p fino_counter -- scenario run scenarios/counter.json --backend mock --out artifacts/runs/counter-mock --format json
+cargo run -p fino_counter -- scenario run scenarios/counter.json --backend web-headless --out artifacts/runs/counter-web --format json
+cargo run -p fino_counter -- scenario run scenarios/counter.json --backend native-offscreen --out artifacts/runs/counter-native --format json
 ```
 
-MCP parameters and results are defined with `serde + schemars`. `rmcp` handles only protocol and transport. Tool implementations call the library API inside `fino::cli` rather than parsing human terminal output.
+The example calls the shared `fino::scenario` and `fino::headless` library interfaces. `fino inspect` reads the resulting artifacts without knowing which example produced them.
+
+### Agent Skill
+
+The repository provides `.agents/skills/fino/SKILL.md`. It records command selection, Cargo-based example workflows, JSON output conventions, and artifact navigation. The Skill contains no scenario implementation, mount registry, or business logic; agents call the CLI and Cargo commands directly rather than parsing human terminal output.
+
+MCP is not part of the initial toolchain. If external integrations, authorization, or cross-client access later requires it, an adapter may expose the same structured CLI results without becoming a second implementation.
 
 ### Application template
 
@@ -193,12 +194,12 @@ src/                  # Application components and business code
 scenarios/            # AI-executable user behavior and assertions
 assets/fonts/         # Licensed, reproducible test fonts
 tests/                # Rust, backend conformance, and macro tests
-ui.toml               # Backend, environment, and snapshot configuration
+fino.toml             # Backend, environment, and snapshot configuration
 AGENTS.md             # Project commands, boundaries, validation requirements
 artifacts/            # Ignored generated reports, images, and traces
 ```
 
-Applications do not need a separate test host. Using the framework's components, semantics, and platform services provides headless mounting, input scenarios, snapshots, and performance counters.
+Applications own their mount and scenario binaries and run them through Cargo. They do not need a separate test host. Using the framework's components, semantics, and platform services provides headless mounting, input scenarios, snapshots, and performance counters without adding application dependencies to `fino_cli`.
 
 ### AI-friendly Rust and RSX
 

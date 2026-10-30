@@ -5,7 +5,7 @@
 > 文档状态：实施基线 v0.2，优先使用成熟 crate，支持 AI 原生与无头开发。
 > 目标平台：Windows、macOS、Linux、Android、iOS、Web。
 > 首个垂直切片：同一份计数器组件，由真实 DOM 后端与原生 wgpu 后端共同驱动。
-> 命名：文中的 `ui` 命令为工作名称，可在实现前替换；第三方依赖保留其实际名称。
+> 工具：`fino_cli` crate 产生 `fino` 命令，不包含示例专属行为；示例通过 Cargo 运行。第三方依赖保留其实际名称。
 
 ## 项目定义
 
@@ -155,6 +155,7 @@ MIT 许可证的 [Solid Glass](https://github.com/deeplethe/solid-glass) 将样�
 ```text
 crates/
   fino/              # 响应式核心、DOM、布局、渲染、Host、无头工具
+  fino_cli/          # 通用 fino 命令；不依赖示例，也不包含示例行为
   fino_primitives/   # 无样式行为与无障碍
   fino_components/   # 主题无关的正式组件
   fino_glass/        # Solid Glass 默认主题
@@ -162,11 +163,12 @@ crates/
 examples/
   counter/
     src/lib.rs       # 两端共享的计数器组件
+    src/main.rs      # 示例自己的检查与场景运行器，通过 Cargo 调用
     src/native.rs
     src/web.rs
 ```
 
-`fino` 内部仍按响应式、组件、DOM API、运行时、后端、文本、布局、渲染、平台、Host、无头、场景、检查、CLI、MCP、DevTools 与测试模块保持本文所述边界。尤其不能把 web-sys、wgpu 或 winit 类型泄漏到共享组件 API。
+`fino` 内部仍按响应式、组件、DOM API、运行时、后端、文本、布局、渲染、平台、Host、无头、场景、检查、DevTools 与测试模块保持本文所述边界。`fino_cli` 只依赖这些公共 library 接口，不依赖示例。`.agents/skills/fino` Skill 只包含工作流指引。尤其不能把 web-sys、wgpu 或 winit 类型泄漏到共享组件 API。
 
 ## 第一组技术决策
 
@@ -183,6 +185,7 @@ Web 布局：BrowserFlow
 Native 结构：arena + generational NodeId
 原生 Host：首个原生计数器即采用 Application → WindowManager → WindowContext
 跨语言 ABI：版本化 fino_api 句柄；C ABI 与 WASM 为传输层；不暴露内部 Rust 类型
+工具：fino_cli + Agent Skill；示例通过 Cargo 运行；MCP 后置
 样式：受控 Tailwind 风格 class → 强类型 Style IR；Web CSS 为生成物
 文本接口：TextSpec → ShapedText → TextLayout
 布局读取：禁止隐式同步 flush

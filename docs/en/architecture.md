@@ -5,7 +5,7 @@
 > Status: implementation baseline v0.2, prioritizing mature crates, AI-native workflows, and headless development.
 > Target platforms: Windows, macOS, Linux, Android, iOS, and Web.
 > First vertical slice: one counter component shared by a real DOM backend and a native wgpu backend.
-> Naming: the `ui` command is a working name and may be replaced before implementation. Third-party dependencies keep their actual names.
+> Tooling: the `fino_cli` crate produces the `fino` command. It contains no example-specific behavior; examples run through Cargo. Third-party dependencies keep their actual names.
 
 ## Project definition
 
@@ -155,6 +155,7 @@ The MIT-licensed [Solid Glass](https://github.com/deeplethe/solid-glass) project
 ```text
 crates/
   fino/              # Reactive core, DOM, layout, rendering, hosts, headless tooling
+  fino_cli/          # Generic fino command; no example dependencies or behavior
   fino_primitives/   # Unstyled behavior and accessibility
   fino_components/   # Official theme-independent components
   fino_glass/        # Default Solid Glass theme
@@ -162,11 +163,12 @@ crates/
 examples/
   counter/
     src/lib.rs       # Counter component shared by both backends
+    src/main.rs      # Example-owned checks and scenario runner invoked through Cargo
     src/native.rs
     src/web.rs
 ```
 
-Within `fino`, the reactive, component, DOM API, runtime, backend, text, layout, rendering, platform, host, headless, scenario, inspection, CLI, MCP, DevTools, and test modules retain the boundaries described by this architecture. In particular, web-sys, wgpu, and winit types must not leak into shared component APIs.
+Within `fino`, the reactive, component, DOM API, runtime, backend, text, layout, rendering, platform, host, headless, scenario, inspection, DevTools, and test modules retain the boundaries described by this architecture. `fino_cli` depends on these public library interfaces but never on examples. The `.agents/skills/fino` Skill contains workflow guidance only. In particular, web-sys, wgpu, and winit types must not leak into shared component APIs.
 
 ## Initial technical decisions
 
@@ -183,6 +185,7 @@ Web layout: BrowserFlow
 Native structure: arena + generational NodeId
 Native host: Application → WindowManager → WindowContext from the first native counter
 Cross-language ABI: versioned fino_api handles; C ABI and WASM are transports; no internal Rust types
+Tooling: fino_cli + Agent Skill; examples run through Cargo; MCP deferred
 Styles: controlled Tailwind-like class syntax → strongly typed Style IR; Web CSS is generated
 Text API: TextSpec → ShapedText → TextLayout
 Layout reads: no implicit synchronous flush

@@ -28,6 +28,12 @@ Docs:
 
 Single-language by design: this file (agent instructions, one source of truth), `LICENSE`, generated and vendored text.
 
+## Tooling boundaries
+
+- `fino_cli` provides only generic project and tooling operations. It must not discover, mount, check, or depend on examples.
+- Each example owns its component, mount, smoke checks, and scenario runner, and developers run it through Cargo.
+- The CLI is the source of truth. `.agents/skills/fino` contains workflow guidance only, not business logic. MCP is deferred until external integrations require it.
+
 ## Commit messages
 
 Prefix every commit subject with exactly one [Gitmoji](https://gitmoji.dev/) emoji and a space, chosen for the primary change. Use the emoji itself rather than its `:shortcode:`. Example: `🎉 Initial commit`.

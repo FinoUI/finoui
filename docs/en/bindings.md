@@ -70,7 +70,7 @@ The runtime is confined to the UI thread by default. Other threads may only post
 
 ### No JSON on hot paths
 
-Scenario, Inspect, and MCP continue to use JSON. Actual UI updates use native function calls or WASM calls. Batch changes use mutation buffers, and static templates are registered once, avoiding repeated cross-language calls for every node and property.
+Scenario, Inspect, and the CLI continue to use JSON. Actual UI updates use native function calls or WASM calls. Batch changes use mutation buffers, and static templates are registered once, avoiding repeated cross-language calls for every node and property.
 
 ### Common bindings stay in the core
 

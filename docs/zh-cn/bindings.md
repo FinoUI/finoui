@@ -70,7 +70,7 @@ Runtime 默认限定 UI 线程。其他线程只能投递任务；回调在明�
 
 ### 热路径不用 JSON
 
-Scenario、Inspect、MCP 继续使用 JSON；实际 UI 更新走本地函数调用或 WASM 调用。批量修改使用 mutation buffer，静态模板一次注册，避免每个节点和属性都产生多次跨语言调用。
+Scenario、Inspect、CLI 继续使用 JSON；实际 UI 更新走本地函数调用或 WASM 调用。批量修改使用 mutation buffer，静态模板一次注册，避免每个节点和属性都产生多次跨语言调用。
 
 ### 常见绑定留在核心内完成
 

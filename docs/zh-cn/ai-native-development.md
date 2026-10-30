@@ -41,7 +41,7 @@ AI 对框架或应用的开发闭环应当全部可以在无显示服务器的�
 → 重跑并生成验证报告
 ```
 
-目标是让每次生成都伴随可执行反馈，而非绕过验证。CLI 是事实来源，MCP 只把同一能力暴露给 Agent，禁止在 MCP 中另写一套业务逻辑。
+目标是让每次生成都伴随可执行反馈，而非绕过验证。CLI 是事实来源，Agent Skill 只把同一套工作流教给 Agent，不复制业务逻辑。只有外部集成、鉴权或跨客户端需求出现时，才考虑增加 MCP 薄适配层。
 
 ## 工具分层
 
@@ -54,9 +54,9 @@ fino::scenario：Action / Assert / Capture
         ↓
 fino::inspect + fino::test：结构化状态与验证
         ↓
-fino::cli：稳定命令、JSON 输出、artifacts
+fino_cli：通用命令、JSON 输出、artifacts
         ↓
-fino::mcp：rmcp 薄适配
+.agents/skills/fino：只提供工作流指引
         ↓
 任意 AI Agent / CI / 人类开发者
 ```
@@ -149,40 +149,41 @@ NativeOffscreen 直接创建纹理目标，不要求 winit Surface。确定性�
 
 `hint` 只是调查入口，不能替代 trace 证据。Rust panic、wgpu validation、浏览器异常和宏错误都应转换为带原始输出的工具结果，同时保留退出码。
 
-## CLI、MCP 与应用工具链
+## CLI、Skill 与应用工具链
 
 ### 共用 CLI
 
-`ui` 是工作命令名，实施前可替换。最小命令集：
+`fino_cli` 产生 `fino` 命令，只提供项目与工具自身的通用操作，不负责发现、挂载、检查或依赖任何示例。最小命令集：
 
 ```bash
-ui doctor --format json
-ui check --format json
-ui test --backend mock --format json
-ui scenario run scenarios/counter.json --backend web-headless --out artifacts/runs/counter-web
-ui scenario run scenarios/counter.json --backend native-offscreen --out artifacts/runs/counter-native
-ui inspect dom --run artifacts/runs/counter-web --format json
-ui inspect a11y --run artifacts/runs/counter-web --format json
-ui capture --backend native-offscreen --out artifacts/counter
-ui shader check --format json
-ui bench --baseline main --format json
-ui mcp
+fino doctor --format json
+fino check --format json
+fino inspect dom --run artifacts/runs/counter-web --format json
+fino inspect a11y --run artifacts/runs/counter-web --format json
+fino shader check --format json
+fino bench --baseline main --format json
 ```
 
-默认输出适合人类；`--format json` 或 MCP 调用使用同一结构化结果。大快照写进 artifacts，命令只返回摘要与路径，避免把数兆 DOM 或 Base64 图片塞进上下文。每次场景运行必须返回稳定的 `run_id` 与 `run_dir`；`ui inspect --run` 读取已完成的运行产物，`ui inspect --session` 读取显式保活的调试会话，不依赖隐藏的全局应用状态。
+默认输出适合人类，`--format json` 返回 Agent 使用的同一结构化结果。大快照写进 artifacts，命令只返回摘要与路径，避免把数兆 DOM 或 Base64 图片塞进上下文。每次场景运行必须返回稳定的 `run_id` 与 `run_dir`；`fino inspect --run` 读取已完成的运行产物，`fino inspect --session` 读取显式保活的调试会话，不依赖隐藏的全局应用状态。
 
-### 少量高层 MCP 工具
+### 示例通过 Cargo 运行
 
-```text
-ui_check
-ui_run_scenario
-ui_inspect
-ui_capture
-ui_shader_check
-ui_run_benchmark
+每个示例拥有自己的组件、挂载函数、冒烟检查和场景运行器。开发者通过 Cargo 调用运行器，`fino_cli` 不承担任何示例专属工作：
+
+```bash
+cargo run -p fino_counter -- check --format json
+cargo run -p fino_counter -- scenario run scenarios/counter.json --backend mock --out artifacts/runs/counter-mock --format json
+cargo run -p fino_counter -- scenario run scenarios/counter.json --backend web-headless --out artifacts/runs/counter-web --format json
+cargo run -p fino_counter -- scenario run scenarios/counter.json --backend native-offscreen --out artifacts/runs/counter-native --format json
 ```
 
-MCP 参数与结果由 `serde + schemars` 定义。`rmcp` 只负责协议和传输，工具实现调用 `fino::cli` 内部的 library API，不通过解析人类终端文本获取结果。
+示例调用共享的 `fino::scenario` 与 `fino::headless` library 接口。`fino inspect` 只读取产物，不需要知道产物来自哪个示例。
+
+### Agent Skill
+
+仓库提供 `.agents/skills/fino/SKILL.md`，记录命令选择、基于 Cargo 的示例工作流、JSON 输出约定和产物导航。Skill 不包含场景实现、挂载注册表或业务逻辑；Agent 直接调用 CLI 与 Cargo 命令，不解析人类终端文本。
+
+初始工具链不包含 MCP。以后出现外部集成、鉴权或跨客户端访问需求时，可以增加适配层并复用同一结构化 CLI 结果，但不能形成第二套实现。
 
 ### 应用模板
 
@@ -193,12 +194,12 @@ src/                  # 应用组件与业务代码
 scenarios/            # AI 可执行的用户行为与断言
 assets/fonts/         # 许可明确、可复现的测试字体
 tests/                # Rust、后端一致性与宏测试
-ui.toml               # 后端、环境与快照配置
+fino.toml             # 后端、环境与快照配置
 AGENTS.md             # 项目命令、边界与验证要求
 artifacts/            # 可忽略生成的报告、图像与 trace
 ```
 
-业务应用不需要单独发明测试 Host。只要使用框架的组件、语义和平台服务，就自动获得 headless mount、输入场景、快照和性能计数。
+业务应用拥有自己的挂载与场景二进制，并通过 Cargo 运行，不需要单独发明测试 Host。只要使用框架的组件、语义和平台服务，就自动获得 headless mount、输入场景、快照和性能计数，同时不把应用依赖带入 `fino_cli`。
 
 ### AI 友好的 Rust／RSX 设计
 
