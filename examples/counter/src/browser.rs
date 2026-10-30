@@ -282,6 +282,8 @@ fn parse_report(stdout: &str, stderr: &[u8]) -> Result<DriverReport, ToolError> 
     })
 }
 
+/// Collects the names of failed browser checks for one structured error message.
+/// 收集失败浏览器检查的名称，用于单条结构化错误消息。
 fn failed_checks(checks: &[DriverCheck]) -> String {
     checks
         .iter()
@@ -294,6 +296,8 @@ fn failed_checks(checks: &[DriverCheck]) -> String {
         .join(", ")
 }
 
+/// Resolves a possibly relative path against the process working directory.
+/// 把可能为相对的路径解析到进程工作目录下。
 fn absolute(path: &Path) -> std::io::Result<PathBuf> {
     if path.is_absolute() {
         Ok(path.to_owned())
@@ -302,6 +306,8 @@ fn absolute(path: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
+/// Keeps structured errors readable when a child process emits a long log.
+/// 当子进程输出很长的日志时，保持结构化错误可读。
 /// Keeps structured errors readable when a child process emits a long log.
 /// 当子进程输出很长的日志时，保持结构化错误可读。
 fn tail(output: &str) -> String {

@@ -188,7 +188,7 @@ npm ci --prefix examples/counter/web
 npx --prefix examples/counter/web playwright install chromium
 ```
 
-缺少 Node.js、Playwright、Chromium 或版本匹配的 `wasm-bindgen` 时，运行器返回结构化失败，不跳过浏览器步骤。`WASM_BINDGEN`、`NODE` 与 `FINO_CHROMIUM` 可覆盖对应可执行文件路径。
+缺少 Node.js、Playwright、Chromium 或版本匹配的 `wasm-bindgen` 时，运行器返回结构化失败，不跳过浏览器步骤。`WASM_BINDGEN`、`NODE` 与 `FINO_CHROMIUM` 可覆盖对应可执行文件路径。驱动的路径与旧产物规则可用 `node --test examples/counter/web/lib/*.test.mjs` 单独验证。
 
 ### Agent Skill
 

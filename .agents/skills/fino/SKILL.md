@@ -32,10 +32,11 @@ The `web-headless` runner builds the wasm bundle and drives headless Chromium. I
 
 ```bash
 cargo test -p fino_counter --test web_browser -- --ignored
+node --test examples/counter/web/lib/*.test.mjs
 ```
 
-Run this browser test when changing the web backend; it is ignored in the default suite because it launches Chromium.
-修改 Web 后端时运行该浏览器测试；它因启动 Chromium 而默认被忽略。
+Run the browser test when changing the web backend; it is ignored in the default suite because it launches Chromium. The Node test covers driver path resolution, `/pkg/` traversal containment, and stale-artifact cleanup.
+修改 Web 后端时运行该浏览器测试；它因启动 Chromium 而默认被忽略。Node 测试覆盖驱动路径解析、`/pkg/` 路径穿越约束与旧产物清理。
 
 Run the same unchanged scenario on later backends through the example package, then inspect the resulting `run_dir`. Do not move the example's mount or checks into `fino_cli`.
 

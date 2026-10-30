@@ -109,17 +109,23 @@ pub fn run_scenario(scenario_json: &str, run_dir: &str) -> Result<String, JsValu
     .map_err(|error| tool_error("UI_ARTIFACT_SERIALIZATION", error.to_string()))
 }
 
+/// Mounts the shared counter and attaches its root to `document.body`.
+/// 挂载共享计数器并把其根节点附加到 `document.body`。
 fn mount_on_body(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
     let root = crate::mount_counter(runtime, owner);
     runtime.backend_mut().mount_to_body(&root);
     root
 }
 
+/// Builds a serialized `ToolError` JavaScript exception for browser callers.
+/// 为浏览器调用方构造序列化的 `ToolError` JavaScript 异常。
 fn tool_error(code: &str, message: String) -> JsValue {
     let error = ToolError::for_backend(code, message, "web-headless");
     JsValue::from_str(&serde_json::to_string(&error).expect("tool error JSON"))
 }
 
+/// Converts an owned tool error into the same JavaScript exception shape.
+/// 把已拥有的工具错误转换为相同的 JavaScript 异常形状。
 fn tool_error_value(error: ToolError) -> JsValue {
     JsValue::from_str(&serde_json::to_string(&error).expect("tool error JSON"))
 }

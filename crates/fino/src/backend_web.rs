@@ -71,6 +71,8 @@ enum WebBackendOp {
 }
 
 impl WebBackendOp {
+    /// Maps each mutation to the stable verb used by normalized trace events.
+    /// 将每种变更映射为规范化 trace 事件使用的稳定操作名。
     fn operation(&self) -> &'static str {
         match self {
             Self::CreateElement(_) => "create_element",
@@ -150,6 +152,8 @@ impl DomBackend {
         self.listeners.len()
     }
 
+    /// Assigns a stable creation-order identifier to one real browser node.
+    /// 为一个真实浏览器节点分配稳定的创建顺序标识。
     fn allocate_node(&mut self, node: Node, tag: Option<Tag>) -> WebNode {
         self.next_node += 1;
         let handle = WebNode { node, tag };
@@ -160,6 +164,8 @@ impl DomBackend {
         handle
     }
 
+    /// Looks up the stable identifier by comparing real DOM node identity.
+    /// 通过比较真实 DOM 节点身份查找稳定标识。
     fn record_id(&self, node: &Node) -> Option<u64> {
         self.nodes
             .iter()
@@ -167,6 +173,8 @@ impl DomBackend {
             .map(|record| record.id)
     }
 
+    /// Returns the tracked handle for a real node without copying its subtree.
+    /// 返回真实节点的受跟踪句柄，不复制其子树。
     fn record(&self, node: &Node) -> Option<WebNode> {
         self.nodes
             .iter()
@@ -174,6 +182,8 @@ impl DomBackend {
             .map(|record| record.node.clone())
     }
 
+    /// Materializes the current real child list so it can be traversed safely.
+    /// 具象化当前真实子节点列表，以便安全遍历。
     fn child_nodes(node: &Node) -> Vec<Node> {
         let children = node.child_nodes();
         (0..children.length())
@@ -216,6 +226,8 @@ impl DomBackend {
         nodes
     }
 
+    /// Borrows a tracked node as an element without changing its identity.
+    /// 把受跟踪节点借用为元素，且不改变其身份。
     fn element(node: &Node) -> &Element {
         node.unchecked_ref::<Element>()
     }
@@ -232,10 +244,14 @@ impl DomBackend {
             .to_owned()
     }
 
+    /// Formats one stable snapshot identifier from a real node.
+    /// 为一个真实节点格式化稳定快照标识。
     fn node_id_string(&self, node: &Node) -> Option<String> {
         self.record_id(node).map(|id| format!("node-{id}"))
     }
 
+    /// Appends one normalized operation to the inspection log.
+    /// 向检查日志追加一条规范化操作。
     fn emit(&mut self, operation: WebBackendOp) {
         self.operations.push(operation);
     }
@@ -245,6 +261,8 @@ impl crate::dom_api::DomBackend for DomBackend {
     type Node = WebNode;
     type Listener = WebListener;
 
+    /// Creates a real button element for the closed tag set.
+    /// 为封闭标签集合创建真实按钮元素。
     fn create_element(&mut self, tag: Tag) -> Self::Node {
         let name = match tag {
             Tag::Button => "button",
@@ -258,6 +276,8 @@ impl crate::dom_api::DomBackend for DomBackend {
         handle
     }
 
+    /// Creates a real text node with its initial content.
+    /// 创建带初始内容的真实文本节点。
     fn create_text(&mut self, value: &str) -> Self::Node {
         let text = self.document.create_text_node(value);
         let handle = self.allocate_node(text.unchecked_into(), None);
@@ -309,6 +329,8 @@ impl crate::dom_api::DomBackend for DomBackend {
         });
     }
 
+    /// Sets or removes one supported real DOM attribute.
+    /// 设置或移除一个受支持的真实 DOM 属性。
     fn set_attribute(&mut self, node: &Self::Node, name: Attribute, value: Option<&str>) {
         assert!(
             node.tag.is_some() && self.record_id(&node.node).is_some(),
@@ -366,6 +388,8 @@ impl crate::dom_api::DomBackend for DomBackend {
         handle
     }
 
+    /// Removes a live DOM listener and drops its retained Rust closure.
+    /// 移除存活的 DOM 监听器并释放其保留的 Rust 闭包。
     fn unlisten(&mut self, listener: Self::Listener) {
         if let Some(registration) = self.listeners.remove(&listener.0) {
             registration
@@ -382,10 +406,14 @@ impl crate::dom_api::DomBackend for DomBackend {
 }
 
 impl HeadlessBackend for DomBackend {
+    /// Returns the stable backend name used in results and traces.
+    /// 返回结果与 trace 使用的稳定后端名。
     fn backend_name(&self) -> &'static str {
         "web-headless"
     }
 
+    /// Reports the four logical snapshot capabilities backed by the real DOM.
+    /// 报告由真实 DOM 支撑的四种逻辑快照能力。
     fn supports_snapshot(&self, kind: SnapshotKind) -> bool {
         matches!(
             kind,
@@ -406,6 +434,8 @@ impl HeadlessBackend for DomBackend {
             .collect()
     }
 
+    /// Reads descendant text only from a tracked real node.
+    /// 仅从受跟踪的真实节点读取后代文本。
     fn text_content(&self, node: &Self::Node) -> Option<String> {
         self.record_id(&node.node)?;
         node.node.text_content()
@@ -510,6 +540,8 @@ impl HeadlessBackend for DomBackend {
         A11ySnapshot { schema: 1, nodes }
     }
 
+    /// Normalizes real DOM mutations into backend-neutral trace records.
+    /// 把真实 DOM 变更规范化为后端无关的 trace 记录。
     fn operation_log(&self) -> Vec<BackendOperation> {
         self.operations
             .iter()
@@ -521,6 +553,8 @@ impl HeadlessBackend for DomBackend {
     }
 }
 
+/// Maps the closed event contract to the browser's DOM event name.
+/// 把封闭事件契约映射为浏览器的 DOM 事件名。
 fn event_name(event: EventKind) -> &'static str {
     match event {
         EventKind::Click => "click",

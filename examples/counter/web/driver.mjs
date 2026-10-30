@@ -5,6 +5,9 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 
+import { cleanManagedArtifacts } from './lib/artifacts.mjs';
+import { pkgFileFor, webDirFrom } from './lib/paths.mjs';
+
 let chromium;
 const checks = [];
 try {
@@ -15,8 +18,13 @@ try {
 
 const args = parseArgs(process.argv.slice(2));
 
-// Reads one required driver argument.
-// 读取一个必需的驱动参数。
+/**
+ * Reads one required driver argument or reports a structured usage failure.
+ * 读取一个必需的驱动参数，或报告结构化用法失败。
+ *
+ * @param {string} name Argument name without the leading `--`.
+ * @returns {string} Argument value.
+ */
 function required(name) {
   const value = args.get(name);
   if (!value) {
@@ -25,6 +33,18 @@ function required(name) {
   return value;
 }
 
+/**
+ * Parses strict `--name value` pairs without shell interpretation.
+ *
+ * Only the expected argument shape is accepted; unknown positional input and
+ * missing values become structured failures instead of partial runs.
+ * 解析严格的 `--name value` 参数对，不经过 shell 解释。
+ *
+ * 只接受预期参数形状；未知位置参数和缺失值会转为结构化失败，而不是部分运行。
+ *
+ * @param {string[]} argv Driver arguments after the script path.
+ * @returns {Map<string, string>} Argument names mapped to values.
+ */
 function parseArgs(argv) {
   const parsed = new Map();
   for (let index = 0; index < argv.length; index += 1) {
@@ -42,18 +62,45 @@ function parseArgs(argv) {
   return parsed;
 }
 
+/**
+ * Fails the current browser check when a semantic condition is false.
+ * 当语义条件为假时使当前浏览器检查失败。
+ *
+ * @param {unknown} condition Condition that must be truthy.
+ * @param {string} message Failure message shown in the structured report.
+ */
 function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
   }
 }
 
+/**
+ * Compares two values strictly and reports both sides on mismatch.
+ * 严格比较两个值，并在不匹配时报告双方。
+ *
+ * @param {unknown} actual Observed value.
+ * @param {unknown} expected Required value.
+ * @param {string} label Field name included in the failure message.
+ */
 function assertEqual(actual, expected, label) {
   if (actual !== expected) {
     throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
   }
 }
 
+/**
+ * Runs one named browser check and records its outcome exactly once.
+ *
+ * A failure is recorded before rethrowing so the final report shows which
+ * guarantee broke instead of only a generic driver error.
+ * 运行单个具名浏览器检查并只记录一次结果。
+ *
+ * 失败会在重新抛出前记录，使最终报告指出被破坏的保证，而不只是通用驱动错误。
+ *
+ * @param {string} name Stable check name used in `browser.json`.
+ * @param {() => Promise<void>} operation Check body.
+ */
 async function runCheck(name, operation) {
   try {
     await operation();
@@ -64,8 +111,19 @@ async function runCheck(name, operation) {
   }
 }
 
-// Reports a structured failure without pretending the run succeeded.
-// 报告结构化失败，绝不伪装成成功。
+/**
+ * Writes a structured failure payload and sets a non-zero exit code.
+ *
+ * The browser and server still shut down through the surrounding `finally`
+ * block, so failed checks do not leak Chromium processes.
+ * 写入结构化失败负载并设置非零退出码。
+ *
+ * 浏览器与服务器仍会通过外层 `finally` 关闭，因此失败检查不会泄漏 Chromium 进程。
+ *
+ * @param {string} code Stable tool error code.
+ * @param {string} message Human-readable failure message.
+ * @param {unknown} [report] Optional scenario result retained for diagnostics.
+ */
 function emitFailure(code, message, report = undefined) {
   const payload = {
     status: 'failed',
@@ -77,29 +135,60 @@ function emitFailure(code, message, report = undefined) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
 }
 
+/**
+ * Reports a fatal argument or setup failure and exits immediately.
+ * 报告致命参数或初始化失败并立即退出。
+ *
+ * @param {string} code Stable tool error code.
+ * @param {string} message Human-readable failure message.
+ * @param {unknown} [report] Optional scenario result retained for diagnostics.
+ */
 function fail(code, message, report = undefined) {
   emitFailure(code, message, report);
   process.exit(1);
 }
 
+/**
+ * Clears previous managed outputs before any browser check or scenario runs.
+ *
+ * Only the declared managed artifacts and capture directory are removed, so
+ * unrelated files in a reused directory survive a failed or partial rerun.
+ * 在任何浏览器检查或场景运行前清除上一次的受管输出。
+ *
+ * 只删除声明的受管产物与捕获目录，因此复用目录中的无关文件会在失败或不完整重跑后保留。
+ *
+ * @param {string} directory Absolute output directory.
+ */
+function cleanOutDir(directory) {
+  try {
+    cleanManagedArtifacts(directory);
+  } catch (error) {
+    fail('UI_ARTIFACT_IO', `failed to clean ${directory}: ${error.message}`);
+  }
+}
+
 const pkgDir = path.resolve(required('pkg'));
-const webDir = path.resolve(path.dirname(new URL(import.meta.url).pathname));
+const webDir = path.resolve(webDirFrom(import.meta.url));
 const outDir = path.resolve(required('out'));
 const runDirLabel = required('run-dir-label');
 const scenarioPath = path.resolve(required('scenario'));
 const browserPath = args.get('browser');
+
+cleanOutDir(outDir);
+
 const scenario = fs.readFileSync(scenarioPath, 'utf8');
 const scenarioDocument = JSON.parse(scenario);
 const environment = scenarioDocument.environment;
 
 const server = http.createServer((request, response) => {
-  const pathname = decodeURIComponent(new URL(request.url, 'http://127.0.0.1').pathname);
+  const pathname = new URL(request.url, 'http://127.0.0.1').pathname;
   let file;
   if (pathname === '/' || pathname === '/index.html') {
     file = path.join(webDir, 'index.html');
-  } else if (pathname.startsWith('/pkg/')) {
-    file = path.join(pkgDir, pathname.slice('/pkg/'.length));
   } else {
+    file = pkgFileFor(pkgDir, pathname);
+  }
+  if (!file) {
     response.writeHead(404);
     response.end('not found');
     return;
@@ -192,6 +281,17 @@ try {
 
   // Reports the live DOM state without trusting the Rust snapshot alone.
   // 读取实时 DOM 状态，不只信任 Rust 快照。
+  /**
+   * Reads live DOM identity, mutation counts, and reactive counters.
+   *
+   * The button and both text nodes are compared by reference so a recreation
+   * cannot satisfy a text-only assertion.
+   * 读取实时 DOM 身份、变更计数与响应式计数。
+   *
+   * 按钮与两个文本节点按引用比较，因此重建节点无法满足仅检查文本的断言。
+   *
+   * @returns {Promise<object>} Snapshot of the probed page state.
+   */
   const probe = () =>
     page.evaluate(() => {
       const { button, texts, counts, counter } = window.__finoProbe;

@@ -58,9 +58,26 @@ jobs:
       # The CLI version must match the wasm-bindgen crate exactly.
       # CLI 版本必须与 wasm-bindgen crate 完全一致。
       - name: Install wasm-bindgen
+        env:
+          WASM_BINDGEN_ARCHIVE: wasm-bindgen-0.2.129-x86_64-unknown-linux-musl.tar.gz
+          WASM_BINDGEN_RELEASE: https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.129
         run: |
-          curl -sSfL https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.129/wasm-bindgen-0.2.129-x86_64-unknown-linux-musl.tar.gz | tar xz
+          cd "$RUNNER_TEMP"
+          curl -sSfL --retry 3 -o "$WASM_BINDGEN_ARCHIVE" "$WASM_BINDGEN_RELEASE/$WASM_BINDGEN_ARCHIVE"
+          curl -sSfL --retry 3 -o "$WASM_BINDGEN_ARCHIVE.sha256sum" "$WASM_BINDGEN_RELEASE/$WASM_BINDGEN_ARCHIVE.sha256sum"
+          expected="$(awk '{print $1}' "$WASM_BINDGEN_ARCHIVE.sha256sum")"
+          actual="$(sha256sum "$WASM_BINDGEN_ARCHIVE" | awk '{print $1}')"
+          if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+            echo "wasm-bindgen checksum mismatch: publisher=$expected actual=$actual" >&2
+            exit 1
+          fi
+          tar xzf "$WASM_BINDGEN_ARCHIVE"
           sudo mv wasm-bindgen-0.2.129-x86_64-unknown-linux-musl/wasm-bindgen /usr/local/bin/
+          wasm-bindgen --version
+      # Driver path, traversal, and stale-artifact rules run without Chromium.
+      # 驱动路径、路径穿越与旧产物规则无需 Chromium 即可运行。
+      - name: Test browser driver helpers
+        run: node --test examples/counter/web/lib/*.test.mjs
       # Playwright owns Chromium download and system dependencies.
       # Chromium 下载与系统依赖由 Playwright 负责。
       - name: Install Playwright

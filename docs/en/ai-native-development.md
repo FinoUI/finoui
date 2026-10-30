@@ -188,7 +188,7 @@ npm ci --prefix examples/counter/web
 npx --prefix examples/counter/web playwright install chromium
 ```
 
-When Node.js, Playwright, Chromium, or a matching `wasm-bindgen` is missing, the runner returns a structured failure instead of skipping the browser step. `WASM_BINDGEN`, `NODE`, and `FINO_CHROMIUM` override the corresponding executable paths.
+When Node.js, Playwright, Chromium, or a matching `wasm-bindgen` is missing, the runner returns a structured failure instead of skipping the browser step. `WASM_BINDGEN`, `NODE`, and `FINO_CHROMIUM` override the corresponding executable paths. The driver's path and stale-artifact rules can be checked separately with `node --test examples/counter/web/lib/*.test.mjs`.
 
 ### Agent Skill
 

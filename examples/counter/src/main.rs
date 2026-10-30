@@ -188,6 +188,8 @@ fn output_error(error: ToolError, format: OutputFormat) -> ExitCode {
     ExitCode::from(2)
 }
 
+/// Prints one machine-readable value as stable pretty JSON.
+/// 以稳定格式化 JSON 输出单个机器可读值。
 fn print_json(value: &impl Serialize) {
     println!(
         "{}",

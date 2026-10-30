@@ -420,6 +420,8 @@ struct FsArtifactSink {
 }
 
 impl FsArtifactSink {
+    /// Creates a filesystem sink rooted at the caller-supplied run directory.
+    /// 创建以调用方运行目录为根的文件系统接收器。
     fn new(root: &Path) -> Self {
         Self {
             root: root.to_owned(),
@@ -427,12 +429,16 @@ impl FsArtifactSink {
         }
     }
 
+    /// Joins one managed relative artifact path to the run directory.
+    /// 把一个受管相对产物路径拼接到运行目录。
     fn path(&self, relative: &str) -> PathBuf {
         self.root.join(relative)
     }
 }
 
 impl ArtifactSink for FsArtifactSink {
+    /// Creates the run directory before any scenario work begins.
+    /// 在任何场景工作开始前创建运行目录。
     fn prepare(&mut self) -> Result<(), ToolError> {
         fs::create_dir_all(&self.root).map_err(|error| {
             ToolError::new(
@@ -442,6 +448,8 @@ impl ArtifactSink for FsArtifactSink {
         })
     }
 
+    /// Creates one capture directory on disk.
+    /// 在磁盘上创建一个捕获目录。
     fn create_dir(&mut self, relative: &str) -> Result<(), ToolError> {
         let path = self.path(relative);
         fs::create_dir_all(&path).map_err(|error| {
@@ -452,6 +460,8 @@ impl ArtifactSink for FsArtifactSink {
         })
     }
 
+    /// Writes bytes and records the same bytes for caller inspection.
+    /// 写入字节，并记录相同字节供调用方检查。
     fn write(&mut self, relative: &str, bytes: &[u8]) -> Result<(), ToolError> {
         let path = self.path(relative);
         if let Some(parent) = path.parent() {
@@ -472,6 +482,8 @@ impl ArtifactSink for FsArtifactSink {
         Ok(())
     }
 
+    /// Removes one stale artifact while treating absence as success.
+    /// 删除一个过期产物，并把不存在视为成功。
     fn remove(&mut self, relative: &str) -> Result<(), ToolError> {
         let path = self.path(relative);
         match fs::remove_file(&path) {
@@ -488,6 +500,8 @@ impl ArtifactSink for FsArtifactSink {
         Ok(())
     }
 
+    /// Returns all artifacts written so far in stable path order.
+    /// 按稳定路径顺序返回目前写入的全部产物。
     fn artifacts(&self) -> &BTreeMap<String, Vec<u8>> {
         &self.artifacts
     }
@@ -501,24 +515,34 @@ struct MemoryArtifactSink {
 }
 
 impl ArtifactSink for MemoryArtifactSink {
+    /// Has no directory to create before an in-memory run.
+    /// 内存运行前没有需要创建的目录。
     fn prepare(&mut self) -> Result<(), ToolError> {
         Ok(())
     }
 
+    /// Ignores capture directories because memory has no directory structure.
+    /// 内存没有目录结构，因此忽略捕获目录。
     fn create_dir(&mut self, _relative: &str) -> Result<(), ToolError> {
         Ok(())
     }
 
+    /// Stores artifact bytes under their managed relative path.
+    /// 按受管相对路径保存产物字节。
     fn write(&mut self, relative: &str, bytes: &[u8]) -> Result<(), ToolError> {
         self.artifacts.insert(relative.to_owned(), bytes.to_vec());
         Ok(())
     }
 
+    /// Drops one managed artifact from memory.
+    /// 从内存中删除一个受管产物。
     fn remove(&mut self, relative: &str) -> Result<(), ToolError> {
         self.artifacts.remove(relative);
         Ok(())
     }
 
+    /// Returns all artifacts written so far in stable path order.
+    /// 按稳定路径顺序返回目前写入的全部产物。
     fn artifacts(&self) -> &BTreeMap<String, Vec<u8>> {
         &self.artifacts
     }
