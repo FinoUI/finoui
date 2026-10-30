@@ -306,27 +306,34 @@ mod tests {
         owner.dispose();
     }
 
-    /// Verifies guard-based restoration after unwinding and no leakage into later reads.
-    /// 验证 panic 展开时 guard 恢复状态，后续读取不受泄漏影响。
+    /// Verifies guard-based restoration within the same effect run after unwinding.
+    /// 验证 panic 展开后 guard 在同一次 Effect 运行内恢复状态。
     #[test]
     fn untracked_panic_restores_diagnostic_tracking_state() {
         let _guard = lock();
         let owner = Owner::new();
         let inside = owner.signal_named("test/panic-inside", 0_i32);
         let outside = owner.signal_named("test/panic-outside", 0_i32);
-        let observed = inside.clone();
-        let outcome = catch_unwind(AssertUnwindSafe(|| {
-            owner.effect_named("test/panicking-untracked", move || {
+        let observed_inside = inside.clone();
+        let observed_outside = outside.clone();
+        owner.effect_named("test/panicking-untracked", move || {
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
                 untracked(|| {
-                    observed.get();
+                    observed_inside.get();
                     panic!("untracked restoration regression");
                 });
-            });
-        }));
-        assert!(outcome.is_err());
+            }));
+            assert!(outcome.is_err());
 
-        outside.get();
-        assert!(owner.snapshot().effects[0].dependencies.is_empty());
+            // Still inside the effect run, so this read proves `untracked` restored tracking.
+            // 仍处于该 Effect 运行内，因此这次读取能证明 `untracked` 已恢复追踪。
+            observed_outside.get();
+        });
+
+        // `outside` is the second signal, so the effect depends on it and not on `inside`.
+        // `outside` 是第二个 Signal，因此该 Effect 只依赖它而不依赖 `inside`。
+        let effects = owner.snapshot().effects;
+        assert_eq!(effects[0].dependencies, vec!["signal-2".to_owned()]);
         owner.dispose();
     }
 
