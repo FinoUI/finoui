@@ -116,7 +116,7 @@ Web：DomBackend::Node = 浏览器节点句柄
 Native：DomBackend::Node = NodeId { index, generation }
 ```
 
-Web 不额外维护一棵镜像 DOM。原生端由 `fino::native_dom` 保存：
+Web 不额外维护一棵镜像 DOM。原生端每个 `WindowContext` 拥有独立 DOM 根节点与 `NodeId` 空间，由 `fino::native_dom` 保存：
 
 ```rust
 pub struct NodeData {
@@ -154,15 +154,15 @@ pub struct NodeData {
 几何访问分为：
 
 ```rust
-committed_bounds(node)        // Reads a committed snapshot without computation.
-                              // 读取已提交快照，不触发计算。
-request_current_bounds(node) // Explicit request completed after a layout scheduling point.
-                              // 显式请求，在布局调度点后完成。
+committed_bounds(window, node) // Reads a committed snapshot without computation.
+                               // 读取已提交快照，不触发计算。
+request_current_bounds(window, node) // Explicit request completed after a layout scheduling point.
+                                     // 显式请求，在布局调度点后完成。
 measure_text(shaped, constraints) // Pure text computation, independent of DOM mounting.
                                   // 纯文本计算，与 DOM 挂载无关。
 ```
 
-布局引擎是原生几何的事实来源，DOM 只保存布局结果引用。
+每次几何请求都携带 `WindowId`，不读取隐含当前窗口。布局引擎是原生几何的事实来源，DOM 只保存布局结果引用。
 
 ### 帧管线
 

@@ -31,6 +31,10 @@ Fino 是一套以 Rust 实现的跨端 UI 框架。它采用 SolidJS 哲学的�
 
 默认样式作者接口采用受控的 Tailwind 风格 `class` 子集，并编译为强类型 Style IR。Web CSS 由 Style IR 生成，原生后端直接消费 Style IR。Fino 的定位是 Tailwind-like，而非 Tailwind-compatible；Utility 是作者接口，Style IR 才是跨端事实来源。
 
+所有跨语言能力统一经过版本化、句柄化的 API。Rust RSX 是一等作者接口，但不是跨语言 ABI；其他语言不得直接绑定内部 Rust 类型。详见[多语言绑定](bindings.md)。
+
+桌面多窗口是一等能力。原生 Host 从首个原生计数器开始采用 `Application → WindowManager → WindowContext`，输入、几何、绘制与生命周期契约都携带窗口身份。详见[多窗口架构](windows.md)。
+
 ## 设计目标与非目标
 
 ### 核心目标
@@ -44,6 +48,8 @@ Fino 是一套以 Rust 实现的跨端 UI 框架。它采用 SolidJS 哲学的�
 | 文本可预测 | `shape` 与 `layout` 分离，文本测量不要求节点挂载 |
 | GPU 效果可扩展 | WGSL Material、Effect 与 GpuSurface 是一等绘制能力 |
 | 全平台可演进 | 核心不包含具体窗口、GPU、DOM 或异步运行时类型 |
+| 多语言绑定 | 版本化句柄与无泛型语义隔离其他语言和 Rust 布局、泛型、闭包、生命周期 |
+| 桌面多窗口 | 每个窗口拥有独立 UI 与帧状态，应用 Owner 和可共享渲染资源的生命周期不受单个窗口关闭影响 |
 | 可验证 | 每个后端运行同一套一致性测试，性能指标可观测 |
 | 成熟 crate 优先 | 自研只用于差异化层，不重复实现已有文本、布局、GPU 与协议算法 |
 | AI 原生 | 框架与应用都能通过结构化 CLI、场景和快照完成无头开发闭环 |
@@ -72,6 +78,8 @@ Fino 是一套以 Rust 实现的跨端 UI 框架。它采用 SolidJS 哲学的�
 | 布局读取 | 显式、分阶段、可缓存 | 读取几何时隐式 flush 全树 |
 | 自定义 GPU | Material / Effect / GpuSurface 三类接口 | 所有需求都塞进一个 ShaderNode |
 | 后端选择 | 编译期单后端，泛型静态分发 | 每个节点操作都经过动态分发 |
+| 跨语言 ABI | 版本化、带 generation 的句柄与无泛型语义 | 直接绑定 Rust 泛型、引用、闭包、`Result`、`Vec` 或响应式图对象 |
+| 原生窗口模型 | 首个原生 Host 即采用 `Application → WindowManager → WindowContext` | 全局单窗口状态或通过 `current_window()` 路由事件 |
 
 ## 总体分层
 
@@ -173,6 +181,8 @@ examples/
 第三后端：Native wgpu
 Web 布局：BrowserFlow
 Native 结构：arena + generational NodeId
+原生 Host：首个原生计数器即采用 Application → WindowManager → WindowContext
+跨语言 ABI：版本化 fino_api 句柄；C ABI 与 WASM 为传输层；不暴露内部 Rust 类型
 样式：受控 Tailwind 风格 class → 强类型 Style IR；Web CSS 为生成物
 文本接口：TextSpec → ShapedText → TextLayout
 布局读取：禁止隐式同步 flush

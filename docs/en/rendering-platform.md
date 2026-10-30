@@ -66,6 +66,8 @@ A host only:
 
 The UI core has no direct knowledge of Activity, UIKit, DOM Window, or winit Window.
 
+Desktop hosts use `Application → WindowManager → WindowContext` from the first native counter. Each `WindowContext` owns its DOM root, focus, accessibility, input routing, layout/paint state, surface, and frame requests. `SharedRenderContext` retains the GPU device, queue, pipelines, glyph caches, and other shareable resources. See [Multi-window architecture](windows.md).
+
 ### Unified lifecycle
 
 ```text
@@ -77,7 +79,7 @@ Resumed
 HostDestroyed
 ```
 
-UI state, the DOM, and ShapedText must survive surface loss. The host and renderer recreate GPU devices, surfaces, and swapchain resources.
+UI state, the DOM, and ShapedText must survive surface loss. Surface lifecycle events and frame requests are scoped by `WindowId`; rebuilding one window's surface must not invalidate another window. The host and renderer recreate GPU devices, surfaces, and swapchain resources according to their distinct application, window, and surface lifetimes.
 
 ### Input and semantics
 

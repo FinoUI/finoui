@@ -66,6 +66,8 @@ Host 只负责：
 
 UI Core 不直接认识 Activity、UIKit、DOM Window 或 winit Window。
 
+桌面 Host 从首个原生计数器开始采用 `Application → WindowManager → WindowContext`。每个 `WindowContext` 拥有自己的 DOM 根节点、焦点、无障碍、输入路由、布局与绘制状态、Surface 和帧请求；`SharedRenderContext` 保存 GPU Device、Queue、Pipeline、Glyph 缓存与其他可共享资源。详见[多窗口架构](windows.md)。
+
 ### 统一生命周期
 
 ```text
@@ -77,7 +79,7 @@ Resumed
 HostDestroyed
 ```
 
-UI 状态、DOM 与 ShapedText 必须能在 Surface 丢失后保留。GPU Device、Surface 与交换链资源由 Host/Renderer 重建。
+UI 状态、DOM 与 ShapedText 必须能在 Surface 丢失后保留。Surface 生命周期事件与帧请求按 `WindowId` 隔离，重建一个窗口的 Surface 不得使其他窗口失效。Host/Renderer 按应用、窗口和 Surface 各自的生命周期重建 GPU Device、Surface 与交换链资源。
 
 ### 输入与语义
 

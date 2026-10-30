@@ -116,7 +116,7 @@ Web: DomBackend::Node = browser node handle
 Native: DomBackend::Node = NodeId { index, generation }
 ```
 
-Web does not maintain an additional mirror DOM. On native platforms, `fino::native_dom` stores:
+Web does not maintain an additional mirror DOM. Each native `WindowContext` owns an independent DOM root and `NodeId` space, and `fino::native_dom` stores:
 
 ```rust
 pub struct NodeData {
@@ -154,15 +154,15 @@ The core DOM API has no `width()`, `offset_height()`, or `get_bounding_client_re
 Geometry access is divided into:
 
 ```rust
-committed_bounds(node)        // Reads a committed snapshot without computation.
-                              // 读取已提交快照，不触发计算。
-request_current_bounds(node) // Explicit request completed after a layout scheduling point.
-                              // 显式请求，在布局调度点后完成。
+committed_bounds(window, node) // Reads a committed snapshot without computation.
+                               // 读取已提交快照，不触发计算。
+request_current_bounds(window, node) // Explicit request completed after a layout scheduling point.
+                                     // 显式请求，在布局调度点后完成。
 measure_text(shaped, constraints) // Pure text computation, independent of DOM mounting.
                                   // 纯文本计算，与 DOM 挂载无关。
 ```
 
-The layout engine is the native source of truth for geometry. The DOM only retains references to layout results.
+Every geometry request carries a `WindowId`; no implicit current window is consulted. The layout engine is the native source of truth for geometry. The DOM only retains references to layout results.
 
 ### Frame pipeline
 

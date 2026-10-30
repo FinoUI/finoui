@@ -7,6 +7,8 @@ Fino 是一套以 Rust 实现的跨端 UI 框架，采用细粒度响应式模�
 ## 文档
 
 - [基础架构](docs/zh-cn/architecture.md)
+- [多语言绑定](docs/zh-cn/bindings.md)
+- [多窗口架构](docs/zh-cn/windows.md)
 - [运行时与 DOM API](docs/zh-cn/runtime.md)
 - [文本与布局](docs/zh-cn/text-layout.md)
 - [渲染与平台 Host](docs/zh-cn/rendering-platform.md)

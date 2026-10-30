@@ -31,6 +31,10 @@ In short:
 
 The default style-authoring interface is a controlled, Tailwind-like `class` subset compiled into strongly typed Style IR. Web CSS is generated from that IR, while native backends consume it directly. Fino is Tailwind-like rather than Tailwind-compatible: Utility is the authoring syntax, and Style IR is the cross-platform source of truth.
 
+All cross-language capabilities use a versioned, handle-based API. Rust RSX is a first-class authoring interface, not the cross-language ABI; other languages never bind internal Rust types. See [Multi-language bindings](bindings.md).
+
+Desktop multi-window support is first-class. Native hosts use `Application → WindowManager → WindowContext` from the first native counter, including window identity in input, geometry, paint, and lifecycle contracts. See [Multi-window architecture](windows.md).
+
 ## Goals and non-goals
 
 ### Core goals
@@ -44,6 +48,8 @@ The default style-authoring interface is a controlled, Tailwind-like `class` sub
 | Predictable text | `shape` and `layout` are separate, and text measurement does not require mounted nodes |
 | Extensible GPU effects | WGSL materials, effects, and GPU surfaces are first-class painting capabilities |
 | Evolution on every platform | The core contains no concrete window, GPU, DOM, or async-runtime types |
+| Multi-language bindings | Versioned handles and non-generic semantics isolate other languages from Rust layouts, generics, closures, and lifetimes |
+| Desktop multi-window | Every window has independent UI and frame state, while application owners and shareable rendering resources outlive individual windows |
 | Verifiability | Every backend runs the same conformance tests, and performance metrics are observable |
 | Mature crates first | Custom implementation is reserved for differentiating layers rather than repeating existing text, layout, GPU, and protocol algorithms |
 | AI-native | Framework and application development both support a headless feedback loop through structured CLI commands, scenarios, and snapshots |
@@ -72,6 +78,8 @@ The first major version does not aim to provide:
 | Layout reads | Explicit, phased, and cacheable | Implicitly flushing the whole tree during geometry reads |
 | Custom GPU work | Material, Effect, and GpuSurface interfaces | Routing every requirement through one ShaderNode |
 | Backend selection | One backend at compile time with generic static dispatch | Dynamic dispatch for every node operation |
+| Cross-language ABI | Versioned, generational handles over non-generic semantics | Binding Rust generics, references, closures, `Result`, `Vec`, or reactive-graph objects directly |
+| Native window model | `Application → WindowManager → WindowContext` from the first native host | Global single-window state or event routing through `current_window()` |
 
 ## System layers
 
@@ -173,6 +181,8 @@ Second backend: Web DOM
 Third backend: Native wgpu
 Web layout: BrowserFlow
 Native structure: arena + generational NodeId
+Native host: Application → WindowManager → WindowContext from the first native counter
+Cross-language ABI: versioned fino_api handles; C ABI and WASM are transports; no internal Rust types
 Styles: controlled Tailwind-like class syntax → strongly typed Style IR; Web CSS is generated
 Text API: TextSpec → ShapedText → TextLayout
 Layout reads: no implicit synchronous flush
