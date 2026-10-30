@@ -5,6 +5,8 @@ use std::{panic::AssertUnwindSafe, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use fino::scenario::{self, ScenarioResult, Status, ToolError};
+#[cfg(not(target_arch = "wasm32"))]
+use fino_counter::runner::run_native_offscreen_scenario;
 use fino_counter::{
     browser::run_web_scenario,
     runner::{check_counter, run_mock_scenario},
@@ -34,6 +36,15 @@ enum Command {
         #[command(subcommand)]
         command: ScenarioCommand,
     },
+    /// Opens the native winit/wgpu counter window.
+    /// 打开原生 winit/wgpu 计数器窗口。
+    #[cfg(not(target_arch = "wasm32"))]
+    Native {
+        /// Clicks the button twice through the real window input path, then exits.
+        /// 通过真实窗口输入路径点击按钮两次后退出。
+        #[arg(long)]
+        smoke: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -55,6 +66,7 @@ enum ScenarioCommand {
 enum Backend {
     Mock,
     WebHeadless,
+    NativeOffscreen,
 }
 
 impl Backend {
@@ -64,6 +76,7 @@ impl Backend {
         match self {
             Self::Mock => "mock",
             Self::WebHeadless => "web",
+            Self::NativeOffscreen => "native",
         }
     }
 }
@@ -116,6 +129,8 @@ fn run() -> ExitCode {
             let run = scenario::load_scenario(&path).and_then(|scenario| match backend {
                 Backend::Mock => run_mock_scenario(&scenario, &out),
                 Backend::WebHeadless => run_web_scenario(&path, &out),
+                #[cfg(not(target_arch = "wasm32"))]
+                Backend::NativeOffscreen => run_native_offscreen_scenario(&scenario, &out),
             });
             match run {
                 Ok(result) => {
@@ -126,6 +141,14 @@ fn run() -> ExitCode {
                 Err(error) => output_error(error, format),
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        Command::Native { smoke } => match fino_counter::native::run(smoke) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => output_error(
+                ToolError::for_backend("UI_NATIVE_HOST", error.to_string(), "native"),
+                panic_output_format(),
+            ),
+        },
     }
 }
 

@@ -16,6 +16,11 @@ pub mod runner;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod browser;
 
+/// Native winit/wgpu host for the same counter.
+/// 同一计数器的原生 winit/wgpu Host。
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native;
+
 /// wasm browser entry points that mount the shared counter on `document.body`.
 /// 将共享计数器挂载到 `document.body` 的 wasm 浏览器入口。
 #[cfg(target_arch = "wasm32")]
@@ -27,6 +32,17 @@ pub fn mount_counter<B: DomBackend + 'static>(runtime: &mut Runtime<B>, owner: &
     mount_counter_with_state(runtime, owner).0
 }
 
+/// Mounts the counter against an application-owned shared count signal.
+/// 使用应用持有的共享计数 Signal 挂载计数器。
+pub fn mount_counter_with_count<B: DomBackend + 'static>(
+    runtime: &mut Runtime<B>,
+    owner: &Owner,
+    count: Signal<i32>,
+) -> B::Node {
+    runtime.component_executions().increment();
+    build_counter(runtime, owner, count)
+}
+
 pub(crate) fn mount_counter_with_state<B: DomBackend + 'static>(
     runtime: &mut Runtime<B>,
     owner: &Owner,
@@ -34,6 +50,15 @@ pub(crate) fn mount_counter_with_state<B: DomBackend + 'static>(
     runtime.component_executions().increment();
 
     let count = owner.signal_named("counter/count", 0_i32);
+    let button = build_counter(runtime, owner, count.clone());
+    (button, count)
+}
+
+fn build_counter<B: DomBackend + 'static>(
+    runtime: &mut Runtime<B>,
+    owner: &Owner,
+    count: Signal<i32>,
+) -> B::Node {
     let button = runtime.backend_mut().create_element(Tag::Button);
     let prefix = runtime.backend_mut().create_text("Count: ");
     let value = runtime.backend_mut().create_text("");
@@ -50,13 +75,13 @@ pub(crate) fn mount_counter_with_state<B: DomBackend + 'static>(
     });
 
     let text_node = value.clone();
-    let text_count = count.clone();
+    let text_count = count;
     runtime.effect(owner, "counter/text", move |cx| {
         let next = text_count.get().to_string();
         cx.backend_mut().set_text(&text_node, &next);
     });
 
-    (button, count)
+    button
 }
 
 #[cfg(test)]

@@ -59,4 +59,34 @@ fn cargo_check_and_scenario_commands_form_a_json_loop() {
             .iter()
             .any(|node| node["text"] == "1")
     );
+
+    let native_dir = temporary.path().join("counter-native");
+    let native = counter()
+        .arg("scenario")
+        .arg("run")
+        .arg(scenario_path())
+        .arg("--backend")
+        .arg("native-offscreen")
+        .arg("--out")
+        .arg(&native_dir)
+        .args(["--format", "json"])
+        .output()
+        .expect("native counter scenario output");
+    assert!(
+        native.status.success(),
+        "native counter scenario failed: {}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+    let native: Value = serde_json::from_slice(&native.stdout).expect("native scenario JSON");
+    assert_eq!(native["status"], "passed");
+    assert_eq!(native["backend"], "native-offscreen");
+    assert_eq!(native["counters"]["component_executions"], 1);
+    let native_dom = inspect_artifact(&native_dir, SnapshotKind::Dom).expect("native DOM");
+    assert!(
+        native_dom["nodes"]
+            .as_array()
+            .expect("native dom nodes")
+            .iter()
+            .any(|node| node["text"] == "1")
+    );
 }

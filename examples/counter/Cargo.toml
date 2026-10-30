@@ -19,6 +19,11 @@ serde_json.workspace = true
 fino = { path = "../../crates/fino", features = ["web"] }
 wasm-bindgen.workspace = true
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fino = { path = "../../crates/fino", features = ["native"] }
+winit.workspace = true
+wgpu.workspace = true
+
 [dev-dependencies]
 schemars.workspace = true
 tempfile.workspace = true

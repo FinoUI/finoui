@@ -285,6 +285,16 @@ pub trait HeadlessBackend: DomBackend {
     /// Returns normalized structured operations in stable order.
     /// 按稳定顺序返回规范化结构化操作。
     fn operation_log(&self) -> Vec<BackendOperation>;
+    /// Captures real layout state when the backend supports it.
+    /// 后端支持时捕获真实布局状态。
+    fn layout_snapshot(&mut self) -> Option<Value> {
+        None
+    }
+    /// Captures the real display list when the backend supports it.
+    /// 后端支持时捕获真实绘制列表。
+    fn display_list_snapshot(&mut self) -> Option<Value> {
+        None
+    }
 }
 
 /// Structured headless action failure.
@@ -386,6 +396,12 @@ impl<B: HeadlessBackend + 'static> HeadlessHost<B> {
     /// 返回 Runtime，用于聚焦的后端与生命周期测试。
     pub fn runtime(&self) -> &Runtime<B> {
         &self.runtime
+    }
+
+    /// Returns the runtime for explicit layout or paint snapshot refreshes.
+    /// 返回 Runtime，用于显式刷新布局或绘制快照。
+    pub fn runtime_mut(&mut self) -> &mut Runtime<B> {
+        &mut self.runtime
     }
 
     /// Returns the root owner.

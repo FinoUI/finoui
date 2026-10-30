@@ -3,6 +3,8 @@
 
 use std::path::Path;
 
+#[cfg(not(target_arch = "wasm32"))]
+use fino::native::{Size, offscreen_backend};
 use fino::{
     backend_mock::MockBackend,
     dom_api::{Role, Selector},
@@ -84,6 +86,22 @@ pub fn check_counter() -> CounterCheckReport {
 /// 将计数器 mount 显式传给通用 library 并运行场景。
 pub fn run_mock_scenario(scenario: &Scenario, run_dir: &Path) -> Result<ScenarioResult, ToolError> {
     let host = HeadlessHost::new(MockBackend::new(), scenario.environment.clone());
+    scenario::run_on_host(scenario, run_dir, host, mount_counter)
+}
+
+/// Runs the same scenario on the real native text/layout/paint backend without a GPU surface.
+/// 在无 GPU Surface 的真实原生文本、布局与绘制后端上运行同一场景。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_native_offscreen_scenario(
+    scenario: &Scenario,
+    run_dir: &Path,
+) -> Result<ScenarioResult, ToolError> {
+    let [width, height] = scenario.environment.viewport;
+    let backend = offscreen_backend(
+        Size::new(width as f32, height as f32),
+        scenario.environment.dpr as f32,
+    );
+    let host = HeadlessHost::new(backend, scenario.environment.clone());
     scenario::run_on_host(scenario, run_dir, host, mount_counter)
 }
 
