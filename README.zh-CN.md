@@ -14,3 +14,17 @@ Fino 是一套以 Rust 实现的跨端 UI 框架，采用细粒度响应式模�
 - [依赖策略](docs/zh-cn/dependencies.md)
 - [AI 原生开发](docs/zh-cn/ai-native-development.md)
 - [演进路线与风险](docs/zh-cn/roadmap.md)
+
+## 开发
+
+安装 [pre-commit](https://pre-commit.com/) 并启用 Rust hooks：
+
+```bash
+pre-commit install
+```
+
+手动运行与 CI 相同的检查：
+
+```bash
+pre-commit run --all-files
+```

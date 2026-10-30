@@ -35,3 +35,5 @@ Prefix every commit subject with exactly one [Gitmoji](https://gitmoji.dev/) emo
 ## Before finishing
 
 `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` pass, and every comment and doc touched has its other language staged in the same commit.
+
+Install the hooks once with `pre-commit install`. Use `pre-commit run --all-files` to run the same Rust checks used by CI.

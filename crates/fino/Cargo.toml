@@ -1,0 +1,7 @@
+[package]
+name = "fino"
+description = "Fine-grained reactive cross-platform UI core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true

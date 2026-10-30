@@ -14,3 +14,17 @@ Fino is a Rust cross-platform UI framework with fine-grained reactivity, real DO
 - [Dependency policy](docs/en/dependencies.md)
 - [AI-native development](docs/en/ai-native-development.md)
 - [Evolution and risks](docs/en/roadmap.md)
+
+## Development
+
+Install [pre-commit](https://pre-commit.com/) and enable the Rust hooks:
+
+```bash
+pre-commit install
+```
+
+Run the same checks used by CI:
+
+```bash
+pre-commit run --all-files
+```
