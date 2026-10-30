@@ -1,0 +1,53 @@
+name: ✨ 功能建议 / Feature request
+description: 提议范围明确、可验收的新能力 / Propose a scoped capability with executable acceptance criteria
+title: "✨ <摘要 / summary>"
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **中文：** 每个 Issue 只定义一个目标。可使用中文或英文，范围、非目标和验收条件应能支持独立实施与回退。
+        **English:** Define one goal per issue. Use either Chinese or English, with scope, non-goals, and acceptance criteria that support independent implementation and reversion.
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题与目标 / Problem and goal
+      description: 说明当前限制和需要达成的结果。 / Describe the current limitation and required outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案 / Proposed solution
+      description: 说明公共 API、数据流或后端行为；不要只写实现口号。 / Describe the public API, data flow, or backend behavior; avoid implementation slogans.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围与非目标 / Scope and non-goals
+      description: 列出本 Issue 包含和明确排除的内容。 / List what this issue includes and explicitly excludes.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收条件 / Acceptance criteria
+      description: 使用可执行、可观察的检查项。 / Use executable and observable checks.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: architecture
+    attributes:
+      label: 架构关联 / Architecture context
+      description: 链接相关架构文档、Issue 或替代方案。 / Link relevant architecture documents, issues, or alternatives.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前检查 / Before submitting
+      options:
+        - label: 我已搜索现有 Issue。 / I searched existing issues.
+          required: true

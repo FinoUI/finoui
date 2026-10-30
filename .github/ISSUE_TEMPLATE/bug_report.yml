@@ -1,0 +1,60 @@
+name: 🐛 Bug 报告 / Bug report
+description: 报告可复现的错误行为 / Report reproducible incorrect behavior
+title: "🐛 <摘要 / summary>"
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **中文：** 每个 Issue 只报告一个问题。可使用中文或英文，复现步骤和验收信息必须可执行。
+        **English:** Report one problem per issue. Use either Chinese or English, with executable reproduction and acceptance details.
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题摘要 / Problem summary
+      description: 用中文或英文简述问题。 / Summarize the problem in Chinese or English.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤 / Reproduction steps
+      description: 给出最小场景、命令或测试。 / Provide a minimal scenario, command, or test.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果 / Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果 / Actual result
+      description: 包含完整错误文本和首个失败位置；删除凭据、令牌和个人数据。 / Include the complete error text and first failure location; redact credentials, tokens, and personal data.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 版本与环境 / Version and environment
+      description: 包含提交或版本、OS、Rust、后端，以及适用的浏览器或 GPU。 / Include the commit or version, OS, Rust, backend, and browser or GPU when applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: 日志与产物 / Logs and artifacts
+      description: 附上相关 trace、JSON、快照或截图；提交前删除凭据、令牌和个人数据。 / Attach relevant traces, JSON, snapshots, or screenshots; redact credentials, tokens, and personal data before submitting.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前检查 / Before submitting
+      options:
+        - label: 我已搜索现有 Issue。 / I searched existing issues.
+          required: true
