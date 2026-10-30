@@ -272,6 +272,17 @@ impl DomBackend for MockBackend {
         if anchor == Some(child) {
             return;
         }
+        // Inserting a node into itself or its descendant would make every later
+        // traversal recurse forever, so reject it before any mutation.
+        // 把节点插入自身或其后代会形成环，使后续遍历无限递归，因此在任何变更前拒绝。
+        let mut ancestor = Some(*parent);
+        while let Some(node) = ancestor {
+            assert!(
+                node != *child,
+                "insert parent must not be the inserted child or its descendant"
+            );
+            ancestor = self.nodes.get(&node).and_then(MockNodeData::parent);
+        }
         if let Some(old_parent) = self.nodes.get(child).and_then(MockNodeData::parent)
             && let Some(MockNodeData::Element { children, .. }) = self.nodes.get_mut(&old_parent)
         {
@@ -540,5 +551,95 @@ impl HeadlessBackend for MockBackend {
                 details: serde_json::to_value(operation).unwrap_or(Value::Null),
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::*;
+
+    /// Builds a labeled button so semantic queries can address it by name.
+    /// 构建带标签的按钮，便于用名称进行语义查询。
+    fn button(backend: &mut MockBackend, label: &str) -> MockNode {
+        let node = backend.create_element(Tag::Button);
+        backend.set_attribute(&node, Attribute::AriaLabel, Some(label));
+        node
+    }
+
+    fn selector(name: &str) -> Selector {
+        Selector {
+            role: Role::Button,
+            name: name.to_owned(),
+        }
+    }
+
+    fn panic_message(outcome: std::thread::Result<()>) -> String {
+        let payload = outcome.expect_err("cycle insertion must panic");
+        if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_owned()
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else {
+            String::new()
+        }
+    }
+
+    /// Rejects inserting a node into itself before any tree mutation.
+    /// 在任何树变更前拒绝把节点插入自身。
+    #[test]
+    fn inserting_a_node_into_itself_is_rejected() {
+        let mut backend = MockBackend::new();
+        let root = button(&mut backend, "Root");
+        let label = backend.create_text("ready");
+        backend.insert_before(&root, &label, None);
+
+        let message = panic_message(catch_unwind(AssertUnwindSafe(|| {
+            backend.insert_before(&root, &root, None);
+        })));
+        assert!(
+            message.contains("must not be the inserted child"),
+            "{message}"
+        );
+
+        // The anchor no-op stays a no-op, and traversals still terminate.
+        backend.insert_before(&root, &label, Some(&label));
+        assert_eq!(backend.text_content(&root).as_deref(), Some("ready"));
+        assert_eq!(backend.find_all(&selector("Root")).len(), 1);
+        assert_eq!(backend.a11y_snapshot().nodes.len(), 1);
+        assert_eq!(backend.dom_snapshot().nodes.len(), 2);
+    }
+
+    /// Rejects inserting an ancestor under its own descendant and keeps legal moves.
+    /// 拒绝把祖先插入其后代，并保持合法移动可用。
+    #[test]
+    fn inserting_an_ancestor_into_its_descendant_is_rejected() {
+        let mut backend = MockBackend::new();
+        let root = button(&mut backend, "Root");
+        let middle = button(&mut backend, "Middle");
+        let leaf = button(&mut backend, "Leaf");
+        backend.insert_before(&root, &middle, None);
+        backend.insert_before(&middle, &leaf, None);
+        let text = backend.create_text("ready");
+        backend.insert_before(&leaf, &text, None);
+
+        let message = panic_message(catch_unwind(AssertUnwindSafe(|| {
+            backend.insert_before(&leaf, &root, None);
+        })));
+        assert!(
+            message.contains("must not be the inserted child"),
+            "{message}"
+        );
+
+        assert_eq!(backend.text_content(&root).as_deref(), Some("ready"));
+        assert_eq!(backend.find_all(&selector("Root")).len(), 1);
+        assert_eq!(backend.find_all(&selector("Leaf")).len(), 1);
+        assert_eq!(backend.a11y_snapshot().nodes.len(), 3);
+        assert_eq!(backend.dom_snapshot().nodes.len(), 4);
+
+        backend.insert_before(&root, &leaf, Some(&middle));
+        assert_eq!(backend.text_content(&root).as_deref(), Some("ready"));
+        assert_eq!(backend.find_all(&selector("Leaf")).len(), 1);
     }
 }
