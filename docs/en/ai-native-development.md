@@ -172,9 +172,9 @@ Each example owns its component, mount function, smoke checks, and scenario runn
 
 ```bash
 cargo run -p fino_counter -- check --format json
-cargo run -p fino_counter -- scenario run scenarios/counter.json --backend mock --out artifacts/runs/counter-mock --format json
-cargo run -p fino_counter -- scenario run scenarios/counter.json --backend web-headless --out artifacts/runs/counter-web --format json
-cargo run -p fino_counter -- scenario run scenarios/counter.json --backend native-offscreen --out artifacts/runs/counter-native --format json
+cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend mock --out artifacts/runs/counter-mock --format json
+cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend web-headless --out artifacts/runs/counter-web --format json
+cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend native-offscreen --out artifacts/runs/counter-native --format json
 ```
 
 The example calls the shared `fino::scenario` and `fino::headless` library interfaces. `fino inspect` reads the resulting artifacts without knowing which example produced them.

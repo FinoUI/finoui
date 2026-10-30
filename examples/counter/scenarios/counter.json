@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "name": "counter/increment",
+  "mount": "counter",
+  "environment": {
+    "viewport": [800, 600],
+    "dpr": 1.0,
+    "locale": "zh-CN",
+    "color_scheme": "dark",
+    "seed": 42
+  },
+  "steps": [
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Increment counter",
+        "value": "Count: 0"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Increment counter"
+      }
+    },
+    {
+      "advance_frames": 1
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Increment counter",
+        "value": "Count: 1"
+      }
+    },
+    {
+      "capture": ["dom", "a11y", "reactive"]
+    }
+  ]
+}

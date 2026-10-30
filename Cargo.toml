@@ -1,10 +1,12 @@
 [workspace]
 members = [
     "crates/fino",
+    "crates/fino_cli",
     "crates/fino_primitives",
     "crates/fino_components",
     "crates/fino_glass",
     "crates/fino_blocks",
+    "examples/counter",
 ]
 resolver = "2"
 
@@ -13,3 +15,14 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/FinoUI/finoui"
+
+[workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
+reactive_graph = { version = "0.2.14", features = ["effects"] }
+schemars = "1"
+send_wrapper = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"

@@ -172,9 +172,9 @@ fino bench --baseline main --format json
 
 ```bash
 cargo run -p fino_counter -- check --format json
-cargo run -p fino_counter -- scenario run scenarios/counter.json --backend mock --out artifacts/runs/counter-mock --format json
-cargo run -p fino_counter -- scenario run scenarios/counter.json --backend web-headless --out artifacts/runs/counter-web --format json
-cargo run -p fino_counter -- scenario run scenarios/counter.json --backend native-offscreen --out artifacts/runs/counter-native --format json
+cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend mock --out artifacts/runs/counter-mock --format json
+cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend web-headless --out artifacts/runs/counter-web --format json
+cargo run -p fino_counter -- scenario run examples/counter/scenarios/counter.json --backend native-offscreen --out artifacts/runs/counter-native --format json
 ```
 
 示例调用共享的 `fino::scenario` 与 `fino::headless` library 接口。`fino inspect` 只读取产物，不需要知道产物来自哪个示例。
