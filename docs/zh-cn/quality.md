@@ -82,7 +82,7 @@ cargo run -p fino_counter -- conformance --backend mock --format json
 cargo run -p fino_counter -- conformance --backend native-offscreen --format json
 ```
 
-报告包含 `tree` 与 `final_tree`（`LogicalTreeSnapshot`）、无障碍投影、点击结果、`checkpoints` 与 `final_stats`（`RuntimeStats`）、规范化 `operations`，以及 100 次增量的 `batch` 结果。所有映射使用稳定键顺序，schema 中不出现平台句柄。`conformance` 命令会校验每个契约字段，在 JSON 与人类可读输出中打印 `status` 与 `violations`，任一字段失败时以非零状态退出。
+报告包含 `tree` 与 `final_tree`（`LogicalTreeSnapshot`）、无障碍投影、点击结果、`checkpoints` 与 `final_stats`（`RuntimeStats`）、规范化 `operations`，以及 100 次增量的 `batch` 结果。所有映射使用稳定键顺序，schema 中不出现平台句柄。`conformance` 命令会校验每个契约字段，在 JSON 与人类可读输出中打印 `status` 与 `violations`，任一字段校验失败时以非零状态退出。
 
 ### 文本与布局测试
 

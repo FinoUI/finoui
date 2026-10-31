@@ -785,7 +785,7 @@ impl DomBackend for NativeDom {
     }
 
     /// Detaches only the selected node while keeping descendants and handle storage alive.
-    /// 仅分离选中节点，同时保留下代与句柄存储。
+    /// 仅分离选中节点，同时保留后代与句柄存储。
     fn remove(&mut self, node: &Self::Node) {
         let Some(data) = self.nodes.get(*node) else {
             return;
@@ -1080,7 +1080,7 @@ mod tests {
     }
 
     /// Detaching a parent keeps descendant handles alive so they can be reinserted.
-    /// 分离父节点会保留下代句柄，使其可以重新插入。
+    /// 分离父节点会保留后代句柄，使其可以重新插入。
     #[test]
     fn removing_a_parent_keeps_descendant_handles_and_reinserts() {
         let mut dom = dom();
