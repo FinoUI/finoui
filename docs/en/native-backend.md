@@ -72,7 +72,7 @@ cargo run -p fino_counter -- native
 cargo run -p fino_counter -- native --smoke
 ```
 
-`--smoke` clicks twice through the same window-tagged input path and then exits. It reports `surface_presented`. A sleeping or headless display can leave the surface occluded; the run then still verifies count, DOM, hit testing, and frame requests, but reports that no frame was presented instead of claiming a visual pass.
+`--smoke` clicks twice through the same window-tagged input path and then exits. It reports `surface_presented`. A sleeping or headless display can leave the surface occluded; the run then still verifies count, DOM, hit testing, and frame requests, but reports that no frame was presented instead of claiming a visual pass. On macOS, the smoke runner performs one foreground activation retry on its first `about_to_wait`. If `surface_presented` is false, bring the application to the foreground and rerun; do not treat this as display sleep or a rendering failure.
 
 The native backend bundles the Roboto variable font under the SIL Open Font License 1.1; see `crates/fino/assets/fonts/OFL.txt`.
 

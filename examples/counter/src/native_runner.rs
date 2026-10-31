@@ -52,6 +52,8 @@ struct CounterHost {
     smoke: SmokeState,
     smoke_initial_text: Option<String>,
     surface_presented: bool,
+    #[cfg(target_os = "macos")]
+    smoke_activation_pending: bool,
     failure: Option<String>,
 }
 
@@ -71,6 +73,8 @@ impl CounterHost {
             },
             smoke_initial_text: None,
             surface_presented: false,
+            #[cfg(target_os = "macos")]
+            smoke_activation_pending: smoke,
             failure: None,
         }
     }
@@ -389,6 +393,16 @@ impl ApplicationHandler for CounterHost {
         let Some(window) = self.window.clone() else {
             return;
         };
+        #[cfg(target_os = "macos")]
+        if self.smoke_activation_pending {
+            // Smoke mode gets one activation retry after the first event-loop turn,
+            // because the initial NSWindow may still be transitioning to a visible,
+            // active state on macOS.
+            // smoke 模式在首轮事件循环后重试激活，因为 macOS 初始 NSWindow 可能尚未进入可见且活跃的状态。
+            self.smoke_activation_pending = false;
+            window.focus_window();
+            window.request_redraw();
+        }
         let Some(context) = self.app().window(window_id) else {
             return;
         };
