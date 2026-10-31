@@ -7,7 +7,10 @@ use std::{
     process::Command,
 };
 
-use fino::{error::ToolError, scenario::ScenarioResult};
+use fino::{
+    error::ToolError,
+    scenario::{ScenarioResult, Status},
+};
 use serde::Deserialize;
 
 const BACKEND: &str = "web-headless";
@@ -132,6 +135,16 @@ fn run_web_scenario_with_mount(
     let report = parse_report(&stdout, &output.stderr)?;
 
     if report.status != "passed" {
+        // A completed scenario may fail its own steps without a browser error.
+        // Return that result so the CLI prints it and exits with the scenario
+        // status instead of replacing it with a generic driver error.
+        // 已完成的场景可能仅因自身步骤失败而没有浏览器错误。返回该结果，使 CLI
+        // 按场景状态输出并以非零码退出，而不是替换成通用驱动错误。
+        if let Some(result) = report.result
+            && result.status == Status::Failed
+        {
+            return Ok(result);
+        }
         let error = report.error.unwrap_or(DriverError {
             code: "UI_WEB_BROWSER".to_owned(),
             message: "the browser driver reported a failure".to_owned(),

@@ -820,3 +820,106 @@ fn web_headless_repeated_keyed_runs_do_not_accumulate_roots() {
         );
     }
 }
+
+/// A failed keyed step must produce a failed result and failed browser report,
+/// exit non-zero, keep the structured step error, and remove stale reports.
+/// 失败的 keyed 步骤必须生成 failed 结果与失败浏览器报告、非零退出、保留结构化
+/// 步骤错误，并清理过期报告。
+#[test]
+#[ignore = "launches headless Chromium; run with cargo test -p fino_counter --test web_browser -- --ignored"]
+fn web_headless_reports_failed_keyed_step_and_cleans_stale_reports() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let scenario_path = temporary.path().join("keyed-failed-step.json");
+    let run_dir = temporary.path().join("keyed-failed-web");
+    fs::create_dir_all(&run_dir).expect("run directory");
+    for stale in ["conformance.json", "keyed_conformance.json", "remount.json"] {
+        fs::write(run_dir.join(stale), "stale report").expect("stale report");
+    }
+    fs::write(run_dir.join("keep.txt"), "unrelated").expect("unrelated file");
+
+    let scenario = serde_json::json!({
+        "schema": 1,
+        "name": "keyed/failed-step",
+        "mount": "keyed",
+        "environment": {
+            "viewport": [800, 600],
+            "dpr": 1.0,
+            "locale": "zh-CN",
+            "color_scheme": "dark",
+            "seed": 42,
+        },
+        "steps": [
+            {
+                "assert_text": {
+                    "role": "button",
+                    "name": "Keyed host",
+                    "value": "definitely not the host text",
+                }
+            }
+        ],
+    });
+    fs::write(
+        &scenario_path,
+        serde_json::to_vec_pretty(&scenario).expect("scenario JSON"),
+    )
+    .expect("scenario file");
+
+    let output = run_web_scenario_with_mount(&scenario_path, &run_dir, Some("keyed"));
+    assert!(
+        !output.status.success(),
+        "failed scenario must exit non-zero; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(1), "scenario failure exit code");
+
+    let result: Value = serde_json::from_slice(&output.stdout).expect("scenario stdout JSON");
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["backend"], "web-headless");
+    let steps = result["steps"].as_array().expect("ordered steps");
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0]["status"], "failed");
+    assert_eq!(steps[0]["error"]["code"], "UI_ASSERT_TEXT");
+    assert_eq!(steps[0]["error"]["step"], 0);
+
+    let stored: Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("result.json")).expect("result artifact"),
+    )
+    .expect("stored result JSON");
+    assert_eq!(stored["status"], "failed");
+    assert_eq!(stored["steps"][0]["error"]["code"], "UI_ASSERT_TEXT");
+
+    for required in ["dom.json", "a11y.json", "reactive.json", "trace.json"] {
+        assert!(
+            run_dir.join(required).is_file(),
+            "missing failed-run snapshot {required}"
+        );
+    }
+
+    let browser: Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("browser.json")).expect("browser report"),
+    )
+    .expect("browser JSON");
+    assert_eq!(browser["status"], "failed");
+    assert_eq!(browser["backend"], "web-headless");
+    assert!(
+        browser["checks"]
+            .as_array()
+            .expect("browser checks")
+            .iter()
+            .any(|check| check["name"] == "scenario_executes_in_chromium"
+                && check["status"] == "passed"),
+        "the scenario must still be recorded as executed"
+    );
+
+    for stale in ["conformance.json", "keyed_conformance.json", "remount.json"] {
+        assert!(
+            !run_dir.join(stale).exists(),
+            "stale managed report {stale} must be removed"
+        );
+    }
+    assert!(
+        run_dir.join("keep.txt").is_file(),
+        "unrelated files must survive"
+    );
+}

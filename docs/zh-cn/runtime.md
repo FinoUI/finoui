@@ -166,7 +166,7 @@ let rows = For::mount(
 - 条目 Owner 与条目/列表锚点都在受保护事务内获取。锚点创建或插入失败会处置 Owner、释放部分锚点并保留后端 panic；初始列表/Show 锚点失败对 control Owner 做同样处理。放置阶段使用 retained key→旧位置映射，不再按 key 线性搜索。
 - 放置移动可回滚。后端 panic 会先恢复旧中段顺序、entries 与已提交 keys，再重新抛出；若回滚自身也 panic，列表进入终止清理并保留首个后端 payload。
 - `ForContext::show` 传入受限 `ForShowContext`，只能修改该嵌套范围创建的节点，且不暴露原始 Runtime。独立 `ShowContext::runtime()` 继续 public，供下游 Show 内容使用。
-- `RangeAnchor::create` 在创建或插入 panic 时释放部分锚点。`RangeAnchor::move_before` 对 `start` 自引用 no-op，并在首次后端操作前拒绝 `end` 或任一范围顶层节点作为参考。
+- `RangeAnchor::create` 在创建或插入 panic 时释放部分锚点。`RangeAnchor::move_before` 对 `start` 自引用 no-op，并在首次后端操作前拒绝 `end` 或范围中的任意顶层节点作为参考。
 - Mock 与 Native 会在分离待移动节点前验证 `insert_before` 参考是目标父节点的子节点，因此非法参考会原子失败。Web 保持浏览器 `insertBefore` 语义，同样在变更前验证。
 - 每个新条目都在改动既有范围前完整构建。构建器 panic 时先释放该条目 Owner 及其跟踪的节点、Effect 与监听，再继续展开；已构建条目会被释放，上一次列表保持已提交。
 - 删除 key 时先释放条目 Owner，再释放其范围。写入已移除条目的 Signal 不再触达后端或请求帧。

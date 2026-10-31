@@ -112,6 +112,53 @@ async function runCheck(name, operation) {
 }
 
 /**
+ * Carries a completed scenario whose own steps failed without a driver error.
+ *
+ * The outer catch still writes this run's artifacts and a failed browser
+ * report, while normal driver assertions keep using `emitFailure`.
+ * 携带自身步骤失败、但没有驱动错误的已完成场景。
+ *
+ * 外层 catch 仍会写出本次运行的产物与失败浏览器报告，普通驱动断言继续使用
+ * `emitFailure`。
+ */
+class ScenarioFailed extends Error {
+  /**
+   * @param {object} bundle Serialized scenario bundle from wasm.
+   */
+  constructor(bundle) {
+    super('the scenario reported a failed result');
+    this.bundle = bundle;
+  }
+}
+
+/**
+ * Writes the exact artifact bytes a completed scenario run produced.
+ * 写入已完成场景运行产生的精确产物字节。
+ *
+ * @param {object} bundle Serialized scenario bundle from wasm.
+ */
+function writeScenarioArtifacts(bundle) {
+  for (const [relative, contents] of Object.entries(bundle.artifacts)) {
+    const destination = path.join(outDir, relative);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, contents);
+  }
+}
+
+/**
+ * Writes the browser report with the exact scenario status.
+ * 使用准确的场景状态写入浏览器报告。
+ *
+ * @param {'passed'|'failed'} status Overall scenario status.
+ */
+function writeBrowserReport(status) {
+  fs.writeFileSync(
+    path.join(outDir, 'browser.json'),
+    `${JSON.stringify({ schema: 1, backend: 'web-headless', status, checks }, null, 2)}\n`,
+  );
+}
+
+/**
  * Writes a structured failure payload and sets a non-zero exit code.
  *
  * The browser and server still shut down through the surrounding `finally`
@@ -462,6 +509,10 @@ try {
     );
     assertEqual(bundle.result.counters.component_executions, 1, 'scenario component executions');
   });
+
+  if (bundle.result.status !== 'passed') {
+    throw new ScenarioFailed(bundle);
+  }
 
   await runCheck('scenario_dom_matches_live_dom', async () => {
     if (isShow) {
@@ -899,11 +950,7 @@ try {
 
   // Writes the exact artifact bytes the wasm run produced.
   // 写入 wasm 运行产生的精确产物字节。
-  for (const [relative, contents] of Object.entries(bundle.artifacts)) {
-    const destination = path.join(outDir, relative);
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, contents);
-  }
+  writeScenarioArtifacts(bundle);
   const scenarioPassed = bundle.result.status === 'passed';
   if (scenarioPassed) {
     fs.writeFileSync(
@@ -931,14 +978,11 @@ try {
       `${JSON.stringify(keyedConformance, null, 2)}\n`,
     );
   }
-  fs.writeFileSync(
-    path.join(outDir, 'browser.json'),
-    `${JSON.stringify({ schema: 1, backend: 'web-headless', status: 'passed', checks }, null, 2)}\n`,
-  );
+  writeBrowserReport(scenarioPassed ? 'passed' : 'failed');
 
   process.stdout.write(
     `${JSON.stringify({
-      status: 'passed',
+      status: scenarioPassed ? 'passed' : 'failed',
       result: bundle.result,
       checks,
       conformance,
@@ -957,9 +1001,26 @@ try {
       ],
     })}\n`,
   );
+  if (!scenarioPassed) {
+    process.exitCode = 1;
+  }
 } catch (error) {
-  const code = error.code?.startsWith?.('UI_') ? error.code : 'UI_BROWSER_ASSERTION';
-  emitFailure(code, error.message);
+  if (error instanceof ScenarioFailed) {
+    writeScenarioArtifacts(error.bundle);
+    writeBrowserReport('failed');
+    process.exitCode = 1;
+    process.stdout.write(
+      `${JSON.stringify({
+        status: 'failed',
+        result: error.bundle.result,
+        checks,
+        artifacts: Object.keys(error.bundle.artifacts),
+      })}\n`,
+    );
+  } else {
+    const code = error.code?.startsWith?.('UI_') ? error.code : 'UI_BROWSER_ASSERTION';
+    emitFailure(code, error.message);
+  }
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));
