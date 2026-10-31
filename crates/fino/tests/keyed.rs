@@ -1866,3 +1866,224 @@ fn keyed_for_dispose_then_builder_panic_keeps_payload_and_terminal_state() {
     assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
     list.dispose();
 }
+
+/// A panic in the first removed item's on_dispose still releases that range,
+/// cleans the remaining removed entries, commits surviving/new state, and
+/// keeps the original payload.
+/// 第一个被删除条目的 on_dispose panic 仍释放该范围、清理其余删除条目、提交
+/// 存活/新建状态，并保留原始 payload。
+#[test]
+fn keyed_for_removed_cleanup_panic_restores_state() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a", "b"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let b_cleanup = Rc::new(std::cell::Cell::new(0_u32));
+    let list = {
+        let read_items = items.clone();
+        let b_cleanup = Rc::clone(&b_cleanup);
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/removal-panic",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                if key == "a" {
+                    context.on_dispose(|| panic!("a cleanup"));
+                }
+                if key == "b" {
+                    let b_cleanup = Rc::clone(&b_cleanup);
+                    context.on_dispose(move || b_cleanup.set(b_cleanup.get() + 1));
+                }
+                vec![item]
+            },
+        )
+    };
+
+    let failure = catch_unwind(AssertUnwindSafe(|| items.set(keys(&["c"]))));
+    let payload = failure.expect_err("a cleanup panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "a cleanup", "the first payload is preserved");
+    assert_eq!(b_cleanup.get(), 1, "later removed entries still clean up");
+    assert_eq!(list.keys(), keys(&["c"]));
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("cTail")
+    );
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        8,
+        "static root/tail, list anchors, and one committed item range"
+    );
+
+    items.set(keys(&["d"]));
+    assert_eq!(list.keys(), keys(&["d"]));
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("dTail")
+    );
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        8,
+        "a changed-key update does not duplicate ranges"
+    );
+
+    list.dispose();
+    assert!(list.is_empty());
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "whole-list disposal releases every surviving range and anchors"
+    );
+}
+
+/// Multiple removed entries panic; every cleanup runs, the first payload wins,
+/// and the committed state remains consistent.
+/// 多个被删除条目 panic 时每个清理都会运行，首个 payload 优先，已提交状态保持一致。
+#[test]
+fn keyed_for_multiple_removed_cleanup_panics_keep_first_payload() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a", "b", "c"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let b_cleanup = Rc::new(std::cell::Cell::new(0_u32));
+    let c_cleanup = Rc::new(std::cell::Cell::new(0_u32));
+    let list = {
+        let read_items = items.clone();
+        let b_cleanup = Rc::clone(&b_cleanup);
+        let c_cleanup = Rc::clone(&c_cleanup);
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/multi-removal-panic",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                match key.as_str() {
+                    "a" => context.on_dispose(|| panic!("a cleanup first")),
+                    "b" => {
+                        let b_cleanup = Rc::clone(&b_cleanup);
+                        context.on_dispose(move || b_cleanup.set(b_cleanup.get() + 1));
+                    }
+                    "c" => {
+                        let c_cleanup = Rc::clone(&c_cleanup);
+                        context.on_dispose(move || c_cleanup.set(c_cleanup.get() + 1));
+                    }
+                    _ => {}
+                }
+                vec![item]
+            },
+        )
+    };
+
+    let failure = catch_unwind(AssertUnwindSafe(|| items.set(keys(&["d"]))));
+    let payload = failure.expect_err("a cleanup panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "a cleanup first");
+    assert_eq!(b_cleanup.get(), 1);
+    assert_eq!(c_cleanup.get(), 1);
+    assert_eq!(list.keys(), keys(&["d"]));
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("dTail")
+    );
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        8,
+        "only the surviving committed range remains"
+    );
+
+    list.dispose();
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "terminal disposal still releases the surviving range and anchors"
+    );
+}
+
+/// Removal cleanup combines a reentrant dispose request with a later owner panic;
+/// terminal cleanup wins and the first panic payload is preserved.
+/// 删除清理同时出现重入 dispose 与后续 Owner panic 时，终止清理优先并保留首个
+/// panic payload。
+#[test]
+fn keyed_for_removal_panic_with_reentrant_dispose_is_terminal() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a", "b"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let slot: ForSlot = Rc::new(RefCell::new(None));
+    let list = {
+        let read_items = items.clone();
+        let builder_slot = Rc::clone(&slot);
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/panic-terminal",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                match key.as_str() {
+                    "a" => {
+                        let cleanup_slot = Rc::clone(&builder_slot);
+                        context.on_dispose(move || {
+                            if let Some(list) = cleanup_slot.borrow().as_ref() {
+                                list.dispose();
+                            }
+                        });
+                    }
+                    "b" => context.on_dispose(|| panic!("b cleanup")),
+                    _ => {}
+                }
+                vec![item]
+            },
+        )
+    };
+    let list = Rc::new(list);
+    *slot.borrow_mut() = Some(Rc::clone(&list));
+
+    let failure = catch_unwind(AssertUnwindSafe(|| items.set(keys(&["c"]))));
+    let payload = failure.expect_err("owner cleanup panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "b cleanup");
+    assert!(list.is_empty());
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "the new range, removed ranges, and anchors are all released"
+    );
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+    let after_dispose = runtime.backend().operations().len();
+    items.set(keys(&["d"]));
+    items.set(keys(&["d", "d"]));
+    list.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+    assert!(list.is_empty());
+}

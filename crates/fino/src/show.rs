@@ -460,11 +460,17 @@ impl<B: DomBackend + 'static> Show<B> {
             // 终止清理。
             return;
         };
-        state.request_terminal();
+        let terminal = catch_unwind(AssertUnwindSafe(|| state.request_terminal())).err();
         let _ = state.take_control_dispose_pending();
         let control = state.control.clone();
         drop(state);
-        control.dispose();
+        let control_panic = catch_unwind(AssertUnwindSafe(|| control.dispose())).err();
+        if let Some(payload) = terminal {
+            resume_unwind(payload);
+        }
+        if let Some(payload) = control_panic {
+            resume_unwind(payload);
+        }
     }
 }
 
@@ -478,10 +484,24 @@ impl<B: DomBackend + 'static> ActiveRange<B> {
     /// Stops the child owner before releasing its nodes and retained handles.
     /// 在释放节点与保留句柄前先停止子 Owner。
     fn dispose(self, runtime: &Runtime<B>) {
-        self.owner.dispose();
-        let mut nodes = self.created;
-        nodes.extend(self.nodes);
-        release_after_detach(runtime, &nodes);
+        let ActiveRange {
+            owner,
+            nodes: returned_nodes,
+            created,
+        } = self;
+        let owner_panic = catch_unwind(AssertUnwindSafe(|| owner.dispose())).err();
+        let release_panic = catch_unwind(AssertUnwindSafe(|| {
+            let mut nodes = created;
+            nodes.extend(returned_nodes);
+            release_after_detach(runtime, &nodes);
+        }))
+        .err();
+        if let Some(payload) = owner_panic {
+            resume_unwind(payload);
+        }
+        if let Some(payload) = release_panic {
+            resume_unwind(payload);
+        }
     }
 }
 
@@ -586,8 +606,8 @@ impl<B: DomBackend + 'static> ShowState<B> {
     /// Releases the range, anchors, and driver effect exactly once.
     /// 只释放一次范围、锚点与驱动 Effect。
     fn request_terminal(&mut self) {
-        self.release_terminal();
         self.control_dispose_pending = true;
+        self.release_terminal();
     }
 
     fn release_terminal(&mut self) {
@@ -596,8 +616,15 @@ impl<B: DomBackend + 'static> ShowState<B> {
         }
         self.cleaned = true;
         let runtime = self.runtime.clone();
-        self.unmount_range(&runtime);
-        self.anchors.remove_anchors(&runtime);
+        let unmount = catch_unwind(AssertUnwindSafe(|| self.unmount_range(&runtime))).err();
+        let anchors =
+            catch_unwind(AssertUnwindSafe(|| self.anchors.remove_anchors(&runtime))).err();
+        if let Some(payload) = unmount {
+            resume_unwind(payload);
+        }
+        if let Some(payload) = anchors {
+            resume_unwind(payload);
+        }
     }
 
     fn take_control_dispose_pending(&mut self) -> bool {
@@ -605,9 +632,17 @@ impl<B: DomBackend + 'static> ShowState<B> {
     }
 
     fn cleanup(&mut self, dispose_control: bool) {
-        self.release_terminal();
-        if dispose_control {
-            self.control.dispose();
+        let release = catch_unwind(AssertUnwindSafe(|| self.release_terminal())).err();
+        let control = if dispose_control {
+            catch_unwind(AssertUnwindSafe(|| self.control.dispose())).err()
+        } else {
+            None
+        };
+        if let Some(payload) = release {
+            resume_unwind(payload);
+        }
+        if let Some(payload) = control {
+            resume_unwind(payload);
         }
     }
 }

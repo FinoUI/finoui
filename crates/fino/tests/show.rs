@@ -843,3 +843,116 @@ fn show_dispose_from_range_cleanup_is_terminal() {
     show.dispose();
     assert_eq!(runtime.backend().operations().len(), after_dispose);
 }
+
+/// A content-owner on_dispose panic during terminal Show disposal still releases
+/// content nodes and anchors, then preserves the original payload.
+/// 终止 Show 释放期间内容 Owner 的 on_dispose panic 仍释放内容节点与锚点，并保留
+/// 原始 payload。
+#[test]
+fn show_terminal_dispose_owner_panic_still_releases_anchors() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let show = Show::mount(
+        &runtime,
+        &owner,
+        &root,
+        Some(&tail),
+        "show/terminal-panic",
+        || true,
+        |context: &mut ShowContext<MockBackend>| {
+            let action = context.create_element(Tag::Button);
+            context.owner().on_dispose(|| panic!("show cleanup"));
+            action
+        },
+    );
+
+    let failure = catch_unwind(AssertUnwindSafe(|| show.dispose()));
+    let payload = failure.expect_err("owner cleanup panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "show cleanup");
+    assert!(!show.is_mounted());
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "content nodes and Show anchors are released"
+    );
+    let after_dispose = runtime.backend().operations().len();
+    show.dispose();
+    show.dispose();
+    assert_eq!(
+        runtime.backend().operations().len(),
+        after_dispose,
+        "repeated disposal is idempotent"
+    );
+}
+
+/// A content-owner on_dispose panic during hide releases content but keeps the
+/// Show anchors, which terminal disposal can still release.
+/// 隐藏期间内容 Owner 的 on_dispose panic 释放内容但保留 Show 锚点，终止释放仍
+/// 可清除它们。
+#[test]
+fn show_hide_owner_panic_releases_content_and_keeps_anchors() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let visible = owner.signal_named("show/hide-panic", true);
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let show = {
+        let visible = visible.clone();
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/hide-panic",
+            move || visible.get(),
+            |context: &mut ShowContext<MockBackend>| {
+                let action = context.create_element(Tag::Button);
+                context.owner().on_dispose(|| panic!("hide cleanup"));
+                action
+            },
+        )
+    };
+
+    let failure = catch_unwind(AssertUnwindSafe(|| visible.set(false)));
+    let payload = failure.expect_err("owner cleanup panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "hide cleanup");
+    assert!(!show.is_mounted());
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        4,
+        "content is released while the static root, tail, and anchors remain"
+    );
+    assert_eq!(
+        runtime
+            .backend()
+            .dom_snapshot()
+            .nodes
+            .iter()
+            .filter(|node| node.kind == fino::headless::DomNodeKind::Anchor)
+            .count(),
+        2
+    );
+
+    show.dispose();
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "terminal disposal releases the remaining anchors"
+    );
+}

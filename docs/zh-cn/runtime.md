@@ -114,6 +114,7 @@ let details = Show::mount(
 - `ShowContext` 跟踪一次挂载中创建的每个节点、Effect 与监听。内容构建器 panic 时会释放子 Owner、回收已跟踪节点并重新抛出，且不推进条件，后续真实切换可以重试。
 - `Show::mount` 首次执行时条件或内容 panic 会在重新抛出前释放 Show 锚点与 Owner；后续真实切换 panic 会保留锚点与活跃条件 Effect，以便重试。
 - 条件 Effect 或内容清理持有状态时，`Show::dispose` 也会记录请求，在下一个安全点释放范围与锚点，并在借用结束后处置 control Owner。
+- `Show` 内容 Owner 清理 panic 不会阻止节点释放或终止锚点清理。首个 payload 会保留，重复释放仍幂等。
 - 锚点只创建一次并保持稳定；静态兄弟及其 `NodeId` 绝不替换。
 - 条件 Effect 只在真正的 `false → true` 切换时创建子 Owner 与内容；写入相同值不执行操作。
 - `true → false` 时先释放子 Owner，停止事件分发并解绑 Effect 与监听，再从父节点释放范围。
@@ -153,6 +154,7 @@ let rows = For::mount(
 - 嵌套 `Show` 挂载同样具有事务性。首次内容或条件 panic 会在重新抛出前释放 Show 锚点与 Owner；后续内容 panic 会保留锚点与活跃 Effect，使重试可以成功。
 - panic 回滚与终止释放会先用 `remove` 分离每个受跟踪节点，再对每个唯一节点释放一次。`remove` 仍只做分离，`release` 仍是终止操作，因此“父先创建”与“子先创建”的顺序都不会重复释放跟踪后代。
 - 即使协调或条目清理正借用状态，`For::dispose` 也会记录终止请求。Effect 在下一个安全点释放范围与锚点，并在释放借用后处置 control Owner；外层协调此后不再提交活跃条目，后续 key 更新也不能复活列表。
+- 删除清理会捕获每个条目 Owner/on_dispose panic，保留首个 payload，继续释放全部被删除范围，把存活与新建条目恢复到已提交状态，最后才重新抛出。终止释放同样会先完成全部节点、锚点与 control 清理，再重新抛出。
 - 每个新条目都在改动既有范围前完整构建。构建器 panic 时先释放该条目 Owner 及其跟踪的节点、Effect 与监听，再继续展开；已构建条目会被释放，上一次列表保持已提交。
 - 删除 key 时先释放条目 Owner，再释放其范围。写入已移除条目的 Signal 不再触达后端或请求帧。
 - 条目内通过条目 Effect 完成的 Signal 更新不会运行协调 Effect。

@@ -314,10 +314,28 @@ impl<B: DomBackend + 'static, K> ForEntry<B, K> {
     /// Stops the item owner, then releases every created node and external node.
     /// 先停止条目 Owner，再释放全部已创建节点与外部节点。
     fn dispose(self, runtime: &Runtime<B>) {
-        self.owner.dispose();
-        let mut nodes = self.created;
-        nodes.extend(self.nodes);
-        release_after_detach(runtime, &nodes);
+        let ForEntry {
+            owner,
+            nodes: returned_nodes,
+            created,
+            ..
+        } = self;
+        let owner_panic = catch_unwind(AssertUnwindSafe(|| owner.dispose())).err();
+        let release_panic = catch_unwind(AssertUnwindSafe(|| {
+            let mut nodes = created;
+            nodes.extend(returned_nodes);
+            release_after_detach(runtime, &nodes);
+        }))
+        .err();
+        // A user on_dispose panic must not prevent node release, and must not be
+        // replaced by a secondary release panic.
+        // 用户 on_dispose panic 不得阻止节点释放，也不得被二次 release panic 覆盖。
+        if let Some(payload) = owner_panic {
+            resume_unwind(payload);
+        }
+        if let Some(payload) = release_panic {
+            resume_unwind(payload);
+        }
     }
 
     /// Moves the complete item range before one reference node.
@@ -552,11 +570,17 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> For<B, 
             // 清理。
             return;
         };
-        state.request_terminal();
+        let terminal = catch_unwind(AssertUnwindSafe(|| state.request_terminal())).err();
         let _ = state.take_control_dispose_pending();
         let control = state.control.clone();
         drop(state);
-        control.dispose();
+        let control_panic = catch_unwind(AssertUnwindSafe(|| control.dispose())).err();
+        if let Some(payload) = terminal {
+            resume_unwind(payload);
+        }
+        if let Some(payload) = control_panic {
+            resume_unwind(payload);
+        }
     }
 }
 
@@ -709,14 +733,22 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
         }
         debug_assert!(retained.is_empty(), "all requested keys are resolved");
 
+        let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
         for entry in removed {
-            entry.dispose(runtime);
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| entry.dispose(runtime)))
+                && first_panic.is_none()
+            {
+                first_panic = Some(payload);
+            }
         }
         if self.dispose_requested.get() {
             self.entries = prefix_entries;
             self.entries.extend(middle_final);
             self.entries.extend(suffix_entries);
             self.request_terminal();
+            if let Some(payload) = first_panic {
+                resume_unwind(payload);
+            }
             return;
         }
 
@@ -740,27 +772,41 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
         // Prefix and suffix ranges never move.
         // 从右向左重排。稳定的保留范围保持 DOM 位置；新范围或不稳定范围移动到
         // 下一个最终条目之前。前后两段绝不移动。
-        let mut reference = suffix_entries
-            .first()
-            .map(|entry| entry.anchors.start().clone())
-            .unwrap_or_else(|| self.anchors.end().clone());
-        for index in (0..middle_final.len()).rev() {
-            let entry = &middle_final[index];
-            if old_positions[index].is_none() || !stable[index] {
-                entry.move_before(runtime, &self.parent, &reference);
+        let commit = catch_unwind(AssertUnwindSafe(|| {
+            let mut reference = suffix_entries
+                .first()
+                .map(|entry| entry.anchors.start().clone())
+                .unwrap_or_else(|| self.anchors.end().clone());
+            for index in (0..middle_final.len()).rev() {
+                let entry = &middle_final[index];
+                if old_positions[index].is_none() || !stable[index] {
+                    entry.move_before(runtime, &self.parent, &reference);
+                }
+                reference = entry.anchors.start().clone();
             }
-            reference = entry.anchors.start().clone();
-        }
+        }));
 
         self.entries = prefix_entries;
         self.entries.extend(middle_final);
         self.entries.extend(suffix_entries);
         if self.dispose_requested.get() {
             self.request_terminal();
+            if let Some(payload) = first_panic {
+                resume_unwind(payload);
+            }
+            if let Err(payload) = commit {
+                resume_unwind(payload);
+            }
             return;
         }
         self.last_keys = Some(new_keys);
         self.last_error = None;
+        if let Some(payload) = first_panic {
+            resume_unwind(payload);
+        }
+        if let Err(payload) = commit {
+            resume_unwind(payload);
+        }
     }
 
     /// Builds one child owner and item range inside a panic transaction.
@@ -802,8 +848,8 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
     /// Records a terminal request and releases ranges at the current safe point.
     /// 记录终止请求，并在当前安全点释放范围。
     fn request_terminal(&mut self) {
-        self.release_terminal_ranges();
         self.control_dispose_pending = true;
+        self.release_terminal_ranges();
     }
 
     /// Releases committed ranges and the list anchors exactly once.
@@ -815,10 +861,23 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
         self.cleaned = true;
         let runtime = self.runtime.clone();
         let entries = std::mem::take(&mut self.entries);
+        let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
         for entry in entries.into_iter().rev() {
-            entry.dispose(&runtime);
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| entry.dispose(&runtime)))
+                && first_panic.is_none()
+            {
+                first_panic = Some(payload);
+            }
         }
-        self.anchors.remove_anchors(&runtime);
+        if let Err(payload) =
+            catch_unwind(AssertUnwindSafe(|| self.anchors.remove_anchors(&runtime)))
+            && first_panic.is_none()
+        {
+            first_panic = Some(payload);
+        }
+        if let Some(payload) = first_panic {
+            resume_unwind(payload);
+        }
     }
 
     /// Takes a pending control-owner disposal for the post-borrow safe boundary.
@@ -830,9 +889,17 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
     /// Releases ranges and optionally the control owner for Drop/owner cleanup.
     /// 为 Drop 与 Owner 清理释放范围，并按需释放 control Owner。
     fn cleanup(&mut self, dispose_control: bool) {
-        self.release_terminal_ranges();
-        if dispose_control {
-            self.control.dispose();
+        let release = catch_unwind(AssertUnwindSafe(|| self.release_terminal_ranges())).err();
+        let control = if dispose_control {
+            catch_unwind(AssertUnwindSafe(|| self.control.dispose())).err()
+        } else {
+            None
+        };
+        if let Some(payload) = release {
+            resume_unwind(payload);
+        }
+        if let Some(payload) = control {
+            resume_unwind(payload);
         }
     }
 }

@@ -114,6 +114,7 @@ let details = Show::mount(
 - `ShowContext` tracks every node, effect, and listener created during one mount. A panic in the content builder disposes the child owner, releases tracked nodes, and rethrows without advancing the condition, so a later real transition can retry.
 - A first-run condition or content panic during `Show::mount` releases the Show anchors and owner before rethrowing; a later transition panic keeps the anchors and active condition effect for retry.
 - `Show::dispose` also records a request while the condition effect or content cleanup owns the state, then releases the range and anchors at the next safe point and disposes the control owner after the borrow.
+- `Show` content-owner cleanup panics do not prevent node release or terminal anchor cleanup. The first payload is preserved, and repeated disposal remains idempotent.
 - The anchors are created once and stay stable. Static siblings and their `NodeId`s are never replaced.
 - The condition effect creates a child owner and content only on a real `false → true` transition; equal writes are no-ops.
 - On `true → false`, the child owner is disposed first, which stops event dispatch and releases effects and listeners, then the range is released from the parent.
@@ -153,6 +154,7 @@ let rows = For::mount(
 - Nested `Show` mounts are transactional too. A first-run content or condition panic releases the Show anchors and owner before rethrowing; a later content panic leaves the anchors and active effect in place so a retry can succeed.
 - Panic rollback and terminal release first detach every tracked node with `remove`, then release each unique node once. `remove` stays detach-only and `release` stays terminal, so parent-before-child and child-before-parent creation orders cannot double-release tracked descendants.
 - `For::dispose` records a terminal request even when reconciliation or item cleanup already borrows the state. The effect completes range and anchor release at the next safe point, then disposes the control owner after releasing the borrow; the outer reconcile never commits active items afterward, and later key updates cannot revive the list.
+- Removal cleanup catches each item owner/on_dispose panic, keeps the first payload, continues releasing every removed range, restores surviving and new entries into the committed state, and only then rethrows. Terminal disposal likewise completes all node, anchor, and control cleanup before rethrowing.
 - Every new item is fully built before existing ranges change. A builder panic disposes that item owner and releases its tracked nodes, effects, and listeners before rethrowing; already-built items are released and the previous list stays committed.
 - Removing a key disposes the item owner first, then releases its range. Writing a removed item's signal no longer touches the backend or requests a frame.
 - Item-local signal updates through item effects do not run the reconciliation effect.
