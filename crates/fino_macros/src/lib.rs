@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use proc_macro2::{Ident, Span, TokenStream};
 use proc_macro2_diagnostics::Level;
-use quote::{format_ident, quote};
+use quote::quote;
 use rstml::{
     Parser, ParserConfig,
     node::{Node, NodeAttribute, NodeBlock, NodeElement, NodeText},
@@ -65,13 +65,32 @@ fn combine(errors: &mut Option<syn::Error>, error: syn::Error) {
     }
 }
 
-#[derive(Default)]
+impl Default for Builder {
+    fn default() -> Self {
+        Self {
+            template: Vec::new(),
+            bindings: Vec::new(),
+            closures: Vec::new(),
+            text_slots: Vec::new(),
+            next_node: 0,
+            template_ident: hidden_ident("__fino_template"),
+            nodes_ident: hidden_ident("__fino_nodes"),
+            node_idents: Vec::new(),
+            name: None,
+        }
+    }
+}
+
 struct Builder {
     template: Vec<TokenStream>,
     bindings: Vec<Binding>,
     closures: Vec<Closure>,
     text_slots: Vec<usize>,
     next_node: usize,
+    template_ident: Ident,
+    nodes_ident: Ident,
+    node_idents: Vec<Ident>,
+    name: Option<String>,
 }
 
 struct Closure {
@@ -129,7 +148,13 @@ impl Builder {
     fn next_node(&mut self) -> usize {
         let node = self.next_node;
         self.next_node += 1;
+        self.node_idents
+            .push(hidden_ident(&format!("__fino_node_{node}")));
         node
+    }
+
+    fn node_ident(&self, node: usize) -> Ident {
+        self.node_idents[node].clone()
     }
 
     fn finish(self) -> TokenStream {
@@ -139,6 +164,10 @@ impl Builder {
             closures,
             text_slots,
             next_node: _,
+            template_ident,
+            nodes_ident,
+            node_idents: _,
+            name: _,
         } = self;
         let mut shared = BTreeMap::new();
         for closure in &closures {
@@ -161,7 +190,7 @@ impl Builder {
                     closure: _,
                 } => quote! {
                     ::fino::view::TextBinding::new(#name, #expression)
-                        .mount(runtime, owner, &__fino_nodes[#node]);
+                        .mount(runtime, owner, &#nodes_ident[#node]);
                 },
                 Binding::Attribute {
                     node,
@@ -172,25 +201,25 @@ impl Builder {
                         ::fino::dom_api::Attribute::#attribute,
                         #expression,
                     )
-                    .mount(runtime, owner, &__fino_nodes[#node]);
+                    .mount(runtime, owner, &#nodes_ident[#node]);
                 },
                 Binding::Event { node, closure: _ } => quote! {
                     ::fino::view::EventBinding::click(#expression)
-                        .mount(runtime, owner, &__fino_nodes[#node]);
+                        .mount(runtime, owner, &#nodes_ident[#node]);
                 },
             }
         });
         let slots = text_slots
             .iter()
-            .map(|slot| quote! { __fino_nodes[#slot].clone() });
+            .map(|slot| quote! { #nodes_ident[#slot].clone() });
 
         quote! {{
-            let mut __fino_template = ::fino::view::Template::new();
+            let mut #template_ident = ::fino::view::Template::new();
             #(#template)*
-            let __fino_nodes = __fino_template.mount(runtime);
+            let #nodes_ident = #template_ident.mount(runtime);
             #(#bindings)*
             ::fino::view::ViewOutput::new(
-                __fino_nodes[0].clone(),
+                #nodes_ident[0].clone(),
                 ::std::vec![#(#slots),*],
             )
         }}
@@ -213,24 +242,26 @@ impl Builder {
         };
         let tag: Ident = Ident::new(tag, element.name().span());
         let node = self.next_node();
-        let node_ident = format_ident!("__fino_node_{node}");
+        let node_ident = self.node_ident(node);
+        let template_ident = self.template_ident.clone();
         let parent = match parent {
             Some(parent) => {
-                let parent_ident = format_ident!("__fino_node_{parent}");
+                let parent_ident = self.node_ident(parent);
                 quote! { Some(#parent_ident) }
             }
             None => quote! { None },
         };
         self.template.push(quote! {
-            let #node_ident = __fino_template.element(
+            let #node_ident = #template_ident.element(
                 #parent,
                 ::fino::dom_api::Tag::#tag,
             );
         });
 
         let mut errors = None;
+        let mut events = BTreeSet::new();
         for attribute in element.attributes() {
-            if let Err(error) = self.attribute(attribute, node) {
+            if let Err(error) = self.attribute(attribute, node, &mut events) {
                 combine(&mut errors, error);
             }
         }
@@ -246,7 +277,12 @@ impl Builder {
         }
     }
 
-    fn attribute(&mut self, attribute: &NodeAttribute, node: usize) -> syn::Result<()> {
+    fn attribute(
+        &mut self,
+        attribute: &NodeAttribute,
+        node: usize,
+        events: &mut BTreeSet<String>,
+    ) -> syn::Result<()> {
         let NodeAttribute::Attribute(attribute) = attribute else {
             return Err(syn::Error::new_spanned(
                 attribute,
@@ -254,11 +290,39 @@ impl Builder {
             ));
         };
         let key = attribute.key.to_string();
+        if key == "fino:name" {
+            if node != 0 {
+                return Err(syn::Error::new_spanned(
+                    &attribute.key,
+                    "fino:name is only supported on the root view element",
+                ));
+            }
+            if self.name.is_some() {
+                return Err(syn::Error::new_spanned(
+                    &attribute.key,
+                    "fino:name is specified more than once",
+                ));
+            }
+            let value = attribute.value().ok_or_else(|| {
+                syn::Error::new_spanned(&attribute.key, "fino:name requires a string value")
+            })?;
+            let literal = string_literal(value).ok_or_else(|| {
+                syn::Error::new_spanned(value, "fino:name requires a static string literal")
+            })?;
+            self.name = Some(literal.value());
+            return Ok(());
+        }
         if let Some(event) = key.strip_prefix("on:") {
             if event != "click" {
                 return Err(syn::Error::new_spanned(
                     &attribute.key,
                     format!("unsupported event `{key}`; view! supports only on:click"),
+                ));
+            }
+            if !events.insert(key.clone()) {
+                return Err(syn::Error::new_spanned(
+                    &attribute.key,
+                    format!("duplicate event `{key}` on one element"),
                 ));
             }
             let value = attribute.value().ok_or_else(|| {
@@ -274,7 +338,9 @@ impl Builder {
             _ => {
                 return Err(syn::Error::new_spanned(
                     &attribute.key,
-                    format!("unsupported attribute `{key}`; view! supports only aria-label"),
+                    format!(
+                        "unsupported attribute `{key}`; view! supports aria-label and root fino:name"
+                    ),
                 ));
             }
         };
@@ -284,10 +350,11 @@ impl Builder {
         })?;
 
         if let Some(literal) = string_literal(value) {
-            let node_variable = Ident::new(&format!("__fino_node_{node}"), literal.span());
+            let node_ident = self.node_ident(node);
+            let template_ident = self.template_ident.clone();
             self.template.push(quote! {
-                __fino_template.static_attribute(
-                    #node_variable,
+                #template_ident.static_attribute(
+                    #node_ident,
                     ::fino::dom_api::Attribute::#attribute_ident,
                     #literal,
                 );
@@ -345,10 +412,11 @@ impl Builder {
         }
         let literal = &text.value;
         let node = self.next_node();
-        let node_ident = format_ident!("__fino_node_{node}");
-        let parent_ident = format_ident!("__fino_node_{parent}");
+        let node_ident = self.node_ident(node);
+        let parent_ident = self.node_ident(parent);
+        let template_ident = self.template_ident.clone();
         self.template.push(quote! {
-            let #node_ident = __fino_template.text(#parent_ident, #literal);
+            let #node_ident = #template_ident.text(#parent_ident, #literal);
         });
         Ok(())
     }
@@ -357,13 +425,19 @@ impl Builder {
         let expression = block_expression(block)?;
         let closure = self.closure(expression, ClosureKind::Text)?;
         let node = self.next_node();
-        let node_ident = format_ident!("__fino_node_{node}");
-        let parent_ident = format_ident!("__fino_node_{parent}");
+        let node_ident = self.node_ident(node);
+        let parent_ident = self.node_ident(parent);
+        let template_ident = self.template_ident.clone();
         self.template.push(quote! {
-            let #node_ident = __fino_template.text_slot(#parent_ident);
+            let #node_ident = #template_ident.text_slot(#parent_ident);
         });
+        let name = match &self.name {
+            Some(prefix) if self.text_slots.is_empty() => format!("{prefix}/text"),
+            Some(prefix) => format!("{prefix}/text/{node}"),
+            None => format!("view/text/{node}"),
+        };
         self.text_slots.push(node);
-        let name = LitStr::new(&format!("view/text/{node}"), expression.span());
+        let name = LitStr::new(&name, expression.span());
         self.bindings.push(Binding::Text {
             node,
             name,
@@ -387,6 +461,10 @@ impl Builder {
         });
         Ok(index)
     }
+}
+
+fn hidden_ident(name: &str) -> Ident {
+    Ident::new(name, Span::mixed_site())
 }
 
 fn closure_tokens(closure: &Closure, shared: &BTreeMap<String, usize>) -> TokenStream {
@@ -435,7 +513,7 @@ impl ClosureKind {
         match self {
             Self::Text => "dynamic text closure must not take arguments",
             Self::Attribute => "dynamic attribute closure must not take arguments",
-            Self::Event => "event closure must not take arguments; use set values through signals",
+            Self::Event => "event closure must not take arguments; write values through signals",
         }
     }
 }

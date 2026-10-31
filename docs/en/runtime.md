@@ -69,9 +69,10 @@ The counter now uses a deliberately small Rust RSX subset. `rstml` parses the to
 ```rust
 fn counter<B: DomBackend + 'static>() -> View<B> {
     View::new(|runtime, owner| {
-        let count = signal(0);
+        let count = signal_named("counter/count", 0);
         view! {
             <button
+                fino:name="counter"
                 aria-label="Increment counter"
                 on:click={move || count.update(|value| *value += 1)}
             >
@@ -85,10 +86,12 @@ fn counter<B: DomBackend + 'static>() -> View<B> {
 | Authoring form | Lowering |
 |---|---|
 | One static `<button>` with quoted text | `Template` |
-| `{move || value}` child | `TextBinding` |
-| `on:click={move || action()}` | `EventBinding` |
-| Dynamic `aria-label={move || value}` | `AttributeBinding` |
+| `{move \|\| value}` child | `TextBinding` |
+| `on:click={move \|\| action()}` | `EventBinding` |
+| Dynamic `aria-label={move \|\| value}` | `AttributeBinding` |
 | Static `aria-label="..."` | Template attribute |
+
+The optional root `fino:name` attribute is compile-time metadata rather than a DOM attribute. It names the counter's text effect `counter/text`; ordinary views keep the default `view/text/{node}` diagnostic name.
 
 `View::mount` installs the component owner, calls the build closure exactly once, mounts the static template, and then binds events and effects to the existing nodes. `signal()` inside the closure resolves against that owner. A signal captured by multiple generated closures is cloned into each closure so the component is not re-executed and clicks update only the target binding.
 

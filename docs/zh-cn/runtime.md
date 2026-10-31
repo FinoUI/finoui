@@ -69,9 +69,10 @@ fn counter() -> View {
 ```rust
 fn counter<B: DomBackend + 'static>() -> View<B> {
     View::new(|runtime, owner| {
-        let count = signal(0);
+        let count = signal_named("counter/count", 0);
         view! {
             <button
+                fino:name="counter"
                 aria-label="Increment counter"
                 on:click={move || count.update(|value| *value += 1)}
             >
@@ -85,10 +86,12 @@ fn counter<B: DomBackend + 'static>() -> View<B> {
 | 作者写法 | 下沉结果 |
 |---|---|
 | 一个静态 `<button>` 与带引号文本 | `Template` |
-| `{move || value}` 子节点 | `TextBinding` |
-| `on:click={move || action()}` | `EventBinding` |
-| 动态 `aria-label={move || value}` | `AttributeBinding` |
+| `{move \|\| value}` 子节点 | `TextBinding` |
+| `on:click={move \|\| action()}` | `EventBinding` |
+| 动态 `aria-label={move \|\| value}` | `AttributeBinding` |
 | 静态 `aria-label="..."` | 模板属性 |
+
+根元素上的可选 `fino:name` 是编译期元数据，不会写入 DOM。它把计数器的文本 Effect 命名为 `counter/text`；普通视图仍保留默认诊断名 `view/text/{node}`。
 
 `View::mount` 安装组件 Owner，只调用一次构建闭包，挂载静态模板，然后把事件与 Effect 绑定到已有节点。闭包内的 `signal()` 通过该 Owner 解析。被多个生成闭包捕获的 Signal 会分别克隆进各闭包，因此组件不会重新执行，点击只更新目标绑定。
 

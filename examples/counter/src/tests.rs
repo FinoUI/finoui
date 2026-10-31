@@ -16,7 +16,7 @@ use fino::{
     runtime::Runtime,
 };
 
-use super::mount_counter_with_state;
+use super::{mount_counter, mount_counter_with_state};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -44,6 +44,22 @@ fn selector() -> Selector {
         role: Role::Button,
         name: "Increment counter".to_owned(),
     }
+}
+
+/// Keeps the counter's stable signal and text-effect diagnostic names.
+/// 保持计数器稳定的 Signal 与文本 Effect 诊断名。
+#[test]
+fn default_counter_keeps_diagnostic_names() {
+    let _guard = lock();
+    let mut runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let _button = mount_counter(&mut runtime, &owner);
+
+    let snapshot = owner.snapshot();
+    assert_eq!(snapshot.signals.len(), 1);
+    assert_eq!(snapshot.signals[0].name, "counter/count");
+    assert_eq!(snapshot.effects.len(), 1);
+    assert_eq!(snapshot.effects[0].name, "counter/text");
 }
 
 /// Derives the dynamic target from the public initial write instead of a fixed node ID.

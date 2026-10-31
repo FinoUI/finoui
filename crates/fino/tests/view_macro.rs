@@ -93,6 +93,7 @@ fn view_counter_matches_manual_identity_and_component_execution() {
     let button = counter().mount(&mut runtime, &owner);
 
     assert_eq!(runtime.component_executions().get(), 1);
+    assert_eq!(owner.snapshot().effects[0].name, "view/text/2");
     assert_eq!(
         runtime.backend().text_content(&button).as_deref(),
         Some("Count: 0")
@@ -254,6 +255,43 @@ fn view_counter_matches_manual_construction() {
             .iter()
             .filter(|operation| matches!(operation, BackendOp::SetText { .. }))
             .count()
+    );
+}
+
+/// Generated locals keep macro hygiene and do not shadow caller bindings.
+/// 生成的局部变量保持宏卫生，不遮蔽调用者的同名绑定。
+#[test]
+fn generated_locals_do_not_shadow_caller_bindings() {
+    let _guard = lock();
+    let mut runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let count = owner.signal_named("test/hygiene", 0_i32);
+    let click_count = count.clone();
+    let __fino_template = 40_i32;
+    let __fino_nodes = 2_i32;
+    let __fino_node_0 = 1_i32;
+    let view = View::<MockBackend>::new(move |runtime, owner| {
+        let _owner = owner;
+        fino::view! {
+            <button
+                fino:name="hygiene"
+                on:click={move || click_count.update(|value| *value += __fino_nodes)}
+            >
+                "Total: " {move || __fino_template + __fino_node_0 + click_count.get()}
+            </button>
+        }
+    });
+    let button = view.mount(&mut runtime, &owner);
+
+    assert_eq!(owner.snapshot().effects[0].name, "hygiene/text");
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Total: 41")
+    );
+    click(&runtime, &button);
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Total: 43")
     );
 }
 

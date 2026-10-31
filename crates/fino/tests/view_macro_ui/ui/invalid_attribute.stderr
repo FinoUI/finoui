@@ -1,4 +1,4 @@
-error: unsupported attribute `class`; view! supports only aria-label
+error: unsupported attribute `class`; view! supports aria-label and root fino:name
  --> tests/view_macro_ui/ui/invalid_attribute.rs:3:17
   |
 3 |         <button class="counter"></button>

@@ -5,7 +5,7 @@ use fino::{
     dom_api::DomBackend,
     reactive::{Owner, Signal},
     runtime::Runtime,
-    view::{View, ViewOutput, signal},
+    view::{View, ViewOutput, signal_named},
 };
 
 /// Shared cross-backend conformance sequence and stable report.
@@ -35,7 +35,7 @@ pub mod web;
 /// 使用 `view!` 构建的共享计数器组件作者接口。
 pub fn counter<B: DomBackend + 'static>() -> View<B> {
     View::new(|runtime, owner| {
-        let count = signal(0);
+        let count = signal_named("counter/count", 0);
         counter_markup(runtime, owner, count)
     })
 }
@@ -99,6 +99,7 @@ fn counter_markup<B: DomBackend + 'static>(
 ) -> ViewOutput<B> {
     fino::view! {
         <button
+            fino:name="counter"
             aria-label="Increment counter"
             on:click={move || count.update(|value| *value += 1)}
         >

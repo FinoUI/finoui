@@ -1,0 +1,5 @@
+error: event closure must not take arguments; write values through signals
+ --> tests/view_macro_ui/ui/invalid_event_arguments.rs:3:27
+  |
+3 |         <button on:click={move |_event| {}}></button>
+  |                           ^^^^^^^^^^^^^^^^
