@@ -35,7 +35,7 @@ use crate::{
     dom_api::{Attribute, DomBackend, Event, EventContext, EventKind, Tag},
     reactive::Owner,
     runtime::Runtime,
-    show::{RangeAnchor, Show, ShowContext, release_after_detach},
+    show::{RangeAnchor, Show, ShowContext, terminate_owner_and_nodes},
     view::with_owner,
 };
 
@@ -90,6 +90,7 @@ impl std::error::Error for ForError {}
 pub struct ForContext<B: DomBackend + 'static> {
     inner: ShowContext<B>,
     owned: Rc<std::cell::RefCell<Vec<B::Node>>>,
+    pending_dispose: Vec<Box<dyn FnOnce()>>,
 }
 
 /// Restricted effect context for one keyed item.
@@ -154,6 +155,7 @@ impl<B: DomBackend + 'static> ForContext<B> {
         Self {
             inner: ShowContext::new(runtime, owner),
             owned: Rc::new(std::cell::RefCell::new(Vec::new())),
+            pending_dispose: Vec::new(),
         }
     }
 
@@ -170,8 +172,16 @@ impl<B: DomBackend + 'static> ForContext<B> {
     /// runs during item owner disposal.
     /// 回调可以清除探针状态或其它按条目维护的数据；它在条目 Owner 释放期间
     /// 运行。
-    pub fn on_dispose(&self, cleanup: impl FnOnce() + 'static) {
-        self.inner.owner().on_dispose(cleanup);
+    pub fn on_dispose(&mut self, cleanup: impl FnOnce() + 'static) {
+        self.pending_dispose.push(Box::new(cleanup));
+    }
+
+    /// Registers deferred item cleanups after builder bindings.
+    /// 在构建器绑定之后注册延迟的条目清理。
+    fn flush_on_dispose(&mut self) {
+        for cleanup in std::mem::take(&mut self.pending_dispose) {
+            self.inner.owner().on_dispose(cleanup);
+        }
     }
 
     /// Rejects a mutation that targets a node outside this item transaction.
@@ -320,20 +330,9 @@ impl<B: DomBackend + 'static, K> ForEntry<B, K> {
             created,
             ..
         } = self;
-        let owner_panic = catch_unwind(AssertUnwindSafe(|| owner.dispose())).err();
-        let release_panic = catch_unwind(AssertUnwindSafe(|| {
-            let mut nodes = created;
-            nodes.extend(returned_nodes);
-            release_after_detach(runtime, &nodes);
-        }))
-        .err();
-        // A user on_dispose panic must not prevent node release, and must not be
-        // replaced by a secondary release panic.
-        // 用户 on_dispose panic 不得阻止节点释放，也不得被二次 release panic 覆盖。
-        if let Some(payload) = owner_panic {
-            resume_unwind(payload);
-        }
-        if let Some(payload) = release_panic {
+        let mut nodes = created;
+        nodes.extend(returned_nodes);
+        if let Some(payload) = terminate_owner_and_nodes(owner, nodes, runtime, None) {
             resume_unwind(payload);
         }
     }
@@ -825,6 +824,7 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             with_owner(&owner, || (self.content)(&mut context, &key))
         }));
+        context.flush_on_dispose();
         match outcome {
             Ok(nodes) => {
                 let created = context.inner.take_created();
@@ -838,9 +838,10 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
             }
             Err(payload) => {
                 let created = context.inner.take_created();
-                owner.dispose();
-                release_after_detach(&self.runtime, &created);
-                resume_unwind(payload);
+                match terminate_owner_and_nodes(owner, created, &self.runtime, Some(payload)) {
+                    Some(payload) => resume_unwind(payload),
+                    None => unreachable!("builder payload must be preserved"),
+                }
             }
         }
     }

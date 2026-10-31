@@ -956,3 +956,65 @@ fn show_hide_owner_panic_releases_content_and_keeps_anchors() {
         "terminal disposal releases the remaining anchors"
     );
 }
+
+/// Show content builder panic wins over a panicking content-owner on_dispose,
+/// while nodes, listeners, effects, and anchors are still released.
+/// Show 内容构建器 panic 优先于内容 Owner 的 on_dispose panic，同时仍释放节点、
+/// 监听、Effect 与锚点。
+#[test]
+fn show_builder_panic_wins_over_owner_cleanup_panic() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let baseline = runtime.backend().dom_snapshot().nodes.len();
+
+    let failure = catch_unwind(AssertUnwindSafe(|| {
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/builder-owner-panic",
+            || true,
+            |context: &mut ShowContext<MockBackend>| {
+                let action = context.create_element(Tag::Button);
+                let value = context.create_text("value");
+                context.insert_before(&action, &value, None);
+                let bound = value;
+                context.effect("show/failed/text", move |effect| {
+                    effect.backend_mut().set_text(&bound, "failed");
+                });
+                context.listen(&action, EventKind::Click, |_event, _context| {});
+                context
+                    .owner()
+                    .on_dispose(|| panic!("content owner cleanup"));
+                panic!("show builder boom");
+            },
+        );
+    }));
+
+    let payload = failure.expect_err("builder panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "show builder boom");
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        baseline,
+        "failed content and anchors leave no storage"
+    );
+    assert!(
+        owner
+            .snapshot()
+            .effects
+            .iter()
+            .any(|effect| effect.name == "show/failed/text" && !effect.active),
+        "the failed content effect is inactive"
+    );
+}

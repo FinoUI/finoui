@@ -146,6 +146,27 @@ pub(crate) fn release_after_detach<B: DomBackend + 'static>(
     }
 }
 
+/// Stops an owner, then detaches and releases every tracked node exactly once.
+/// 停止一个 Owner，然后分离并逐个释放全部受跟踪节点。
+///
+/// If `first_panic` already exists, it always wins. Otherwise an owner cleanup
+/// panic wins over a secondary release panic. Node release still runs for every
+/// case, so a user `on_dispose` panic cannot orphan backend ranges.
+/// 若已有 `first_panic`，始终保留它。否则 Owner 清理 panic 优先于二次 release
+/// panic。所有情况下都会继续释放节点，因此用户 `on_dispose` panic 不会留下
+/// 孤儿后端范围。
+pub(crate) fn terminate_owner_and_nodes<B: DomBackend + 'static>(
+    owner: Owner,
+    nodes: Vec<B::Node>,
+    runtime: &Runtime<B>,
+    first_panic: Option<Box<dyn std::any::Any + Send>>,
+) -> Option<Box<dyn std::any::Any + Send>> {
+    let owner_panic = catch_unwind(AssertUnwindSafe(|| owner.dispose())).err();
+    let release_panic =
+        catch_unwind(AssertUnwindSafe(|| release_after_detach(runtime, &nodes))).err();
+    first_panic.or(owner_panic).or(release_panic)
+}
+
 /// Transactional construction context for one [`Show`] content mount.
 /// 一次 [`Show`] 内容挂载使用的事务性构建上下文。
 ///
@@ -489,17 +510,9 @@ impl<B: DomBackend + 'static> ActiveRange<B> {
             nodes: returned_nodes,
             created,
         } = self;
-        let owner_panic = catch_unwind(AssertUnwindSafe(|| owner.dispose())).err();
-        let release_panic = catch_unwind(AssertUnwindSafe(|| {
-            let mut nodes = created;
-            nodes.extend(returned_nodes);
-            release_after_detach(runtime, &nodes);
-        }))
-        .err();
-        if let Some(payload) = owner_panic {
-            resume_unwind(payload);
-        }
-        if let Some(payload) = release_panic {
+        let mut nodes = created;
+        nodes.extend(returned_nodes);
+        if let Some(payload) = terminate_owner_and_nodes(owner, nodes, runtime, None) {
             resume_unwind(payload);
         }
     }
@@ -588,9 +601,11 @@ impl<B: DomBackend + 'static> ShowState<B> {
             }
             Err(payload) => {
                 let created = std::mem::take(&mut context.created);
-                owner.dispose();
-                release_after_detach(runtime, &created);
-                resume_unwind(payload);
+                if let Some(payload) =
+                    terminate_owner_and_nodes(owner, created, runtime, Some(payload))
+                {
+                    resume_unwind(payload);
+                }
             }
         }
     }

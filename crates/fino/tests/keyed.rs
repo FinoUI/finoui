@@ -2087,3 +2087,142 @@ fn keyed_for_removal_panic_with_reentrant_dispose_is_terminal() {
     assert_eq!(runtime.backend().operations().len(), after_dispose);
     assert!(list.is_empty());
 }
+
+/// A failed new item builder keeps its own panic even when the item owner's
+/// on_dispose panics, and still releases nodes, listeners, and effects.
+/// 新条目构建器失败时，即使条目 Owner 的 on_dispose 也 panic，仍保留构建器
+/// panic，并释放节点、监听与 Effect。
+#[test]
+fn keyed_for_builder_panic_wins_over_owner_cleanup_panic() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let a_handle: Rc<RefCell<Option<MockNode>>> = Rc::new(RefCell::new(None));
+    let list = {
+        let read_items = items.clone();
+        let a_handle = Rc::clone(&a_handle);
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/builder-owner-panic",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                if key == "b" {
+                    let item = context.create_element(Tag::Button);
+                    let value = context.create_text("b");
+                    context.insert_before(&item, &value, None);
+                    context.on_dispose(|| panic!("owner cleanup boom"));
+                    let bound = value;
+                    context.effect("keyed/failed/text", move |effect| {
+                        effect.set_text(&bound, "failed");
+                    });
+                    context.listen(&item, EventKind::Click, |_event, _context| {});
+                    panic!("builder boom");
+                }
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                if key == "a" {
+                    *a_handle.borrow_mut() = Some(item);
+                }
+                vec![item]
+            },
+        )
+    };
+    let old_handle = a_handle.borrow().expect("a handle");
+    let baseline = runtime.backend().dom_snapshot().nodes.len();
+
+    let failure = catch_unwind(AssertUnwindSafe(|| items.set(keys(&["a", "b"]))));
+    let payload = failure.expect_err("builder panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "builder boom", "the builder payload wins");
+    assert_eq!(list.keys(), keys(&["a"]));
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        baseline,
+        "the failed item leaves no nodes behind"
+    );
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert!(
+        owner
+            .snapshot()
+            .effects
+            .iter()
+            .any(|effect| effect.name == "keyed/failed/text" && !effect.active),
+        "the failed item effect is inactive"
+    );
+    assert_eq!(
+        a_handle.borrow().expect("a handle still live"),
+        old_handle,
+        "the committed item keeps its NodeId"
+    );
+
+    items.set(keys(&["a", "c"]));
+    assert_eq!(list.keys(), keys(&["a", "c"]));
+    assert_eq!(a_handle.borrow().expect("a handle"), old_handle);
+    list.dispose();
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "subsequent updates and whole-list disposal remain healthy"
+    );
+}
+
+/// Without a builder panic, a terminal owner cleanup panic still releases every
+/// node and anchor and propagates the owner payload.
+/// 没有构建器 panic 时，终止 Owner 清理 panic 仍释放全部节点与锚点，并传播
+/// Owner payload。
+#[test]
+fn keyed_for_terminal_owner_panic_still_releases_range() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let list = {
+        let read_items = items.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/terminal-owner-panic",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                context.listen(&item, EventKind::Click, |_event, _context| {});
+                context.on_dispose(|| panic!("terminal owner cleanup"));
+                vec![item]
+            },
+        )
+    };
+
+    let failure = catch_unwind(AssertUnwindSafe(|| list.dispose()));
+    let payload = failure.expect_err("owner cleanup panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "terminal owner cleanup");
+    assert!(list.is_empty());
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "item nodes and list anchors are released"
+    );
+    let after_dispose = runtime.backend().operations().len();
+    list.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+}
