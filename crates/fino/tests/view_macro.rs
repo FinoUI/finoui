@@ -361,6 +361,148 @@ fn format_macro_arguments_are_captured() {
     );
 }
 
+/// `if let` branch bindings do not leak into the enclosing capture set.
+/// `if let` 分支绑定不会泄漏到外层捕获集合。
+// The if-let shape is the capture-analysis fixture.
+// if-let 形式是捕获分析测试的固定目标。
+#[allow(clippy::manual_unwrap_or, clippy::manual_unwrap_or_default)]
+#[test]
+fn if_let_bindings_are_scoped_to_the_branch() {
+    let _guard = lock();
+    let mut runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let count = owner.signal_named("test/if-let", 0_i32);
+    let click_count = count.clone();
+    let view = View::<MockBackend>::new(move |runtime, owner| {
+        let _owner = owner;
+        fino::view! {
+            <button on:click={move || {
+                if let Some(value) = Some(1) {
+                    click_count.update(|count| *count += value);
+                }
+            }}>
+                "Value: " {move || {
+                    if let Some(value) = Some(click_count.get()) {
+                        value
+                    } else {
+                        0
+                    }
+                }}
+            </button>
+        }
+    });
+    let button = view.mount(&mut runtime, &owner);
+
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Value: 0")
+    );
+    click(&runtime, &button);
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Value: 1")
+    );
+}
+
+/// Match guards are visited after pattern bindings and before the arm body.
+/// match guard 在 pattern 绑定之后、arm body 之前访问。
+#[test]
+fn match_guards_capture_shared_signals() {
+    let _guard = lock();
+    let mut runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let count = owner.signal_named("test/guard", 0_i32);
+    let click_count = count.clone();
+    let view = View::<MockBackend>::new(move |runtime, owner| {
+        let _owner = owner;
+        fino::view! {
+            <button on:click={move || click_count.update(|value| *value += 1)}>
+                "Value: " {move || match Some(7) {
+                    Some(value) if click_count.get() >= value - 7 => value,
+                    _ => -1,
+                }}
+            </button>
+        }
+    });
+    let button = view.mount(&mut runtime, &owner);
+
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Value: 7")
+    );
+    click(&runtime, &button);
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Value: 7")
+    );
+    assert_eq!(owner.snapshot().effects[0].executions, 2);
+}
+
+/// Semicolon `vec!` arguments participate in capture sharing.
+/// 分号形式的 `vec!` 参数参与捕获共享。
+// vec! semicolon syntax is the macro-argument fixture.
+// vec! 分号形式是宏参数测试的固定目标。
+#[allow(clippy::useless_vec)]
+#[test]
+fn vec_semicolon_arguments_are_analyzed() {
+    let _guard = lock();
+    let mut runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let count = owner.signal_named("test/vec", 0_i32);
+    let click_count = count.clone();
+    let view = View::<MockBackend>::new(move |runtime, owner| {
+        let _owner = owner;
+        fino::view! {
+            <button on:click={move || click_count.update(|value| *value += 1)}>
+                "Count: " {move || {
+                    let values = vec![click_count.get(); 2];
+                    values[0]
+                }}
+            </button>
+        }
+    });
+    let button = view.mount(&mut runtime, &owner);
+
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Count: 0")
+    );
+    click(&runtime, &button);
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Count: 1")
+    );
+}
+
+/// Inline named captures in `format!` join the lexical capture set.
+/// `format!` 的内联命名捕获进入词法捕获集合。
+// Inline format capture is the macro-argument fixture.
+// 内联 format 捕获是宏参数测试的固定目标。
+#[allow(clippy::useless_format)]
+#[test]
+fn format_inline_named_captures_are_analyzed() {
+    let _guard = lock();
+    let mut runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let label = String::from("label");
+    let view = View::<MockBackend>::new(move |runtime, owner| {
+        let _owner = owner;
+        fino::view! {
+            <button on:click={move || {
+                let _ = label.len();
+            }}>
+                "Value: " {move || format!("{label}")}
+            </button>
+        }
+    });
+    let button = view.mount(&mut runtime, &owner);
+
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Value: label")
+    );
+}
+
 /// Dynamic attributes lower to an owner-scoped AttributeBinding.
 /// 动态属性下沉为 Owner 作用域内的 AttributeBinding。
 #[test]

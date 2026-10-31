@@ -203,7 +203,7 @@ fn run() -> ExitCode {
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
-        Command::Native { smoke } => match fino_counter::native::run(smoke) {
+        Command::Native { smoke } => match fino_counter::native_runner::run(smoke) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => output_error(
                 ToolError::for_backend("UI_NATIVE_HOST", error.to_string(), "native"),

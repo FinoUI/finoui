@@ -1,0 +1,5 @@
+error: unsupported macro `unknown_macro!` in view! binding; only expression argument macros are supported
+ --> tests/view_macro_ui/ui/unsupported_macro.rs:4:13
+  |
+4 |             unknown_macro!();
+  |             ^^^^^^^^^^^^^^^^

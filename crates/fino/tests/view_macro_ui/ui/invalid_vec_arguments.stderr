@@ -1,0 +1,5 @@
+error: cannot analyze `vec!` arguments: expected `,`
+ --> tests/view_macro_ui/ui/invalid_vec_arguments.rs:4:26
+  |
+4 |             let values = vec![0;];
+  |                          ^^^^^^^^

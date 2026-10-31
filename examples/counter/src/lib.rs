@@ -21,10 +21,15 @@ pub mod runner;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod browser;
 
-/// Native winit/wgpu host for the same counter.
-/// 同一计数器的原生 winit/wgpu Host。
+/// Native Host and Backend initialization for the same counter.
+/// 同一计数器的原生 Host 与 Backend 初始化。
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
+
+/// Native winit event loop, rendering, input routing, and smoke runner.
+/// 原生 winit 事件循环、渲染、输入路由与 smoke 运行器。
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native_runner;
 
 /// wasm Host and Backend initialization.
 /// wasm Host 与 Backend 初始化。

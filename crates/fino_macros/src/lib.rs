@@ -457,7 +457,7 @@ impl Builder {
         let index = self.closures.len();
         self.closures.push(Closure {
             expression: expression.clone(),
-            captured: captured_identifiers(closure),
+            captured: captured_identifiers(closure)?,
         });
         Ok(index)
     }
@@ -559,7 +559,7 @@ fn string_literal(expression: &Expr) -> Option<&LitStr> {
     }
 }
 
-fn captured_identifiers(closure: &ExprClosure) -> BTreeSet<String> {
+fn captured_identifiers(closure: &ExprClosure) -> syn::Result<BTreeSet<String>> {
     let mut collector = CaptureCollector::default();
     collector.push_scope();
     for input in &closure.inputs {
@@ -567,13 +567,17 @@ fn captured_identifiers(closure: &ExprClosure) -> BTreeSet<String> {
     }
     collector.visit_expr(&closure.body);
     collector.pop_scope();
-    collector.used
+    match collector.error {
+        Some(error) => Err(error),
+        None => Ok(collector.used),
+    }
 }
 
 #[derive(Default)]
 struct CaptureCollector {
     used: BTreeSet<String>,
     scopes: Vec<BTreeSet<String>>,
+    error: Option<syn::Error>,
 }
 
 impl CaptureCollector {
@@ -599,6 +603,72 @@ impl CaptureCollector {
             scope.extend(names);
         }
     }
+
+    fn record_error(&mut self, error: syn::Error) {
+        match &mut self.error {
+            Some(existing) => existing.combine(error),
+            None => self.error = Some(error),
+        }
+    }
+
+    fn analyze_macro(&mut self, mac: &syn::Macro) {
+        let Some(name) = mac
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            self.record_error(syn::Error::new_spanned(
+                mac,
+                "view! cannot analyze a macro without a name in a binding closure",
+            ));
+            return;
+        };
+        if !is_expression_macro(&name) {
+            self.record_error(syn::Error::new_spanned(
+                mac,
+                format!(
+                    "unsupported macro `{name}!` in view! binding; only expression argument macros are supported"
+                ),
+            ));
+            return;
+        }
+
+        if name == "vec"
+            && let Ok(arguments) = parse_vec_semicolon_arguments(mac)
+        {
+            for argument in arguments {
+                self.visit_expr(&argument);
+            }
+            return;
+        }
+
+        let parser = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated;
+        match mac.parse_body_with(parser) {
+            Ok(arguments) => {
+                if matches!(name.as_str(), "format" | "format_args")
+                    && let Some(Expr::Lit(ExprLit {
+                        lit: Lit::Str(literal),
+                        ..
+                    })) = arguments.first()
+                {
+                    let literal_value = literal.value();
+                    for identifier in inline_format_identifiers(&literal_value) {
+                        if !self.is_bound(&identifier) {
+                            self.used.insert(identifier);
+                        }
+                    }
+                }
+                for argument in arguments {
+                    self.visit_expr(&argument);
+                }
+            }
+            Err(error) => self.record_error(syn::Error::new_spanned(
+                mac,
+                format!("cannot analyze `{name}!` arguments: {error}"),
+            )),
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for CaptureCollector {
@@ -608,7 +678,7 @@ impl<'ast> Visit<'ast> for CaptureCollector {
             && path.path.segments.len() == 1
         {
             let identifier = path.path.segments[0].ident.to_string();
-            if !self.is_bound(&identifier) {
+            if !self.is_bound(&identifier) && !is_constructor(&identifier) {
                 self.used.insert(identifier);
             }
         }
@@ -652,36 +722,108 @@ impl<'ast> Visit<'ast> for CaptureCollector {
         self.pop_scope();
     }
 
+    fn visit_expr_if(&mut self, if_expression: &'ast syn::ExprIf) {
+        if let Expr::Let(let_expression) = &*if_expression.cond {
+            self.visit_expr(&let_expression.expr);
+            self.push_scope();
+            self.bind_pattern(&let_expression.pat);
+            self.visit_block(&if_expression.then_branch);
+            self.pop_scope();
+        } else {
+            self.visit_expr(&if_expression.cond);
+            self.visit_block(&if_expression.then_branch);
+        }
+        if let Some((_else_token, else_branch)) = &if_expression.else_branch {
+            self.visit_expr(else_branch);
+        }
+    }
+
     fn visit_arm(&mut self, arm: &'ast syn::Arm) {
         self.push_scope();
-        self.bind_pattern(&arm.pat);
+        if let syn::Pat::Guard(guarded) = &arm.pat {
+            self.bind_pattern(&guarded.pat);
+            self.visit_expr(&guarded.guard);
+        } else {
+            self.bind_pattern(&arm.pat);
+        }
         self.visit_expr(&arm.body);
         self.pop_scope();
     }
 
     fn visit_expr_macro(&mut self, mac: &'ast syn::ExprMacro) {
-        let Some(name) = mac
-            .mac
-            .path
-            .segments
-            .last()
-            .map(|segment| segment.ident.to_string())
-        else {
-            return;
-        };
-        if !is_expression_macro(&name) {
-            return;
+        self.analyze_macro(&mac.mac);
+    }
+
+    fn visit_stmt_macro(&mut self, mac: &'ast syn::StmtMacro) {
+        self.analyze_macro(&mac.mac);
+    }
+}
+
+fn parse_vec_semicolon_arguments(mac: &syn::Macro) -> syn::Result<Vec<Expr>> {
+    let parser = |input: syn::parse::ParseStream| -> syn::Result<Vec<Expr>> {
+        let element: Expr = input.parse()?;
+        input.parse::<syn::Token![;]>()?;
+        let count: Expr = input.parse()?;
+        if !input.is_empty() {
+            return Err(input.error("unexpected tokens after vec! repeat count"));
         }
-        // Every macro argument is an expression in these macros, so parse the
-        // arguments before visiting them instead of treating tokens as names.
-        // 这些宏的每个参数都是表达式；先解析参数，再按表达式访问其中的标识符。
-        let parser = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated;
-        if let Ok(arguments) = mac.mac.parse_body_with(parser) {
-            for argument in arguments {
-                self.visit_expr(&argument);
+        Ok(vec![element, count])
+    };
+    mac.parse_body_with(parser)
+}
+
+fn inline_format_identifiers(format: &str) -> BTreeSet<String> {
+    let mut identifiers = BTreeSet::new();
+    let mut characters = format.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '{' if characters.peek() == Some(&'{') => {
+                characters.next();
             }
+            '{' => {
+                let mut field = String::new();
+                while let Some(&next) = characters.peek() {
+                    if next == '}' {
+                        characters.next();
+                        break;
+                    }
+                    characters.next();
+                    if next == ':' {
+                        // Skip the format specification up to its closing brace.
+                        // 跳过格式说明，直到对应右花括号。
+                        for spec in characters.by_ref() {
+                            if spec == '}' {
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                    field.push(next);
+                }
+                if is_identifier(&field) {
+                    identifiers.insert(field);
+                }
+            }
+            '}' if characters.peek() == Some(&'}') => {
+                characters.next();
+            }
+            _ => {}
         }
     }
+    identifiers
+}
+
+fn is_constructor(identifier: &str) -> bool {
+    matches!(identifier, "Some" | "None" | "Ok" | "Err")
+}
+
+fn is_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 fn is_expression_macro(name: &str) -> bool {
@@ -716,6 +858,12 @@ fn collect_pattern_idents(pattern: &syn::Pat, bound: &mut BTreeSet<String>) {
         fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
             self.0.insert(pattern.ident.to_string());
             syn::visit::visit_pat_ident(self, pattern);
+        }
+
+        fn visit_pat_guard(&mut self, guard: &'ast syn::PatGuard) {
+            // The guard is evaluated after the pattern binds, but binds no names itself.
+            // guard 在 pattern 绑定后求值，但自身不引入新绑定。
+            self.visit_pat(&guard.pat);
         }
     }
     Bound(bound).visit_pat(pattern);
