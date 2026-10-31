@@ -157,7 +157,8 @@ let rows = For::mount(
 - 删除清理会捕获每个条目 Owner/on_dispose panic，保留首个 payload，继续释放全部被删除范围，把存活与新建条目恢复到已提交状态，最后才重新抛出。终止释放同样会先完成全部节点、锚点与 control 清理，再重新抛出。
 - For 条目释放、构建器回滚、已删除条目与终止清理共用同一条 Owner+节点终止路径：捕获 Owner 清理 panic，节点仍被分离并只释放一次，已有构建器/用户 payload 始终优先于清理或 release panic。Show 挂载回滚与活动范围释放使用同一规则。
 - `ForContext::on_dispose` 会延迟到条目构建结束，因此即使用户回调更早注册，监听与 Effect 清理也会先于用户 on_dispose 运行。
-- 不同 key 不得返回同一个外部节点。冲突会以 `UI_FOR_SHARED_NODE` 原子拒绝，保留既有所有者、NodeId 与 DOM；被拒绝的暂存条目只释放自身独有资源。
+- 不同 key 不得返回同一个外部节点。冲突会以 `UI_FOR_SHARED_NODE` 原子拒绝，保留既有所有者、NodeId 与 DOM；被拒绝的暂存条目只释放自身独有资源。重复 key 与共享节点错误的 `ForError::index` 都是被拒绝 key 在新请求列表中的位置。
+- 条目 Owner 与条目/列表锚点都在受保护事务内获取。锚点创建或插入失败会处置 Owner、释放部分锚点并保留后端 panic；初始列表/Show 锚点失败对 control Owner 做同样处理。放置阶段使用 retained key→旧位置映射，不再按 key 线性搜索。
 - 放置移动可回滚。后端 panic 会先恢复旧中段顺序、entries 与已提交 keys，再重新抛出；若回滚自身也 panic，列表进入终止清理并保留首个后端 payload。
 - `ForContext::show` 传入受限 `ForShowContext`，只能修改该嵌套范围创建的节点，且不暴露原始 Runtime。独立 `ShowContext::runtime()` 继续 public，供下游 Show 内容使用。
 - `RangeAnchor::create` 在创建或插入 panic 时释放部分锚点。`RangeAnchor::move_before` 对 `start` 自引用 no-op，并在首次后端操作前拒绝 `end` 或任一范围顶层节点作为参考。

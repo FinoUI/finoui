@@ -2295,6 +2295,10 @@ fn keyed_for_initial_shared_external_node_is_rejected() {
     };
     assert_eq!(error.code, "UI_FOR_SHARED_NODE");
     assert_eq!(
+        error.index, 1,
+        "the second key owns the conflicting staged node"
+    );
+    assert_eq!(
         runtime.backend().dom_snapshot().nodes.len(),
         2,
         "only the static root and tail remain"
@@ -2349,10 +2353,9 @@ fn keyed_for_update_shared_external_node_preserves_retained_owner() {
 
     items.set(keys(&["a", "b"]));
 
-    assert_eq!(
-        list.last_error().as_ref().map(|error| error.code.as_str()),
-        Some("UI_FOR_SHARED_NODE")
-    );
+    let error = list.last_error().expect("shared-node rejection");
+    assert_eq!(error.code, "UI_FOR_SHARED_NODE");
+    assert_eq!(error.index, 1, "the rejected key position is reported");
     assert_eq!(list.keys(), keys(&["a"]));
     assert_eq!(runtime.backend().dom_snapshot().nodes.len(), baseline);
     assert!(
@@ -2907,4 +2910,168 @@ fn keyed_for_nested_show_scope_rejects_foreign_mutation() {
     assert_eq!(list.keys(), keys(&["a", "c"]));
     list.dispose();
     assert_eq!(runtime.backend().dom_snapshot().nodes.len(), 2);
+}
+
+/// A second item-anchor create panic disposes the item owner and releases the
+/// first anchor while keeping the committed list intact.
+/// 第二个条目锚点创建 panic 会释放条目 Owner 与第一个锚点，并保持已提交列表。
+#[test]
+fn keyed_for_item_anchor_failure_keeps_committed_list() {
+    let runtime = Runtime::new(StrictBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", Vec::<String>::new());
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = {
+        let node = runtime.backend_mut().create_text("Tail");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    let list = {
+        let read_items = items.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/item-anchor-panic",
+            move || read_items.get(),
+            |context: &mut ForContext<StrictBackend>, key| {
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                vec![item]
+            },
+        )
+    };
+    let baseline = runtime.backend().inner().dom_snapshot().nodes.len();
+    runtime.backend().panic_anchor_after(2);
+
+    let failure = catch_unwind(AssertUnwindSafe(|| items.set(keys(&["a"]))));
+    let payload = failure.expect_err("item anchor panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "injected anchor create panic");
+    assert!(list.is_empty());
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot().nodes.len(),
+        baseline,
+        "the item owner, first anchor, and list anchors leave no extra storage"
+    );
+    assert_eq!(runtime.backend().inner().listener_count(), 0);
+
+    items.set(keys(&["b"]));
+    assert_eq!(list.keys(), keys(&["b"]));
+    list.dispose();
+    assert_eq!(runtime.backend().inner().dom_snapshot().nodes.len(), 2);
+}
+
+/// Initial list-anchor failure releases the first anchor and disposes the
+/// control owner, then a later mount succeeds.
+/// 初始列表锚点失败会释放第一个锚点并处置 control Owner，之后仍可重新挂载。
+#[test]
+fn keyed_for_initial_list_anchor_failure_disposes_control() {
+    let runtime = Runtime::new(StrictBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = {
+        let node = runtime.backend_mut().create_text("Tail");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    runtime.backend().panic_anchor_after(2);
+
+    let failure = catch_unwind(AssertUnwindSafe(|| {
+        let items = Vec::<String>::new();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/list-anchor-panic",
+            move || items.clone(),
+            |context: &mut ForContext<StrictBackend>, _key| vec![context.create_text("never")],
+        );
+    }));
+    let payload = failure.expect_err("list anchor panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "injected anchor create panic");
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot().nodes.len(),
+        2,
+        "partial anchors are released and static nodes remain"
+    );
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+
+    let items = Vec::<String>::new();
+    let list = For::mount(
+        &runtime,
+        &owner,
+        &root,
+        Some(&tail),
+        "keyed/list-anchor-retry",
+        move || items.clone(),
+        |context: &mut ForContext<StrictBackend>, _key| vec![context.create_text("never")],
+    );
+    list.dispose();
+    assert_eq!(runtime.backend().inner().dom_snapshot().nodes.len(), 2);
+}
+
+/// Show initial anchor failure also disposes its control owner and leaves no
+/// partial anchors.
+/// Show 初始锚点失败同样处置 control Owner，不留下部分锚点。
+#[test]
+fn show_initial_list_anchor_failure_disposes_control() {
+    let runtime = Runtime::new(StrictBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = {
+        let node = runtime.backend_mut().create_text("Tail");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    runtime.backend().panic_anchor_after(2);
+
+    let failure = catch_unwind(AssertUnwindSafe(|| {
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/anchor-panic",
+            || false,
+            |context: &mut fino::show::ShowContext<StrictBackend>| context.create_text("never"),
+        );
+    }));
+    let payload = failure.expect_err("Show anchor panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "injected anchor create panic");
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot().nodes.len(),
+        2,
+        "partial anchors are released and static nodes remain"
+    );
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+
+    let show = Show::mount(
+        &runtime,
+        &owner,
+        &root,
+        Some(&tail),
+        "show/anchor-retry",
+        || false,
+        |context: &mut fino::show::ShowContext<StrictBackend>| context.create_text("never"),
+    );
+    show.dispose();
+    assert_eq!(runtime.backend().inner().dom_snapshot().nodes.len(), 2);
 }

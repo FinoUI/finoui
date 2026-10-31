@@ -412,7 +412,15 @@ impl<B: DomBackend + 'static> Show<B> {
         F: FnMut(&mut ShowContext<B>) -> Vec<B::Node> + 'static,
     {
         let control = owner.child();
-        let anchors = RangeAnchor::create(runtime, parent, before);
+        let anchors = match catch_unwind(AssertUnwindSafe(|| {
+            RangeAnchor::create(runtime, parent, before)
+        })) {
+            Ok(anchors) => anchors,
+            Err(payload) => {
+                let _ = catch_unwind(AssertUnwindSafe(|| control.dispose()));
+                resume_unwind(payload);
+            }
+        };
         let dispose_requested = Rc::new(Cell::new(false));
         let state = Rc::new(RefCell::new(ShowState {
             runtime: runtime.clone(),

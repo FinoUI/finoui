@@ -1055,11 +1055,12 @@ fn show_parent_owner_dispose_in_content_builder_is_terminal() {
         "content and anchors are released after the parent request"
     );
     assert!(
-        signals_owner
+        parent_owner
             .snapshot()
             .effects
             .iter()
-            .all(|effect| !effect.active)
+            .any(|effect| effect.name == "show/parent-dispose/condition" && !effect.active),
+        "the parent-owned condition effect is terminated"
     );
     let after_dispose = runtime.backend().operations().len();
     visible.set(false);

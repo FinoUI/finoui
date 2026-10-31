@@ -39,12 +39,14 @@ use crate::{
     view::with_owner,
 };
 
-/// Deterministic duplicate-key rejection reported by a keyed [`For`].
-/// 由 keyed [`For`] 报告的确定性重复 key 拒绝结果。
+/// Deterministic key rejection reported by a keyed [`For`].
+/// 由 keyed [`For`] 报告的确定性 key 拒绝结果。
 ///
-/// The code is stable for machine checks. `index` is the position of the
-/// second occurrence in the requested key list.
-/// `code` 供机器检查使用且保持稳定；`index` 是请求 key 列表中第二次出现的
+/// The code is stable for machine checks. `index` is the rejected key's
+/// position in the requested new key list, for both duplicate keys and shared
+/// external nodes. For a duplicate, it is the position of the second occurrence.
+/// `code` 供机器检查使用且保持稳定；`index` 是被拒绝 key 在新请求列表中的
+/// 位置，同时适用于重复 key 与共享外部节点。重复 key 时，它是第二次出现的
 /// 位置。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForError {
@@ -54,8 +56,8 @@ pub struct ForError {
     /// Human-readable explanation.
     /// 供人阅读的错误说明。
     pub message: String,
-    /// Position of the duplicate key.
-    /// 重复 key 的位置。
+    /// Position of the rejected key in the requested new key list.
+    /// 被拒绝 key 在新请求列表中的位置。
     pub index: usize,
 }
 
@@ -70,11 +72,18 @@ impl ForError {
         }
     }
 
-    fn shared_node() -> Self {
+    /// Builds the shared-external-node rejection at the rejected key position.
+    /// 在拒绝 key 的位置构造共享外部节点错误。
+    ///
+    /// The code is stable for machine checks. `index` identifies the key whose
+    /// staged entry introduced or reused the conflicting external node.
+    /// `code` 供机器检查使用且保持稳定；`index` 标识引入或复用冲突外部节点的
+    /// 暂存 key。
+    fn shared_node(index: usize) -> Self {
         Self {
             code: "UI_FOR_SHARED_NODE".to_owned(),
-            message: "the same external node was returned by more than one key".to_owned(),
-            index: 0,
+            message: format!("shared external node at index {index}"),
+            index,
         }
     }
 }
@@ -612,7 +621,15 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> For<B, 
         validate_keys(&crate::reactive::untracked(&items))?;
 
         let control = owner.child();
-        let anchors = RangeAnchor::create(runtime, parent, before);
+        let anchors = match catch_unwind(AssertUnwindSafe(|| {
+            RangeAnchor::create(runtime, parent, before)
+        })) {
+            Ok(anchors) => anchors,
+            Err(payload) => {
+                let _ = catch_unwind(AssertUnwindSafe(|| control.dispose()));
+                resume_unwind(payload);
+            }
+        };
         let dispose_requested = Rc::new(std::cell::Cell::new(false));
         let state = Rc::new(std::cell::RefCell::new(ForState {
             runtime: runtime.clone(),
@@ -925,6 +942,7 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
         let existing_nodes = self.committed_nodes();
         let mut staging_nodes: Vec<(B::Node, usize)> = Vec::new();
         let mut shared_node = false;
+        let mut conflict_index = prefix;
         for (index, entry) in built.iter().enumerate() {
             let Some(entry) = entry else {
                 continue;
@@ -942,6 +960,7 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
                         .any(|(staged, owner)| staged == &node && *owner != index)
                 {
                     shared_node = true;
+                    conflict_index = prefix + index;
                     break;
                 }
                 in_entry.push(node.clone());
@@ -960,7 +979,7 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
                 first_panic =
                     entry.dispose_rejected(runtime, &existing_nodes, &mut claimed, first_panic);
             }
-            self.last_error = Some(ForError::shared_node());
+            self.last_error = Some(ForError::shared_node(conflict_index));
             if self.dispose_requested.get() {
                 let terminal = catch_unwind(AssertUnwindSafe(|| self.request_terminal())).err();
                 if first_panic.is_none() {
@@ -978,13 +997,16 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
         // committed keys unchanged.
         // 在放置成功前保持已提交条目原位。后端 panic 时即可恢复旧中段顺序，
         // 并保持已提交 key 不变。
+        let old_middle_positions: HashMap<K, usize> = (prefix..old_len - suffix)
+            .map(|index| (self.entries[index].key.clone(), index))
+            .collect();
         let mut source: Vec<Option<usize>> = Vec::with_capacity(new_mid.len());
         for (mid_index, key) in new_mid.iter().enumerate() {
             if built[mid_index].is_some() {
                 source.push(None);
             } else {
-                let absolute = (prefix..old_len - suffix)
-                    .find(|index| &self.entries[*index].key == key)
+                let absolute = *old_middle_positions
+                    .get(key)
                     .expect("a retained key must keep its range");
                 source.push(Some(absolute));
             }
@@ -1119,14 +1141,17 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
     fn build_entry(&mut self, key: K) -> ForEntry<B, K> {
         let owner = self.control.child();
         let mut context = ForContext::new(self.runtime.clone(), owner.clone());
-        let start = context.create_anchor();
-        let end = context.create_anchor();
-        let outcome = catch_unwind(AssertUnwindSafe(|| {
-            with_owner(&owner, || (self.content)(&mut context, &key))
+        let acquisition = catch_unwind(AssertUnwindSafe(|| {
+            let start = context.create_anchor();
+            let end = context.create_anchor();
+            let content = catch_unwind(AssertUnwindSafe(|| {
+                with_owner(&owner, || (self.content)(&mut context, &key))
+            }));
+            context.flush_on_dispose();
+            (start, end, content)
         }));
-        context.flush_on_dispose();
-        match outcome {
-            Ok(nodes) => {
+        match acquisition {
+            Ok((start, end, Ok(nodes))) => {
                 let created = context.inner.take_created();
                 ForEntry {
                     key,
@@ -1136,7 +1161,7 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
                     created,
                 }
             }
-            Err(payload) => {
+            Ok((_, _, Err(payload))) | Err(payload) => {
                 let created = context.inner.take_created();
                 match terminate_owner_and_nodes(owner, created, &self.runtime, Some(payload)) {
                     Some(payload) => resume_unwind(payload),
