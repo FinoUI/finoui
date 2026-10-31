@@ -1,0 +1,5 @@
+error: dynamic attribute must be a zero-argument closure, for example aria-label={move || value}
+ --> tests/view_macro_ui/ui/invalid_dynamic_attribute.rs:3:29
+  |
+3 |         <button aria-label={42}></button>
+  |                             ^^

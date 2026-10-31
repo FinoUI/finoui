@@ -1,6 +1,10 @@
 //! Reactive, DOM, layout, rendering, and host infrastructure.
 //! 响应式、DOM、布局、渲染与 Host 基础设施。
 
+// Lets macro expansions refer to `::fino` from inside this crate as well.
+// 让宏展开在本 crate 内部也能引用 `::fino`。
+extern crate self as fino;
+
 /// Non-rendering deterministic mock backend.
 /// 无渲染的确定性 Mock 后端。
 pub mod backend_mock;
@@ -40,3 +44,13 @@ pub mod scenario;
 /// 明确区分 shape 与 layout 阶段的最小 Parley/Fontique 文本引擎。
 #[cfg(feature = "native")]
 pub mod text;
+/// Backend-neutral `view!` authoring support.
+/// 后端无关的 `view!` 作者支持。
+pub mod view;
+
+/// RSX authoring macro for the counter-stage subset.
+/// 计数器阶段子集的 RSX 作者宏。
+pub use fino_macros::view;
+/// Creates a Signal on the currently mounting View owner.
+/// 在正在挂载的 View Owner 上创建 Signal。
+pub use view::{View, signal, signal_named};

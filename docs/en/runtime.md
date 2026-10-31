@@ -62,7 +62,37 @@ Component execution: once at mount
 Click update: does not call counter() again
 ```
 
-The `view!` macro is a later authoring interface, not a prerequisite for validating the reactive model. The counter core starts with low-level construction APIs so that macro, runtime, and backend problems are not debugged at the same time.
+### Counter-stage `view!` macro
+
+The counter now uses a deliberately small Rust RSX subset. `rstml` parses the tokens with recovery and source spans, `syn` validates the supported nodes, and `quote` emits readable template and binding construction.
+
+```rust
+fn counter<B: DomBackend + 'static>() -> View<B> {
+    View::new(|runtime, owner| {
+        let count = signal(0);
+        view! {
+            <button
+                aria-label="Increment counter"
+                on:click={move || count.update(|value| *value += 1)}
+            >
+                "Count: " {move || count.get()}
+            </button>
+        }
+    })
+}
+```
+
+| Authoring form | Lowering |
+|---|---|
+| One static `<button>` with quoted text | `Template` |
+| `{move || value}` child | `TextBinding` |
+| `on:click={move || action()}` | `EventBinding` |
+| Dynamic `aria-label={move || value}` | `AttributeBinding` |
+| Static `aria-label="..."` | Template attribute |
+
+`View::mount` installs the component owner, calls the build closure exactly once, mounts the static template, and then binds events and effects to the existing nodes. `signal()` inside the closure resolves against that owner. A signal captured by multiple generated closures is cloned into each closure so the component is not re-executed and clicks update only the target binding.
+
+The macro requires `runtime` and `owner` in scope. Unsupported tags, events, attributes, and non-closure dynamic values produce a compile error at the offending source span; `trybuild` pins those diagnostics. The complete Tailwind-like class subset, `Show`, `For`, full RSX, and hot reload remain out of scope.
 
 ## Unified DOM API
 

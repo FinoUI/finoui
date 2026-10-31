@@ -1,0 +1,5 @@
+error: unsupported attribute `class`; view! supports only aria-label
+ --> tests/view_macro_ui/ui/invalid_attribute.rs:3:17
+  |
+3 |         <button class="counter"></button>
+  |                 ^^^^^

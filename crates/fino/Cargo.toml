@@ -27,6 +27,7 @@ native = [
 
 [dependencies]
 bytemuck = { workspace = true, optional = true }
+fino_macros = { path = "../fino_macros" }
 fontique = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
 parley = { workspace = true, optional = true }
@@ -45,3 +46,6 @@ wasm-bindgen = { workspace = true, optional = true }
 web-sys = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }
 winit = { workspace = true, optional = true }
+
+[dev-dependencies]
+trybuild.workspace = true

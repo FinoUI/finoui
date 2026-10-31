@@ -1,0 +1,5 @@
+error: unsupported event `on:input`; view! supports only on:click
+ --> tests/view_macro_ui/ui/invalid_event_name.rs:3:17
+  |
+3 |         <button on:input={move || {}}></button>
+  |                 ^^^^^^^^

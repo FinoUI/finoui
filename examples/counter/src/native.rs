@@ -3,12 +3,9 @@
 
 use std::{error::Error, sync::Arc};
 
-use fino::{
-    native::{
-        Application, InputEvent, KeyInput, PointerAction, PointerInput, RenderStatus, Size,
-        WindowContext, WindowDesc, WindowId,
-    },
-    reactive::Signal,
+use fino::native::{
+    Application, InputEvent, KeyInput, PointerAction, PointerInput, RenderStatus, Size,
+    WindowContext, WindowDesc, WindowId,
 };
 use serde_json::json;
 use winit::{
@@ -20,7 +17,7 @@ use winit::{
     window::{Window, WindowId as WinitWindowId},
 };
 
-use crate::mount_counter_with_count;
+use crate::mount_counter;
 
 /// Runs the real native counter window.
 /// 运行真实原生计数器窗口。
@@ -49,7 +46,6 @@ struct CounterHost {
     winit_window: Option<WinitWindowId>,
     window_id: Option<WindowId>,
     root: Option<fino::native::NodeId>,
-    count: Option<Signal<i32>>,
     pointer: fino::native::Point,
     smoke: SmokeState,
     smoke_initial_text: Option<String>,
@@ -65,7 +61,6 @@ impl CounterHost {
             winit_window: None,
             window_id: None,
             root: None,
-            count: None,
             pointer: fino::native::Point::default(),
             smoke: if smoke {
                 SmokeState::AwaitFirstFrame
@@ -89,7 +84,7 @@ impl CounterHost {
             return Ok(());
         }
         let attributes = Window::default_attributes()
-            .with_title("Fino Counter — Native (PR3)")
+            .with_title("Fino Counter — Native (PR5)")
             .with_inner_size(LogicalSize::new(640.0, 360.0))
             .with_min_inner_size(LogicalSize::new(320.0, 200.0));
         let window = Arc::new(
@@ -108,7 +103,7 @@ impl CounterHost {
         let mut app =
             Application::with_surface(instance, &surface).map_err(|error| error.to_string())?;
         let window_desc = WindowDesc {
-            title: "Fino Counter — Native (PR3)".to_owned(),
+            title: "Fino Counter — Native (PR5)".to_owned(),
             width: 640,
             height: 360,
         };
@@ -118,17 +113,12 @@ impl CounterHost {
         }
         app.install_surface(window_id, surface)
             .map_err(|error| error.to_string())?;
-        let count = app.owner().signal_named("counter/count", 0_i32);
-        let mount_count = count.clone();
         let root = app
-            .mount_window(window_id, move |runtime, owner| {
-                mount_counter_with_count(runtime, owner, mount_count)
-            })
+            .mount_window(window_id, mount_counter)
             .ok_or_else(|| "window vanished while mounting the counter".to_owned())?;
         self.winit_window = Some(window.id());
         self.window_id = Some(window_id);
         self.root = Some(root);
-        self.count = Some(count);
         self.window = Some(window.clone());
         self.app = Some(app);
         window.request_redraw();

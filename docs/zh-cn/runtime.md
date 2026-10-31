@@ -62,7 +62,37 @@ fn counter() -> View {
 点击更新：不重新调用 counter()
 ```
 
-`view!` 宏是后续作者接口，不是验证响应式模型的前置条件。计数器核心先用底层构建 API 完成，避免同时调试宏、运行时与后端。
+### 计数器阶段的 `view!` 宏
+
+计数器现在使用刻意收窄的 Rust RSX 子集。`rstml` 以可恢复方式解析 Token 并保留源码 Span，`syn` 校验支持的节点，`quote` 输出可读的模板与绑定构建代码。
+
+```rust
+fn counter<B: DomBackend + 'static>() -> View<B> {
+    View::new(|runtime, owner| {
+        let count = signal(0);
+        view! {
+            <button
+                aria-label="Increment counter"
+                on:click={move || count.update(|value| *value += 1)}
+            >
+                "Count: " {move || count.get()}
+            </button>
+        }
+    })
+}
+```
+
+| 作者写法 | 下沉结果 |
+|---|---|
+| 一个静态 `<button>` 与带引号文本 | `Template` |
+| `{move || value}` 子节点 | `TextBinding` |
+| `on:click={move || action()}` | `EventBinding` |
+| 动态 `aria-label={move || value}` | `AttributeBinding` |
+| 静态 `aria-label="..."` | 模板属性 |
+
+`View::mount` 安装组件 Owner，只调用一次构建闭包，挂载静态模板，然后把事件与 Effect 绑定到已有节点。闭包内的 `signal()` 通过该 Owner 解析。被多个生成闭包捕获的 Signal 会分别克隆进各闭包，因此组件不会重新执行，点击只更新目标绑定。
+
+宏要求作用域内存在 `runtime` 与 `owner`。不支持的标签、事件、属性以及非闭包动态值会在对应源码 Span 上产生编译错误；`trybuild` 固定这些诊断。完整 Tailwind-like class 子集、`Show`、`For`、完整 RSX 与热重载仍不在范围内。
 
 ## 统一 DOM API
 
