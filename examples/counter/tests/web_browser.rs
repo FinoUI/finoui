@@ -455,3 +455,108 @@ fn failed_web_rerun_clears_stale_captures_and_keeps_unrelated_files() {
     assert!(nodes.iter().any(|node| node["text"] == "0"));
     assert!(!nodes.iter().any(|node| node["text"] == "1"));
 }
+
+/// A user-supplied keyed scenario may legitimately end with only the list
+/// anchors (clear state); the generic runner must not require a bundled anchor count.
+/// 用户 keyed 场景可以合法地只保留列表锚点（清空状态）；通用运行器不得要求
+/// bundled 场景的固定锚点数。
+#[test]
+#[ignore = "launches headless Chromium; run with cargo test -p fino_counter --test web_browser -- --ignored"]
+fn web_headless_accepts_keyed_scenario_with_clear_final_state() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let scenario_path = temporary.path().join("keyed-clear.json");
+    let run_dir = temporary.path().join("keyed-clear-web");
+    let scenario = serde_json::json!({
+        "schema": 1,
+        "name": "keyed/clear-final",
+        "mount": "keyed",
+        "environment": {
+            "viewport": [800, 600],
+            "dpr": 1.0,
+            "locale": "zh-CN",
+            "color_scheme": "dark",
+            "seed": 42,
+        },
+        "steps": [
+            {
+                "assert_text": {
+                    "role": "button",
+                    "name": "Keyed host",
+                    "value": "HostNextTail",
+                }
+            },
+            { "advance_frames": 1 },
+            { "capture": ["dom", "a11y", "reactive"] },
+        ],
+    });
+    fs::write(
+        &scenario_path,
+        serde_json::to_vec_pretty(&scenario).expect("scenario JSON"),
+    )
+    .expect("scenario file");
+
+    let output = run_web_scenario_with_mount(&scenario_path, &run_dir, Some("keyed"));
+    assert!(
+        output.status.success(),
+        "clear keyed scenario failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).expect("scenario JSON");
+    assert_eq!(result["status"], "passed");
+    assert_eq!(result["backend"], "web-headless");
+    assert_eq!(result["steps"].as_array().map(Vec::len), Some(3));
+
+    for name in [
+        "result.json",
+        "dom.json",
+        "a11y.json",
+        "reactive.json",
+        "trace.json",
+        "browser.json",
+        "keyed_conformance.json",
+    ] {
+        assert!(
+            run_dir.join(name).is_file(),
+            "missing successful artifact {name}"
+        );
+    }
+    let dom = inspect_artifact(&run_dir, SnapshotKind::Dom).expect("clear DOM");
+    assert_eq!(dom["roots"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        dom["nodes"]
+            .as_array()
+            .expect("DOM nodes")
+            .iter()
+            .filter(|node| node["kind"] == "anchor")
+            .count(),
+        2,
+        "clear state keeps only the list anchor pair"
+    );
+    let a11y = inspect_artifact(&run_dir, SnapshotKind::A11y).expect("clear a11y");
+    let host = a11y["nodes"]
+        .as_array()
+        .expect("a11y nodes")
+        .iter()
+        .find(|node| node["name"] == "Keyed host")
+        .expect("keyed host");
+    assert_eq!(host["text"], "HostNextTail");
+
+    let browser: Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("browser.json")).expect("browser checks"),
+    )
+    .expect("browser JSON");
+    assert_eq!(browser["status"], "passed");
+    for expected in [
+        "scenario_executes_in_chromium",
+        "scenario_dom_matches_live_dom",
+    ] {
+        assert!(
+            browser["checks"]
+                .as_array()
+                .expect("browser checks")
+                .iter()
+                .any(|check| check["name"] == expected && check["status"] == "passed"),
+            "missing passing browser check {expected}"
+        );
+    }
+}
