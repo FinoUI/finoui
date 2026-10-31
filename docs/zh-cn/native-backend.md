@@ -49,6 +49,7 @@ PointerInput { window, position }
 ## 生命周期
 
 - `resize` 更新逻辑视口、使布局失效，并保留 DOM 与 count。
+- `remove` 只分离选中节点。下代、generational 句柄与监听保持有效，因此同一子树可以重新插入。
 - `SurfaceLost` 只释放 GPU 状态。DOM、已 shaping 文本、布局、焦点与信号都保留。
 - 重建 Surface 时从共享 adapter 与 device 重新配置。
 - 关闭窗口只释放对应 `WindowContext`、窗口 Owner、监听与 Surface。

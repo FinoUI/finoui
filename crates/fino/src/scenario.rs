@@ -198,7 +198,13 @@ pub struct ScenarioResult {
     /// 验收计数。
     pub counters: ExecutionCounters,
     /// Unified runtime counters shared by every conformance backend.
+    ///
+    /// Older schema-1 artifacts predate this field, so deserialization falls
+    /// back to zero counters instead of rejecting a valid old result.
     /// 每个一致性后端共享的统一运行时计数。
+    ///
+    /// 旧 schema-1 产物没有该字段，因此反序列化回退到零计数，而不是拒绝旧结果。
+    #[serde(default)]
     pub runtime_stats: RuntimeStats,
     /// Structured failures in execution order.
     /// 按执行顺序排列的结构化失败。

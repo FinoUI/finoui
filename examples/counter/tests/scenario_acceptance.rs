@@ -5,7 +5,8 @@ use fino::{
     dom_api::{Attribute, DomBackend, EventKind, Role, Selector, Tag},
     headless::{Environment, HeadlessBackend, HeadlessHost, SnapshotKind},
     inspect::inspect_artifact,
-    scenario::{Scenario, Status, Step, run_on_host},
+    metrics::RuntimeStats,
+    scenario::{Scenario, ScenarioResult, Status, Step, run_on_host},
 };
 use fino_counter::{mount_counter, runner::run_mock_scenario};
 use serde_json::Value;
@@ -101,6 +102,27 @@ fn mock_scenario_writes_deterministic_snapshots_and_trace() {
     .expect("result JSON");
     assert_eq!(saved_result["run_id"], first.run_id);
     assert_eq!(saved_result["snapshots"]["dom"], "dom.json");
+}
+
+/// Reads an older schema-1 result that predates `runtime_stats`.
+/// 读取缺少 `runtime_stats` 的旧 schema-1 结果。
+#[test]
+fn legacy_result_without_runtime_stats_deserializes_with_defaults() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let run_dir = temporary.path().join("legacy-result");
+    let result = run_mock_scenario(&counter_scenario(), &run_dir).expect("scenario run");
+    let mut value = serde_json::to_value(&result).expect("result JSON");
+    value
+        .as_object_mut()
+        .expect("result object")
+        .remove("runtime_stats");
+
+    let legacy: ScenarioResult = serde_json::from_value(value).expect("legacy result");
+    assert_eq!(legacy.schema, 1);
+    assert_eq!(legacy.runtime_stats, RuntimeStats::default());
+    assert_eq!(legacy.run_id, result.run_id);
+    assert_eq!(legacy.counters, result.counters);
+    assert_eq!(legacy.status, result.status);
 }
 
 /// Locks capture files to their step state so later clicks cannot replace history.

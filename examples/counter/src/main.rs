@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use fino::scenario::{self, ScenarioResult, Status, ToolError};
 #[cfg(not(target_arch = "wasm32"))]
 use fino_counter::browser::run_web_scenario;
+use fino_counter::conformance::{ConformanceReport, ContractViolation};
 use fino_counter::runner::{check_counter, run_mock_conformance, run_mock_scenario};
 #[cfg(not(target_arch = "wasm32"))]
 use fino_counter::runner::{run_native_offscreen_conformance, run_native_offscreen_scenario};
@@ -168,24 +169,32 @@ fn run() -> ExitCode {
             };
             match run {
                 Ok(report) => {
+                    let (status, violations) = conformance_outcome(&report);
                     if format == OutputFormat::Json {
-                        print_json(&report);
+                        let mut value =
+                            serde_json::to_value(&report).expect("conformance report JSON");
+                        value["status"] = serde_json::to_value(status).expect("status JSON");
+                        value["violations"] =
+                            serde_json::to_value(&violations).expect("violation JSON");
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&value).expect("conformance output JSON")
+                        );
                     } else {
                         println!(
                             "conformance {}: {} (set_text {}, nodes +{} / -{}, frames {})",
                             report.backend,
-                            status_name(if report.final_tree.roots.is_empty() {
-                                Status::Passed
-                            } else {
-                                Status::Failed
-                            }),
+                            status_name(status),
                             report.final_stats.backend_set_text,
                             report.final_stats.nodes_created,
                             report.final_stats.nodes_removed,
                             report.final_stats.frames_requested,
                         );
+                        for violation in &violations {
+                            println!("  {}: {}", violation.field, violation.message);
+                        }
                     }
-                    ExitCode::SUCCESS
+                    exit_status(status == Status::Failed)
                 }
                 Err(message) => output_error(
                     ToolError::for_backend("UI_CONFORMANCE", message, "conformance"),
@@ -272,14 +281,16 @@ fn print_json(value: &impl Serialize) {
     );
 }
 
+/// Maps a failure flag to the process exit code used by every command.
+/// 把失败标记映射为所有命令使用的进程退出码。
+fn failure_code(failed: bool) -> u8 {
+    if failed { 1 } else { 0 }
+}
+
 /// Distinguishes failed counter assertions from successful scenario completion.
 /// 区分计数器断言失败与场景成功完成。
 fn exit_status(failed: bool) -> ExitCode {
-    if failed {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    }
+    ExitCode::from(failure_code(failed))
 }
 
 /// Uses stable lowercase status labels in human runner output.
@@ -291,9 +302,24 @@ fn status_name(status: Status) -> &'static str {
     }
 }
 
+/// Validates a conformance report and returns its shared status and violations.
+/// 校验一致性报告，并返回共享状态与违规列表。
+fn conformance_outcome(report: &ConformanceReport) -> (Status, Vec<ContractViolation>) {
+    let violations = report.validate();
+    let status = if violations.is_empty() {
+        Status::Passed
+    } else {
+        Status::Failed
+    };
+    (status, violations)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::catch_tool_panic;
+    use fino::scenario::Status;
+    use fino_counter::runner::run_mock_conformance;
+
+    use super::{catch_tool_panic, conformance_outcome, failure_code};
 
     /// Ensures example runner panics retain their original text after conversion.
     /// 确保示例运行器 panic 转换后仍保留原始文本。
@@ -305,5 +331,24 @@ mod tests {
         };
         assert_eq!(error.code.as_ref(), "UI_TOOL_PANIC");
         assert!(error.message.contains("counter runner regression panic"));
+    }
+
+    /// Rejects an altered contract field instead of reporting a passing run.
+    /// 字段偏离契约时拒绝报告通过。
+    #[test]
+    fn conformance_outcome_fails_on_a_contract_violation() {
+        let mut report = run_mock_conformance().expect("mock conformance");
+        assert_eq!(conformance_outcome(&report).0, Status::Passed);
+
+        report.batch.set_text_delta = 100;
+        let (status, violations) = conformance_outcome(&report);
+        assert_eq!(status, Status::Failed);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.field == "batch.set_text_delta")
+        );
+        assert_eq!(failure_code(status == Status::Failed), 1);
+        assert_eq!(failure_code(false), 0);
     }
 }

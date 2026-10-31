@@ -49,6 +49,7 @@ A white-space or accessibility-only write does not request a frame. Writing the 
 ## Lifecycle
 
 - `resize` updates logical viewport, invalidates layout, and keeps the DOM and count.
+- `remove` detaches only the selected node. Descendants, generational handles, and listeners stay valid, so the same subtree can be reinserted.
 - `SurfaceLost` drops only GPU state. DOM, shaped text, layout, focus, and signals remain.
 - A recreated surface reconfigures from the shared adapter and device.
 - Closing a window removes only its `WindowContext`, window Owner, listeners, and surface.

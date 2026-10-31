@@ -5,8 +5,9 @@ use std::{cell::RefCell, collections::BTreeMap, path::Path, rc::Rc};
 
 use fino::{
     backend_web::{DomBackend, WebNode},
+    dom_api::{Attribute, DomBackend as _, Tag},
     error::ToolError,
-    headless::{Environment, HeadlessHost},
+    headless::{Environment, HeadlessBackend as _, HeadlessHost},
     reactive::{Owner, Signal, batch},
     runtime::Runtime,
     scenario::{Scenario, ScenarioResult, run_on_host_collect},
@@ -82,7 +83,79 @@ pub fn run_conformance() -> Result<String, JsValue> {
     let host = HeadlessHost::new(DomBackend::new(), Environment::default());
     let report = crate::conformance::run_conformance(host)
         .map_err(|message| tool_error("UI_CONFORMANCE", message))?;
-    serde_json::to_string(&report)
+    let violations = report.validate();
+    let status = if violations.is_empty() {
+        "passed"
+    } else {
+        "failed"
+    };
+    let mut value = serde_json::to_value(&report)
+        .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))?;
+    value["status"] = serde_json::Value::String(status.to_owned());
+    value["violations"] = serde_json::to_value(&violations)
+        .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))?;
+    serde_json::to_string(&value)
+        .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))
+}
+
+/// Observable state around remove and `mount_to_body`.
+/// remove 与 `mount_to_body` 前后的可观测状态。
+#[derive(Serialize)]
+struct RemountProbe {
+    schema: u32,
+    mounted_matches: usize,
+    removed_matches: usize,
+    removed_tree_roots: usize,
+    removed_a11y_nodes: usize,
+    remounted_matches: usize,
+    remounted_tree_roots: usize,
+    remounted_a11y_nodes: usize,
+}
+
+/// Proves `mount_to_body` restores a removed node to the reachable tree.
+/// 验证 `mount_to_body` 会把已移除节点恢复到可达树。
+#[wasm_bindgen]
+pub fn run_remount_probe() -> Result<String, JsValue> {
+    let mut backend = DomBackend::new();
+    let button = backend.create_element(Tag::Button);
+    backend.set_attribute(&button, Attribute::AriaLabel, Some("Increment counter"));
+    let text = backend.create_text("Count: 0");
+    backend.insert_before(&button, &text, None);
+    backend.mount_to_body(&button);
+    let selector = crate::conformance::counter_selector();
+
+    let mounted_matches = backend.find_all(&selector).len();
+    backend.remove(&button);
+    let removed_matches = backend.find_all(&selector).len();
+    let removed_tree_roots = backend.logical_tree().roots.len();
+    let removed_a11y_nodes = backend.a11y_snapshot().nodes.len();
+
+    backend.mount_to_body(&button);
+    let remounted_matches = backend.find_all(&selector).len();
+    let remounted_tree_roots = backend.logical_tree().roots.len();
+    let remounted_a11y_nodes = backend.a11y_snapshot().nodes.len();
+
+    serde_json::to_string(&RemountProbe {
+        schema: 1,
+        mounted_matches,
+        removed_matches,
+        removed_tree_roots,
+        removed_a11y_nodes,
+        remounted_matches,
+        remounted_tree_roots,
+        remounted_a11y_nodes,
+    })
+    .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))
+}
+
+/// Runs the detach/reinsert probe against the real browser DOM.
+/// 针对真实浏览器 DOM 运行分离／重插探针。
+#[wasm_bindgen]
+pub fn run_detach_reinsert_probe() -> Result<String, JsValue> {
+    let host = HeadlessHost::new(DomBackend::new(), Environment::default());
+    let result = crate::conformance::run_detach_reinsert(host)
+        .map_err(|message| tool_error("UI_CONFORMANCE", message))?;
+    serde_json::to_string(&result)
         .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))
 }
 

@@ -141,12 +141,13 @@ impl DomBackend {
         }
     }
 
-    /// Attaches a backend-created root to `document.body`.
-    /// 把后端创建的根节点挂载到 `document.body`。
-    pub fn mount_to_body(&self, node: &WebNode) {
+    /// Attaches a backend-created root to `document.body` and restores reachability.
+    /// 把后端创建的根节点挂载到 `document.body`，并恢复可达性。
+    pub fn mount_to_body(&mut self, node: &WebNode) {
         self.body
             .append_child(&node.node)
             .expect("mounting the counter on document.body must succeed");
+        self.set_removed(&node.node, false);
     }
 
     /// Returns the number of live listener registrations.

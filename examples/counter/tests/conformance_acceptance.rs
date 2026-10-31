@@ -3,13 +3,16 @@
 use std::sync::{Mutex, MutexGuard};
 
 use fino::{
+    backend_mock::MockBackend,
     headless::{Environment, HeadlessHost},
     metrics::RuntimeStats,
     native::{Size, WindowConstraints, WindowId, offscreen_backend},
     reactive::batch,
 };
 use fino_counter::{
-    conformance::{ConformanceReport, expected_tree, run_conformance},
+    conformance::{
+        ConformanceReport, expected_operations, expected_tree, run_conformance, run_detach_reinsert,
+    },
     mount_counter_with_count,
     runner::{run_mock_conformance, run_native_offscreen_conformance},
 };
@@ -71,21 +74,9 @@ fn mock_and_native_conformance_share_trees_events_and_operation_counts() {
     assert!(mock.event.handled);
     assert_eq!(mock.event.selector_matches, 1);
     assert_eq!(mock.operations, native.operations);
-    assert_eq!(
-        mock.operations,
-        [
-            ("create_element".to_owned(), 1),
-            ("create_text".to_owned(), 3),
-            ("insert".to_owned(), 4),
-            ("listen".to_owned(), 1),
-            ("remove".to_owned(), 1),
-            ("set_attribute".to_owned(), 3),
-            ("set_text".to_owned(), 4),
-            ("unlisten".to_owned(), 1),
-        ]
-        .into_iter()
-        .collect()
-    );
+    assert_eq!(mock.operations, expected_operations());
+    assert!(mock.validate().is_empty(), "{:?}", mock.validate());
+    assert!(native.validate().is_empty(), "{:?}", native.validate());
 
     for report in [&mock, &native] {
         assert_checkpoint(report, "mounted", 1, 1, 1, 3, 0);
@@ -99,7 +90,15 @@ fn mock_and_native_conformance_share_trees_events_and_operation_counts() {
         assert_eq!(report.batch.set_text_delta, 1);
         assert_eq!(report.batch.nodes_created_delta, 0);
         assert_eq!(report.batch.nodes_removed_delta, 0);
-        assert_eq!(report.batch.frames_requested_delta, 0);
+        let expected_batch_frames = if report.backend.starts_with("native") {
+            1
+        } else {
+            0
+        };
+        assert_eq!(
+            report.batch.frames_requested_delta, expected_batch_frames,
+            "batch frame work excludes the mount-time request"
+        );
         assert_eq!(report.unmount.selector_matches, 0);
         assert_eq!(report.unmount.a11y_nodes, 0);
         assert_eq!(report.unmount.nodes_removed_delta, 1);
@@ -110,7 +109,10 @@ fn mock_and_native_conformance_share_trees_events_and_operation_counts() {
     }
 
     assert_eq!(mock.final_stats.frames_requested, 0);
-    assert_eq!(native.final_stats.frames_requested, 1);
+    assert_eq!(
+        native.final_stats.frames_requested, 2,
+        "mount plus batch frame, with the click request coalesced"
+    );
 }
 
 /// A single unbatched click commits one text update without structural work.
@@ -211,4 +213,129 @@ fn conformance_helper_runs_a_fresh_native_host() {
     let report = run_conformance(host).expect("native conformance");
     assert_eq!(report.backend, "native-offscreen");
     assert_eq!(report.tree, expected_tree());
+    assert!(report.validate().is_empty(), "{:?}", report.validate());
+}
+
+/// Mock and Native keep the same child handle through detach and reinsertion.
+/// Mock 与 Native 在分离和重插后保持同一子节点句柄语义。
+#[test]
+fn mock_and_native_detach_reinsert_share_semantics() {
+    let _guard = lock();
+    let mock = run_detach_reinsert(HeadlessHost::new(
+        MockBackend::new(),
+        Environment::default(),
+    ))
+    .expect("mock detach probe");
+    let native = run_detach_reinsert(HeadlessHost::new(
+        offscreen_backend(Size::new(800.0, 600.0), 1.0),
+        Environment::default(),
+    ))
+    .expect("native detach probe");
+
+    assert_eq!(mock.backend, "mock");
+    assert_eq!(native.backend, "native-offscreen");
+    assert_eq!(mock.tree_before, mock.tree_restored);
+    assert_eq!(native.tree_before, native.tree_restored);
+    assert_eq!(mock.tree_before, native.tree_before);
+    assert_eq!(mock.tree_detached, native.tree_detached);
+    assert_eq!(mock.tree_restored, native.tree_restored);
+    assert_eq!(mock.tree_detached.roots[0].children.len(), 1);
+    assert_eq!(mock.text_detached.as_deref(), Some("Count: "));
+    assert_eq!(mock.text_restored.as_deref(), Some("Count: 0"));
+    assert_eq!(mock.detached_stats.nodes_removed, 1);
+    assert_eq!(mock.restored_stats.nodes_removed, 1);
+    assert_eq!(mock.operations, native.operations);
+    assert_eq!(
+        mock.operations,
+        [
+            ("create_element".to_owned(), 1),
+            ("create_text".to_owned(), 2),
+            ("insert".to_owned(), 3),
+            ("listen".to_owned(), 1),
+            ("remove".to_owned(), 1),
+            ("set_attribute".to_owned(), 1),
+            ("set_text".to_owned(), 1),
+        ]
+        .into_iter()
+        .collect()
+    );
+}
+
+/// Returns the violations whose field path starts with the expected key.
+/// 返回字段路径以预期键开头的违规。
+fn violations_for(report: &ConformanceReport, field: &str) -> Vec<String> {
+    report
+        .validate()
+        .into_iter()
+        .filter(|violation| violation.field.starts_with(field))
+        .map(|violation| violation.field)
+        .collect()
+}
+
+#[test]
+fn contract_rejects_a_wrong_tree() {
+    let _guard = lock();
+    let mut report = run_mock_conformance().expect("mock conformance");
+    report.tree.roots.clear();
+    assert!(!violations_for(&report, "tree").is_empty());
+}
+
+#[test]
+fn contract_rejects_a_wrong_event_result() {
+    let _guard = lock();
+    let mut report = run_mock_conformance().expect("mock conformance");
+    report.event.text_after = "Count: wrong".to_owned();
+    assert!(!violations_for(&report, "event").is_empty());
+}
+
+#[test]
+fn contract_rejects_a_wrong_batch_result() {
+    let _guard = lock();
+    let mut report = run_mock_conformance().expect("mock conformance");
+    report.batch.set_text_delta = 100;
+    assert!(!violations_for(&report, "batch").is_empty());
+}
+
+#[test]
+fn contract_rejects_a_wrong_checkpoint() {
+    let _guard = lock();
+    let mut report = run_mock_conformance().expect("mock conformance");
+    report
+        .checkpoints
+        .get_mut("mounted")
+        .expect("mounted checkpoint")
+        .component_executions = 2;
+    assert!(!violations_for(&report, "checkpoints").is_empty());
+}
+
+#[test]
+fn contract_rejects_wrong_operation_counts() {
+    let _guard = lock();
+    let mut report = run_mock_conformance().expect("mock conformance");
+    report.operations.insert("set_text".to_owned(), 5);
+    assert!(!violations_for(&report, "operations").is_empty());
+}
+
+#[test]
+fn contract_rejects_a_wrong_unmount_result() {
+    let _guard = lock();
+    let mut report = run_mock_conformance().expect("mock conformance");
+    report.unmount.a11y_nodes = 1;
+    assert!(!violations_for(&report, "unmount").is_empty());
+}
+
+#[test]
+fn contract_rejects_wrong_final_stats() {
+    let _guard = lock();
+    let mut report = run_mock_conformance().expect("mock conformance");
+    report.final_stats.nodes_removed = 0;
+    assert!(!violations_for(&report, "final_stats").is_empty());
+}
+
+#[test]
+fn contract_rejects_remaining_final_roots() {
+    let _guard = lock();
+    let mut report = run_mock_conformance().expect("mock conformance");
+    report.final_tree = report.tree.clone();
+    assert!(!violations_for(&report, "final_tree").is_empty());
 }

@@ -549,8 +549,10 @@ impl NativeDom {
         }
 
         if binding.shaped.is_none() {
+            let shape_calls_before = engine.borrow().stats().shape_calls;
             binding.shaped = Some(engine.borrow_mut().shape(&binding.spec));
-            self.shaped_texts += 1;
+            let shape_calls_after = engine.borrow().stats().shape_calls;
+            self.shaped_texts += shape_calls_after - shape_calls_before;
         }
         let shaped = binding
             .shaped
@@ -652,17 +654,6 @@ impl NativeDom {
             self.collect_reachable(root, &mut nodes);
         }
         nodes
-    }
-
-    /// Removes a subtree and invalidates every released generational handle.
-    /// 删除子树，并让所有已释放的 generational 句柄失效。
-    fn erase_subtree(&mut self, node: NodeId) {
-        let Some(data) = self.nodes.remove(node) else {
-            return;
-        };
-        for child in data.children {
-            self.erase_subtree(child);
-        }
     }
 
     fn emit(&mut self, operation: NativeBackendOp) {
@@ -793,6 +784,8 @@ impl DomBackend for NativeDom {
         self.mark_structural_change();
     }
 
+    /// Detaches only the selected node while keeping descendants and handle storage alive.
+    /// 仅分离选中节点，同时保留下代与句柄存储。
     fn remove(&mut self, node: &Self::Node) {
         let Some(data) = self.nodes.get(*node) else {
             return;
@@ -804,9 +797,10 @@ impl DomBackend for NativeDom {
             parent_data.children.retain(|candidate| candidate != node);
         }
         self.roots.retain(|root| root != node);
-        self.erase_subtree(*node);
-        self.listeners
-            .retain(|_, registration| self.nodes.contains_key(registration.node));
+        self.nodes
+            .get_mut(*node)
+            .expect("removed node must exist")
+            .parent = None;
         self.emit(NativeBackendOp::Remove { node: stable });
         self.mark_structural_change();
     }
@@ -1030,6 +1024,12 @@ impl HeadlessBackend for NativeDom {
         stats
     }
 
+    /// Takes the pending native frame request so later work can be attributed separately.
+    /// 取走待处理的原生帧请求，便于独立归因后续工作。
+    fn take_frame_request(&self) -> bool {
+        NativeDom::take_frame_request(self)
+    }
+
     /// Serializes only attached native nodes and never exposes generational handles.
     /// 仅序列化已挂载原生节点，绝不暴露 generational 句柄。
     fn logical_tree(&self) -> LogicalTreeSnapshot {
@@ -1079,23 +1079,68 @@ mod tests {
         (button, prefix, value)
     }
 
-    /// A released generational handle never resolves to a replacement node.
-    /// 已释放的 generational 句柄绝不会解析到替代节点。
+    /// Detaching a parent keeps descendant handles alive so they can be reinserted.
+    /// 分离父节点会保留下代句柄，使其可以重新插入。
     #[test]
-    fn released_node_ids_do_not_alias_replacements() {
+    fn removing_a_parent_keeps_descendant_handles_and_reinserts() {
         let mut dom = dom();
-        let old = dom.create_text("old");
-        let old_stable = dom.stable_id(old).expect("stable id");
-        dom.remove(&old);
-        assert!(!dom.contains(old));
-        let replacement = dom.create_text("new");
-        assert_ne!(old, replacement);
-        assert_ne!(some_stable(&dom, replacement), old_stable);
-        assert_eq!(dom.text_content(old), None);
+        let (button, prefix, value) = button_with_text(&mut dom);
+        let stable = (
+            dom.stable_id(button).expect("button id"),
+            dom.stable_id(prefix).expect("prefix id"),
+            dom.stable_id(value).expect("value id"),
+        );
+
+        dom.remove(&button);
+
+        assert!(dom.contains(button), "detached parent handle stays valid");
+        assert!(dom.contains(prefix), "descendant prefix stays alive");
+        assert!(dom.contains(value), "descendant value stays alive");
+        assert_eq!(
+            dom.text_content(button).as_deref(),
+            Some("Count: 0"),
+            "detached subtree remains readable"
+        );
+        assert!(
+            dom.find_all(&selector()).is_empty(),
+            "detached root is unreachable"
+        );
+
+        let wrapper = dom.create_element(Tag::Button);
+        dom.insert_before(&wrapper, &button, None);
+        assert_eq!(dom.stable_id(button), Some(stable.0));
+        assert_eq!(dom.stable_id(prefix), Some(stable.1));
+        assert_eq!(dom.stable_id(value), Some(stable.2));
+        assert_eq!(
+            dom.text_content(wrapper).as_deref(),
+            Some("Count: 0"),
+            "reinserted parent becomes reachable with its children"
+        );
+        assert_eq!(dom.find_all(&selector()), vec![button]);
     }
 
-    fn some_stable(dom: &NativeDom, node: NodeId) -> u64 {
-        dom.stable_id(node).expect("stable id")
+    /// Detaching one child leaves siblings attached and allows the same child back.
+    /// 分离单个子节点会保留兄弟节点，并允许同一子节点重新插入。
+    #[test]
+    fn removing_a_child_allows_reinsertion_without_losing_siblings() {
+        let mut dom = dom();
+        let (button, prefix, value) = button_with_text(&mut dom);
+
+        dom.remove(&value);
+        assert!(dom.contains(value), "detached child handle stays valid");
+        assert_eq!(dom.text_content(button).as_deref(), Some("Count: "));
+
+        dom.insert_before(&button, &value, None);
+        assert_eq!(dom.text_content(button).as_deref(), Some("Count: 0"));
+        assert!(dom.contains(prefix));
+        assert_eq!(dom.find_all(&selector()), vec![button]);
+    }
+
+    fn selector() -> Selector {
+        Selector {
+            role: Role::Button,
+            name: "Increment counter".to_owned(),
+        }
     }
 
     /// Text content changes reshape one node; width-only changes reuse shaping.
@@ -1260,6 +1305,41 @@ mod tests {
             dom.backend_stats().shaped_texts,
             resized.shaped_texts + 1,
             "only the changed text reshapes"
+        );
+    }
+
+    /// Shaping counters follow engine cache misses, not invalidation attempts.
+    /// Shaping 计数跟随引擎缓存未命中，而不是失效尝试。
+    #[test]
+    fn shaped_texts_only_count_cache_misses() {
+        let mut dom = dom();
+        let (_button, _prefix, value) = button_with_text(&mut dom);
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let initial = dom.backend_stats().shaped_texts;
+        assert_eq!(initial, 2);
+
+        dom.set_text(&value, "1");
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let changed = dom.backend_stats().shaped_texts;
+        assert_eq!(changed, initial + 1, "new text requires one shape");
+
+        // Returning to cached text invalidates the binding but hits the engine cache.
+        // 回到缓存文本会使绑定失效，但命中引擎缓存。
+        dom.set_text(&value, "0");
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let cached = dom.backend_stats().shaped_texts;
+        assert_eq!(
+            cached, changed,
+            "cache hits must not increment shaped_texts"
+        );
+
+        let before = dom.backend_stats();
+        dom.set_text(&value, "0");
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        assert_eq!(
+            dom.backend_stats(),
+            before,
+            "repeating the same text is a no-op"
         );
     }
 

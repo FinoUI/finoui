@@ -459,11 +459,15 @@ try {
   await page.waitForFunction(() => window.fino instanceof Object);
 
   let conformance;
+  let detachReinsert;
+  let remount;
   await runCheck('conformance_reports_shared_runtime_stats', async () => {
     const serialized = await page.evaluate(() => window.fino.run_conformance());
     conformance = JSON.parse(serialized);
     assertEqual(conformance.schema, 1, 'conformance schema');
     assertEqual(conformance.backend, 'web-headless', 'conformance backend');
+    assertEqual(conformance.status, 'passed', 'conformance status');
+    assertEqual(conformance.violations.length, 0, 'conformance violations');
     assertEqual(conformance.checkpoints.mounted.component_executions, 1, 'mounted component executions');
     assertEqual(conformance.checkpoints.mounted.effect_executions, 1, 'mounted effect executions');
     assertEqual(conformance.checkpoints.mounted.backend_set_text, 1, 'mounted text commits');
@@ -492,6 +496,33 @@ try {
     assertEqual(conformance.operations.remove, 1, 'remove operations');
   });
 
+  await runCheck('detach_reinsert_matches_shared_semantics', async () => {
+    const serialized = await page.evaluate(() => window.fino.run_detach_reinsert_probe());
+    detachReinsert = JSON.parse(serialized);
+    assertEqual(detachReinsert.schema, 1, 'detach probe schema');
+    assertEqual(detachReinsert.backend, 'web-headless', 'detach probe backend');
+    assertEqual(detachReinsert.text_detached, 'Count: ', 'detached text');
+    assertEqual(detachReinsert.text_restored, 'Count: 0', 'restored text');
+    assertEqual(detachReinsert.tree_detached.roots[0].children.length, 1, 'detached tree children');
+    assertEqual(detachReinsert.tree_restored.roots[0].children.length, 2, 'restored tree children');
+    assertEqual(detachReinsert.detached_stats.nodes_removed, 1, 'detached removals');
+    assertEqual(detachReinsert.operations.insert, 3, 'detach probe insert operations');
+    assertEqual(detachReinsert.operations.remove, 1, 'detach probe remove operations');
+  });
+
+  await runCheck('web_remount_restores_reachability', async () => {
+    const serialized = await page.evaluate(() => window.fino.run_remount_probe());
+    remount = JSON.parse(serialized);
+    assertEqual(remount.schema, 1, 'remount probe schema');
+    assertEqual(remount.mounted_matches, 1, 'mounted matches');
+    assertEqual(remount.removed_matches, 0, 'removed matches');
+    assertEqual(remount.removed_tree_roots, 0, 'removed tree roots');
+    assertEqual(remount.removed_a11y_nodes, 0, 'removed a11y nodes');
+    assertEqual(remount.remounted_matches, 1, 'remounted matches');
+    assertEqual(remount.remounted_tree_roots, 1, 'remounted tree roots');
+    assertEqual(remount.remounted_a11y_nodes, 1, 'remounted a11y nodes');
+  });
+
   // Writes the exact artifact bytes the wasm run produced.
   // 写入 wasm 运行产生的精确产物字节。
   for (const [relative, contents] of Object.entries(bundle.artifacts)) {
@@ -504,6 +535,14 @@ try {
     `${JSON.stringify(conformance, null, 2)}\n`,
   );
   fs.writeFileSync(
+    path.join(outDir, 'detach_reinsert.json'),
+    `${JSON.stringify(detachReinsert, null, 2)}\n`,
+  );
+  fs.writeFileSync(
+    path.join(outDir, 'remount.json'),
+    `${JSON.stringify(remount, null, 2)}\n`,
+  );
+  fs.writeFileSync(
     path.join(outDir, 'browser.json'),
     `${JSON.stringify({ schema: 1, backend: 'web-headless', status: 'passed', checks }, null, 2)}\n`,
   );
@@ -514,7 +553,12 @@ try {
       result: bundle.result,
       checks,
       conformance,
-      artifacts: [...Object.keys(bundle.artifacts), 'conformance.json'],
+      artifacts: [
+        ...Object.keys(bundle.artifacts),
+        'conformance.json',
+        'detach_reinsert.json',
+        'remount.json',
+      ],
     })}\n`,
   );
 } catch (error) {

@@ -114,6 +114,8 @@ fn conformance_command_prints_a_stable_shared_report() {
             String::from_utf8_lossy(&output.stderr)
         );
         let report: Value = serde_json::from_slice(&output.stdout).expect("conformance JSON");
+        assert_eq!(report["status"], "passed");
+        assert_eq!(report["violations"], serde_json::json!([]));
         assert_eq!(report["schema"], 1);
         assert_eq!(report["backend"], backend);
         assert_eq!(report["tree"]["schema"], 1);
@@ -123,6 +125,10 @@ fn conformance_command_prints_a_stable_shared_report() {
         assert_eq!(report["batch"]["set_text_delta"], 1);
         assert_eq!(report["batch"]["nodes_created_delta"], 0);
         assert_eq!(report["batch"]["nodes_removed_delta"], 0);
+        assert_eq!(
+            report["batch"]["frames_requested_delta"],
+            if backend.starts_with("native") { 1 } else { 0 }
+        );
         assert_eq!(report["unmount"]["selector_matches"], 0);
         assert_eq!(report["unmount"]["nodes_removed_delta"], 1);
         assert_eq!(report["final_stats"]["component_executions"], 1);
@@ -130,8 +136,20 @@ fn conformance_command_prints_a_stable_shared_report() {
         assert_eq!(report["final_stats"]["backend_set_text"], 4);
         assert_eq!(report["final_stats"]["nodes_created"], 4);
         assert_eq!(report["final_stats"]["nodes_removed"], 1);
+        assert_eq!(
+            report["final_stats"]["frames_requested"],
+            if backend.starts_with("native") { 2 } else { 0 }
+        );
         assert_eq!(report["operations"]["set_text"], 4);
         assert_eq!(report["operations"]["insert"], 4);
         assert_eq!(report["operations"]["remove"], 1);
     }
+
+    let human = counter()
+        .args(["conformance", "--backend", "mock"])
+        .output()
+        .expect("human conformance output");
+    assert!(human.status.success());
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(stdout.contains("conformance mock: passed"), "{stdout}");
 }
