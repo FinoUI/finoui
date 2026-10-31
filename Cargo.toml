@@ -17,18 +17,27 @@ license = "MIT"
 repository = "https://github.com/FinoUI/finoui"
 
 [workspace.dependencies]
+bytemuck = { version = "1.25", features = ["derive"] }
 clap = { version = "4.5", features = ["derive"] }
+fontique = { version = "0.11.1", default-features = false, features = ["std"] }
 js-sys = "=0.3.106"
+parley = { version = "0.11.1", default-features = false, features = ["std"] }
+pollster = "0.4"
 reactive_graph = { version = "0.2.14", features = ["effects"] }
 schemars = "1"
 send_wrapper = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
+slotmap = "1.1"
 tempfile = "3"
 thiserror = "2"
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 toml = "1"
 wasm-bindgen = "=0.2.129"
+wgpu = "29.0.4"
+winit = "0.30.12"
 web-sys = { version = "=0.3.106", features = [
     "Document",
     "Element",

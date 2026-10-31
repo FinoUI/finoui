@@ -611,10 +611,7 @@ fn ensure_snapshot_supported<B: HeadlessBackend + 'static>(
     step: Option<usize>,
     backend: &str,
 ) -> Result<(), ToolError> {
-    let supported = matches!(
-        kind,
-        SnapshotKind::Dom | SnapshotKind::A11y | SnapshotKind::Reactive | SnapshotKind::Trace
-    ) && host.runtime().backend().supports_snapshot(kind);
+    let supported = host.runtime().backend().supports_snapshot(kind);
     if supported {
         return Ok(());
     }
@@ -642,6 +639,28 @@ fn snapshot_bytes<B: HeadlessBackend + 'static>(
         SnapshotKind::A11y => json_bytes(&host.a11y_snapshot(), kind.artifact_name()),
         SnapshotKind::Reactive => json_bytes(&host.reactive_snapshot(), kind.artifact_name()),
         SnapshotKind::Trace => json_bytes(&host.trace_snapshot(), kind.artifact_name()),
+        SnapshotKind::Layout => host
+            .runtime_mut()
+            .backend_mut()
+            .layout_snapshot()
+            .ok_or_else(|| {
+                ToolError::new(
+                    "UI_SNAPSHOT_UNSUPPORTED",
+                    "backend cannot generate layout snapshots",
+                )
+            })
+            .and_then(|value| json_bytes(&value, kind.artifact_name())),
+        SnapshotKind::DisplayList => host
+            .runtime_mut()
+            .backend_mut()
+            .display_list_snapshot()
+            .ok_or_else(|| {
+                ToolError::new(
+                    "UI_SNAPSHOT_UNSUPPORTED",
+                    "backend cannot generate display_list snapshots",
+                )
+            })
+            .and_then(|value| json_bytes(&value, kind.artifact_name())),
         _ => Err(ToolError::new(
             "UI_SNAPSHOT_UNSUPPORTED",
             format!("backend cannot generate {} snapshots", kind.name()),

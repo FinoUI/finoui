@@ -12,6 +12,7 @@ Fino is a Rust cross-platform UI framework with fine-grained reactivity, real DO
 - [Runtime and DOM API](docs/en/runtime.md)
 - [Text and layout](docs/en/text-layout.md)
 - [Rendering and platform hosts](docs/en/rendering-platform.md)
+- [Native counter backend](docs/en/native-backend.md)
 - [Quality, performance, and CI](docs/en/quality.md)
 - [Dependency policy](docs/en/dependencies.md)
 - [AI-native development](docs/en/ai-native-development.md)

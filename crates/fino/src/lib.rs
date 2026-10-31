@@ -20,6 +20,10 @@ pub mod headless;
 /// Read-only structured artifact inspection.
 /// 只读结构化产物检查。
 pub mod inspect;
+/// Native DOM, text, layout, offscreen, and winit/wgpu host.
+/// 原生 DOM、文本、布局、离屏与 winit/wgpu Host。
+#[cfg(feature = "native")]
+pub mod native;
 /// Thin `reactive_graph` adaptation.
 /// `reactive_graph` 薄适配层。
 pub mod reactive;
@@ -29,3 +33,7 @@ pub mod runtime;
 /// Versioned JSON scenarios and machine-readable artifacts.
 /// 版本化 JSON 场景与机器可读产物。
 pub mod scenario;
+/// Minimal Parley/Fontique text engine with explicit shape and layout phases.
+/// 明确区分 shape 与 layout 阶段的最小 Parley/Fontique 文本引擎。
+#[cfg(feature = "native")]
+pub mod text;
