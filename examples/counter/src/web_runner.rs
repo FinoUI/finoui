@@ -134,6 +134,12 @@ impl KeyedPage {
         serde_json::to_string(&self.mount.builder_runs()).expect("builder runs JSON")
     }
 
+    /// Returns the keys still retained by probe instrumentation as JSON.
+    /// 以 JSON 返回探针仍保留的 key。
+    pub fn probe_keys(&self) -> String {
+        serde_json::to_string(&self.mount.probe_keys()).expect("probe keys JSON")
+    }
+
     /// Returns the last duplicate-key error code, if any.
     /// 返回最近一次重复 key 错误码（若有）。
     pub fn last_error_code(&self) -> Option<String> {

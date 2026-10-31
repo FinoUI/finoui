@@ -127,10 +127,21 @@ impl<B: DomBackend + 'static> KeyedMount<B> {
         self.locals.borrow().get(key).cloned()
     }
 
-    /// Returns how often each key builder ran.
-    /// 返回每个 key 构建器的运行次数。
+    /// Returns how often each live key builder ran.
+    /// 返回每个仍存活 key 的构建器运行次数。
     pub fn builder_runs(&self) -> BTreeMap<String, u32> {
         self.runs.borrow().clone()
+    }
+
+    /// Returns the keys still retained by probe instrumentation.
+    /// 返回探针仍保留的 key。
+    pub fn probe_keys(&self) -> Vec<String> {
+        let mut keys = std::collections::BTreeSet::new();
+        keys.extend(self.runs.borrow().keys().cloned());
+        keys.extend(self.handles.borrow().keys().cloned());
+        keys.extend(self.values.borrow().keys().cloned());
+        keys.extend(self.locals.borrow().keys().cloned());
+        keys.into_iter().collect()
     }
 
     /// Returns the stable list anchors.
@@ -260,9 +271,7 @@ fn item_row<B: DomBackend + 'static>(
     let label = key.to_owned();
     let bound = value.clone();
     context.effect(&format!("keyed/{key}/text"), move |effect| {
-        effect
-            .backend_mut()
-            .set_text(&bound, &format!("{label}={}", read.get()));
+        effect.set_text(&bound, &format!("{label}={}", read.get()));
     });
     let click = local.clone();
     context.listen(&button, EventKind::Click, move |_event, _context| {
@@ -274,6 +283,17 @@ fn item_row<B: DomBackend + 'static>(
         .insert(key.to_owned(), button.clone());
     parts.values.borrow_mut().insert(key.to_owned(), value);
     parts.locals.borrow_mut().insert(key.to_owned(), local);
+    let removed_key = key.to_owned();
+    let handles = Rc::clone(&parts.handles);
+    let values = Rc::clone(&parts.values);
+    let locals = Rc::clone(&parts.locals);
+    let runs = Rc::clone(&parts.runs);
+    context.on_dispose(move || {
+        handles.borrow_mut().remove(&removed_key);
+        values.borrow_mut().remove(&removed_key);
+        locals.borrow_mut().remove(&removed_key);
+        runs.borrow_mut().remove(&removed_key);
+    });
     vec![button]
 }
 
@@ -417,6 +437,9 @@ pub struct KeyedConformanceReport {
     /// Whole-list reconciliation executions.
     /// 整表协调执行次数。
     pub reconcile_executions: u64,
+    /// Whether probe instrumentation retains only live keys.
+    /// 探针是否只为仍存活 key 保留数据。
+    pub probe_storage_bounded: bool,
     /// Normalized backend operation counts.
     /// 规范化后端操作计数。
     pub operations: BTreeMap<String, u64>,
@@ -599,6 +622,12 @@ impl KeyedConformanceReport {
         );
         check(
             &mut violations,
+            "probe_storage_bounded",
+            self.probe_storage_bounded,
+            true,
+        );
+        check(
+            &mut violations,
             "final_stats.component_executions",
             self.final_stats.component_executions,
             1,
@@ -698,8 +727,9 @@ pub fn expected_phase_operations(name: &str) -> BTreeMap<String, u64> {
             ("set_attribute", 1),
             ("set_text", 1),
         ],
-        "swap" => &[("insert", 6)],
-        "reverse" | "rotation" => &[("insert", 15)],
+        "swap" => &[("insert", 3)],
+        "reverse" => &[("insert", 12)],
+        "rotation" => &[("insert", 3)],
         "delete" => &[("release", 4), ("unlisten", 1)],
         "replace" => &[
             ("create_anchor", 2),
@@ -738,7 +768,7 @@ pub fn expected_operations() -> BTreeMap<String, u64> {
         ("create_anchor", 18),
         ("create_element", 10),
         ("create_text", 11),
-        ("insert", 80),
+        ("insert", 59),
         ("listen", 9),
         ("release", 34),
         ("remove", 1),
@@ -784,9 +814,13 @@ pub fn run_keyed_conformance<B: HeadlessBackend + 'static>(
     let mut item_identity_stable = true;
     let mut static_ids_stable = true;
     let mut phases = Vec::new();
+    let mut stale_signal = None;
 
     for index in 1..PHASES.len() {
         let name = PHASE_NAMES[index];
+        if name == "delete" {
+            stale_signal = mount.local_signal("A");
+        }
         let before_operations = operation_counts(&host);
         let before_reconcile = reconcile_executions(&host);
         host.click(&next_selector())
@@ -895,7 +929,7 @@ pub fn run_keyed_conformance<B: HeadlessBackend + 'static>(
     // 已移除 key 的旧 Signal 写入不得触达后端。
     let _ = host.runtime().backend().take_frame_request();
     let stale_operations = operation_counts(&host);
-    if let Some(stale) = mount.local_signal("A") {
+    if let Some(stale) = stale_signal {
         stale.set(9);
     }
     let stale_after = operation_counts(&host);
@@ -925,6 +959,12 @@ pub fn run_keyed_conformance<B: HeadlessBackend + 'static>(
         && recovery_before_runs == recovery_after_runs
         && row_keys(&host.runtime().backend().logical_tree())
             == vec!["E".to_owned(), "D".to_owned()];
+
+    let mut probe_keys = mount.probe_keys();
+    let mut live_keys = mount.keys();
+    probe_keys.sort();
+    live_keys.sort();
+    let probe_storage_bounded = probe_keys == live_keys;
 
     let reordered_tree = host.runtime().backend().logical_tree();
     let current_static = static_node_ids(&host);
@@ -982,6 +1022,7 @@ pub fn run_keyed_conformance<B: HeadlessBackend + 'static>(
         item_identity_stable,
         builder_runs,
         reconcile_executions,
+        probe_storage_bounded,
         operations,
         final_stats,
     })

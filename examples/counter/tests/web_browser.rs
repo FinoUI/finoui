@@ -220,6 +220,11 @@ fn web_headless_runs_the_same_scenario_with_real_dom_probes() {
         mock_keyed.item_identity_stable
     );
     assert_eq!(
+        web_keyed.probe_storage_bounded,
+        mock_keyed.probe_storage_bounded
+    );
+    assert!(web_keyed.probe_storage_bounded);
+    assert_eq!(
         web_keyed.final_stats.component_executions,
         mock_keyed.final_stats.component_executions
     );

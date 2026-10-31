@@ -3,9 +3,12 @@
 use std::{path::PathBuf, process::Command};
 
 use fino::{headless::SnapshotKind, inspect::inspect_artifact, scenario::Status};
-use fino_counter::runner::{
-    run_mock_keyed_conformance, run_mock_keyed_scenario, run_native_offscreen_keyed_conformance,
-    run_native_offscreen_keyed_scenario,
+use fino_counter::{
+    keyed::mount_keyed,
+    runner::{
+        run_mock_keyed_conformance, run_mock_keyed_scenario,
+        run_native_offscreen_keyed_conformance, run_native_offscreen_keyed_scenario,
+    },
 };
 use serde_json::Value;
 
@@ -249,4 +252,32 @@ fn native_keyed_dispose_releases_arena_and_display_list() {
         runtime.backend().text_content(root).as_deref(),
         Some("Tail")
     );
+}
+
+/// Probe instrumentation drops removed keys instead of retaining historical
+/// WebNodes and Signals during long churn.
+/// 探针在长期 churn 中丢弃已移除 key，而不是保留历史 WebNode 与 Signal。
+#[test]
+fn keyed_probe_storage_stays_bounded() {
+    use fino::{backend_mock::MockBackend, runtime::Runtime};
+
+    let mut runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let mount = mount_keyed(&mut runtime, &owner);
+    for index in 0..50 {
+        let key = format!("K{index}");
+        mount.set_keys(vec![key.clone()]);
+        assert_eq!(mount.keys(), vec![key.clone()]);
+        assert_eq!(
+            mount.probe_keys(),
+            vec![key.clone()],
+            "only the live key remains instrumented"
+        );
+        assert_eq!(
+            mount.builder_runs().keys().cloned().collect::<Vec<_>>(),
+            vec![key]
+        );
+    }
+    mount.dispose();
+    assert!(mount.probe_keys().is_empty());
 }

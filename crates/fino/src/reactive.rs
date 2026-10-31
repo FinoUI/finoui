@@ -364,8 +364,10 @@ impl Owner {
         // `ImmediateEffect` retains upstream graph tracking and batch de-duplication.
         // `SendWrapper` 将非 Send 的 UI 状态限制在创建线程，`ImmediateEffect`
         // 则保留上游的依赖图追踪与批内去重。
+        let first_run = SendWrapper::new(Cell::new(true));
         let effect = self.inner.with(|| {
             ImmediateEffect::new(move || {
+                let was_first_run = first_run.get();
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
                     if let Ok(mut runner) = runner.try_borrow_mut() {
                         runner.run(id);
@@ -373,13 +375,20 @@ impl Owner {
                         cycle_registry.borrow_mut().report_cycle(id);
                     }
                 }));
-                if let Err(payload) = outcome {
-                    // A first-run panic would otherwise leave diagnostics active
-                    // because cleanup registration happens after effect creation.
-                    // 首次执行 panic 时清理注册尚未完成，若不处理会让诊断一直显示
-                    // Effect 仍活跃。
-                    panic_registry.borrow_mut().deactivate_effect(id);
-                    resume_unwind(payload);
+                match outcome {
+                    Ok(()) => first_run.set(false),
+                    Err(payload) => {
+                        // Only a first-run panic precedes cleanup registration.
+                        // Later panics leave the effect owned and re-runnable, so
+                        // diagnostics must stay active and a retry can succeed.
+                        // 只有首次执行 panic 发生在清理注册之前。后续 panic 时
+                        // Effect 仍由 Owner 持有并可再次运行，因此诊断必须保持
+                        // 活跃，后续重试可以成功。
+                        if was_first_run {
+                            panic_registry.borrow_mut().deactivate_effect(id);
+                        }
+                        resume_unwind(payload);
+                    }
                 }
             })
         });
@@ -443,6 +452,20 @@ impl Owner {
         let value = SendWrapper::new(RefCell::new(Some(value)));
         self.register_cleanup(move || {
             let _ = value.take();
+        });
+    }
+
+    /// Runs one callback when this owner is disposed; repeated disposal is safe.
+    /// 在该 Owner 释放时执行一个回调；重复释放是安全的。
+    ///
+    /// The callback follows the owner thread and can carry non-`Send` UI state.
+    /// 回调跟随 Owner 线程，可以携带非 `Send` 的 UI 状态。
+    pub fn on_dispose(&self, cleanup: impl FnOnce() + 'static) {
+        let cleanup = SendWrapper::new(RefCell::new(Some(Box::new(cleanup) as Box<dyn FnOnce()>)));
+        self.register_cleanup(move || {
+            if let Some(cleanup) = cleanup.borrow_mut().take() {
+                cleanup();
+            }
         });
     }
 

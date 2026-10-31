@@ -112,6 +112,7 @@ let details = Show::mount(
 ```
 
 - `ShowContext` tracks every node, effect, and listener created during one mount. A panic in the content builder disposes the child owner, releases tracked nodes, and rethrows without advancing the condition, so a later real transition can retry.
+- A first-run condition or content panic during `Show::mount` releases the Show anchors and owner before rethrowing; a later transition panic keeps the anchors and active condition effect for retry.
 - The anchors are created once and stay stable. Static siblings and their `NodeId`s are never replaced.
 - The condition effect creates a child owner and content only on a real `false → true` transition; equal writes are no-ops.
 - On `true → false`, the child owner is disposed first, which stops event dispatch and releases effects and listeners, then the range is released from the parent.
@@ -144,8 +145,11 @@ let rows = For::mount(
 - Duplicate keys are rejected atomically before any backend mutation. `For::try_mount` returns `ForError` before creating the For anchors; `For::mount` panics instead. On update, the committed list stays mounted and `For::last_error` reports the rejection; a later valid write retries and clears it.
 - `ForContext` tracks every node, effect, and listener of one item. Each item has its own child owner and anchor pair.
 - Reconciliation follows the shape of SolidJS `mapArray` (MIT, `solidjs/solid` commit `bc50fe5649ba4fb1ef33f26643dba56c1c002b56`, `packages/solid/src/reactive/array.ts`): common prefix and suffix, a key-to-position map, and one disposer per item. Fino rejects duplicates instead of matching one occurrence. No source code is copied.
+- Placement keeps the longest increasing subsequence of retained old positions in place, following the stable-subsequence idea in Vue 3's keyed patch (MIT, `vuejs/core` commit `ff3501429d4970c37194708b055492a56d9e5be5`, `packages/runtime-core/src/renderer.ts`). New and unstable ranges move; stable retained ranges do not issue `insertBefore`.
 - Only new keys create ranges and only removed keys release them. Retained keys keep their `NodeId`, DOM identity, text nodes, local signals, effects, and listeners; their content builder never reruns.
-- Reordering moves each retained range, anchors included, with `insert_before`. Prefix and suffix ranges stay in place; the parent, static siblings, and For anchors are never cleared or rebuilt, and `innerHTML` is never assigned.
+- Reordering moves each affected range, anchors included, with `insert_before`. Prefix, suffix, and LIS-stable ranges stay in place; the parent, static siblings, and For anchors are never cleared or rebuilt, and `innerHTML` is never assigned.
+- `ForContext` mutations may only target nodes created by the current item. `insert_before`, `set_text`, `set_attribute`, and `listen` reject foreign mounted nodes before mutation, and the context does not expose the shared runtime. Item effects receive a restricted `ForEffectContext` with only item-owned `set_text`, `set_attribute`, and `insert_before`; it has no raw backend borrow.
+- Nested `Show` mounts are transactional too. A first-run content or condition panic releases the Show anchors and owner before rethrowing; a later content panic leaves the anchors and active effect in place so a retry can succeed.
 - Every new item is fully built before existing ranges change. A builder panic disposes that item owner and releases its tracked nodes, effects, and listeners before rethrowing; already-built items are released and the previous list stays committed.
 - Removing a key disposes the item owner first, then releases its range. Writing a removed item's signal no longer touches the backend or requests a frame.
 - Item-local signal updates through item effects do not run the reconciliation effect.

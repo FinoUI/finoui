@@ -151,13 +151,9 @@ impl<B: DomBackend + 'static> ShowContext<B> {
         std::mem::take(&mut self.created)
     }
 
-    /// Returns the shared runtime for explicit backend operations.
-    /// 返回共享 Runtime，供显式后端操作使用。
-    ///
-    /// Nodes created directly through this runtime are not tracked by the
-    /// mount transaction; prefer the context creation methods.
-    /// 直接通过该 Runtime 创建的节点不参与挂载事务跟踪；优先使用上下文创建方法。
-    pub fn runtime(&self) -> &Runtime<B> {
+    /// Returns the shared runtime for crate-internal range assembly.
+    /// 返回 crate 内部范围组装使用的共享 Runtime。
+    pub(crate) fn runtime(&self) -> &Runtime<B> {
         &self.runtime
     }
 
@@ -343,13 +339,26 @@ impl<B: DomBackend + 'static> Show<B> {
         }));
 
         let effect_state = Rc::clone(&state);
-        runtime.effect_with_runtime(
-            &control,
-            &format!("{name}/condition"),
-            move |_context, runtime| {
-                effect_state.borrow_mut().update(runtime);
-            },
-        );
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            runtime.effect_with_runtime(
+                &control,
+                &format!("{name}/condition"),
+                move |_context, runtime| {
+                    effect_state.borrow_mut().update(runtime);
+                },
+            );
+        }));
+        if let Err(payload) = outcome {
+            // A first-run panic happens before cleanup registration. Release the
+            // range and anchors before rethrowing so no orphan nodes survive.
+            // 首次执行 panic 发生在清理注册之前。重新抛出前释放范围与锚点，
+            // 避免留下孤儿节点。
+            if let Ok(mut state) = state.try_borrow_mut() {
+                state.cleanup(false);
+            }
+            control.dispose();
+            resume_unwind(payload);
+        }
 
         let cleanup_state = SendWrapper::new(Rc::downgrade(&state));
         control.register_cleanup(move || {
@@ -412,10 +421,20 @@ impl<B: DomBackend + 'static> ActiveRange<B> {
     /// 在释放节点与保留句柄前先停止子 Owner。
     fn dispose(self, runtime: &Runtime<B>) {
         self.owner.dispose();
+        let mut released: Vec<B::Node> = Vec::new();
         for node in self.created.iter().rev() {
+            if released.iter().any(|released| released == node) {
+                continue;
+            }
             runtime.backend_mut().release(node);
+            released.push(node.clone());
         }
         for node in &self.nodes {
+            if self.created.iter().any(|created| created == node)
+                || released.iter().any(|released| released == node)
+            {
+                continue;
+            }
             runtime.backend_mut().release(node);
         }
     }

@@ -598,3 +598,120 @@ fn initial_failed_mount_releases_anchors() {
         "the static sibling survives a failed initial mount"
     );
 }
+
+/// A first-run condition panic releases the anchors created before the effect.
+/// 首次条件读取 panic 会释放 Effect 之前创建的锚点。
+#[test]
+fn initial_condition_panic_releases_anchors() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let baseline = runtime.backend().dom_snapshot().nodes.len();
+
+    let failure = catch_unwind(AssertUnwindSafe(|| {
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/condition-panic",
+            || panic!("initial condition"),
+            |context: &mut ShowContext<MockBackend>| context.create_text("never"),
+        );
+    }));
+
+    assert!(failure.is_err());
+    assert_eq!(runtime.backend().dom_snapshot().nodes.len(), baseline);
+    assert_eq!(
+        runtime
+            .backend()
+            .dom_snapshot()
+            .nodes
+            .iter()
+            .filter(|node| node.kind == fino::headless::DomNodeKind::Anchor)
+            .count(),
+        0
+    );
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+}
+
+/// A content panic on a real transition leaves the anchors and effect active so
+/// a later transition can retry, matching the PR16 contract.
+/// 真实切换中的内容 panic 会保留锚点与活跃 Effect，使后续切换可以重试，
+/// 符合 PR16 契约。
+#[test]
+fn content_panic_on_transition_keeps_show_retryable() {
+    use std::{
+        cell::Cell,
+        panic::{AssertUnwindSafe, catch_unwind},
+        rc::Rc,
+    };
+
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let visible = owner.signal_named("show/retry", false);
+    let attempts = Rc::new(Cell::new(0_u32));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let show = {
+        let visible = visible.clone();
+        let attempts = Rc::clone(&attempts);
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/retry",
+            move || visible.get(),
+            move |context| {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                let action = context.create_element(Tag::Button);
+                context.set_attribute(&action, Attribute::AriaLabel, Some("Retry action"));
+                let value = context.create_text("value");
+                context.insert_before(&action, &value, None);
+                if attempt == 1 {
+                    panic!("first transition failed");
+                }
+                action
+            },
+        )
+    };
+
+    let failure = catch_unwind(AssertUnwindSafe(|| visible.set(true)));
+    assert!(failure.is_err());
+    assert!(!show.is_mounted());
+    assert_eq!(
+        runtime
+            .backend()
+            .dom_snapshot()
+            .nodes
+            .iter()
+            .filter(|node| node.kind == fino::headless::DomNodeKind::Anchor)
+            .count(),
+        2,
+        "the anchors survive a failed transition"
+    );
+    assert!(
+        owner
+            .snapshot()
+            .effects
+            .iter()
+            .any(|effect| effect.name == "show/retry/condition" && effect.active),
+        "the condition effect stays active for retry"
+    );
+    assert_eq!(runtime.backend().listener_count(), 0);
+
+    visible.set(true);
+    assert!(show.is_mounted());
+    assert_eq!(attempts.get(), 2);
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("valueTail")
+    );
+    assert_eq!(runtime.backend().listener_count(), 0);
+}

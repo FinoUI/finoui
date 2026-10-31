@@ -112,6 +112,7 @@ let details = Show::mount(
 ```
 
 - `ShowContext` 跟踪一次挂载中创建的每个节点、Effect 与监听。内容构建器 panic 时会释放子 Owner、回收已跟踪节点并重新抛出，且不推进条件，后续真实切换可以重试。
+- `Show::mount` 首次执行时条件或内容 panic 会在重新抛出前释放 Show 锚点与 Owner；后续真实切换 panic 会保留锚点与活跃条件 Effect，以便重试。
 - 锚点只创建一次并保持稳定；静态兄弟及其 `NodeId` 绝不替换。
 - 条件 Effect 只在真正的 `false → true` 切换时创建子 Owner 与内容；写入相同值不执行操作。
 - `true → false` 时先释放子 Owner，停止事件分发并解绑 Effect 与监听，再从父节点释放范围。
@@ -144,8 +145,11 @@ let rows = For::mount(
 - 重复 key 会在任何后端变更前被原子拒绝。`For::try_mount` 在创建 For 锚点前返回 `ForError`；`For::mount` 则 panic。更新时已提交列表保持不变，`For::last_error` 报告拒绝；之后的合法写入会重试并清除错误。
 - `ForContext` 跟踪一个条目的每个节点、Effect 与监听。每个条目拥有自己的子 Owner 与锚点对。
 - 协调结构参考 SolidJS `mapArray`（MIT，`solidjs/solid` 提交 `bc50fe5649ba4fb1ef33f26643dba56c1c002b56`，`packages/solid/src/reactive/array.ts`）：公共前缀与后缀、key 到位置映射，以及每项一个 disposer。Fino 拒绝重复 key，而不是匹配其中一个出现位置。未复制其源码。
+- 放置阶段保留旧位置的最长递增子序列，沿用 Vue 3 keyed patch 的稳定子序列思路（MIT，`vuejs/core` 提交 `ff3501429d4970c37194708b055492a56d9e5be5`，`packages/runtime-core/src/renderer.ts`）。新范围与不稳定范围移动；稳定的保留范围不发出 `insertBefore`。
 - 只有新增 key 创建范围，只有删除 key 释放范围。保留的 key 保留 `NodeId`、DOM 身份、文本节点、局部 Signal、Effect 与监听；内容构建器绝不重跑。
-- 重排使用 `insert_before` 移动每个保留范围（含锚点）。前缀与后缀范围原地不动；父节点、静态兄弟与 For 锚点绝不清空或重建，也绝不写入 `innerHTML`。
+- 重排使用 `insert_before` 移动受影响范围（含锚点）。前缀、后缀与 LIS 稳定范围原地不动；父节点、静态兄弟与 For 锚点绝不清空或重建，也绝不写入 `innerHTML`。
+- `ForContext` 的变更只能作用于本条创建节点。`insert_before`、`set_text`、`set_attribute` 与 `listen` 会在变更前拒绝外部已挂载节点，上下文也不暴露共享 Runtime。条目 Effect 接收受限的 `ForEffectContext`，只提供条目内的 `set_text`、`set_attribute` 与 `insert_before`，不暴露原始后端借用。
+- 嵌套 `Show` 挂载同样具有事务性。首次内容或条件 panic 会在重新抛出前释放 Show 锚点与 Owner；后续内容 panic 会保留锚点与活跃 Effect，使重试可以成功。
 - 每个新条目都在改动既有范围前完整构建。构建器 panic 时先释放该条目 Owner 及其跟踪的节点、Effect 与监听，再继续展开；已构建条目会被释放，上一次列表保持已提交。
 - 删除 key 时先释放条目 Owner，再释放其范围。写入已移除条目的 Signal 不再触达后端或请求帧。
 - 条目内通过条目 Effect 完成的 Signal 更新不会运行协调 Effect。

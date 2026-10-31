@@ -3,18 +3,19 @@
 
 use std::{
     cell::RefCell,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     panic::{AssertUnwindSafe, catch_unwind},
     rc::Rc,
 };
 
 use fino::{
-    backend_mock::{BackendOp, MockBackend, MockNode},
+    backend_mock::{BackendOp, MockBackend, MockListener, MockNode},
     dom_api::{Attribute, DomBackend, EventKind, Role, Selector, Tag},
     headless::{DomNodeKind, HeadlessBackend},
     keyed::{For, ForContext},
     reactive::Signal,
     runtime::Runtime,
+    show::Show,
 };
 
 fn text(backend: &mut MockBackend, parent: &MockNode, value: &str) -> MockNode {
@@ -94,9 +95,7 @@ fn row(
     let read = local.clone();
     let label = key.to_owned();
     context.effect(&format!("keyed/{key}/text"), move |effect| {
-        effect
-            .backend_mut()
-            .set_text(&value, &format!("{label}={}", read.get()));
+        effect.set_text(&value, &format!("{label}={}", read.get()));
     });
     let click_local = local.clone();
     context.listen(&button, EventKind::Click, move |_event, _context| {
@@ -184,8 +183,8 @@ fn keyed_for_preserves_identity_across_reorders() {
     );
     assert_eq!(
         reverse_ops.len(),
-        9,
-        "three items move start, node, and end"
+        6,
+        "a three-item reverse keeps one stable range and moves two complete ranges"
     );
     assert_eq!(runtime.backend().listener_count(), 3);
 
@@ -210,7 +209,7 @@ fn keyed_for_preserves_identity_across_reorders() {
             .skip(before_rotate)
             .filter(|operation| matches!(operation, BackendOp::Insert))
             .count(),
-        9
+        3
     );
 
     let state = runtime.backend().dom_snapshot();
@@ -833,6 +832,7 @@ fn keyed_for_disposes_nested_item_owners() {
     let tail = text(&mut runtime.backend_mut(), &root, "Tail");
     let nested: Rc<RefCell<Option<Signal<i32>>>> = Rc::new(RefCell::new(None));
     let runs = Rc::new(std::cell::Cell::new(0_u32));
+    let nested_runtime = runtime.clone();
     let list = {
         let read_items = items.clone();
         let nested_slot = Rc::clone(&nested);
@@ -854,14 +854,12 @@ fn keyed_for_disposes_nested_item_owners() {
                 let binding = value;
                 let label = key.to_owned();
                 let runs = Rc::clone(&nested_runs);
-                context
-                    .runtime()
-                    .effect(&child, "nested/text", move |effect| {
-                        runs.set(runs.get() + 1);
-                        effect
-                            .backend_mut()
-                            .set_text(&binding, &format!("{label}={}", read.get()));
-                    });
+                nested_runtime.effect(&child, "nested/text", move |effect| {
+                    runs.set(runs.get() + 1);
+                    effect
+                        .backend_mut()
+                        .set_text(&binding, &format!("{label}={}", read.get()));
+                });
                 *nested_slot.borrow_mut() = Some(count);
                 vec![button]
             },
@@ -912,5 +910,493 @@ fn keyed_for_mount_panics_on_duplicate_keys() {
         |context: &mut ForContext<MockBackend>, _key: &String| {
             vec![context.create_element(Tag::Button)]
         },
+    );
+}
+
+/// A nested Show panic during the initial For build releases every item, Show,
+/// and For anchor instead of leaving orphan ranges.
+/// 初始 For 构建期间嵌套 Show panic 会释放全部条目、Show 与 For 锚点，而不是
+/// 留下孤儿范围。
+#[test]
+fn keyed_for_nested_show_initial_panic_releases_anchors() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let baseline = runtime.backend().dom_snapshot().nodes.len();
+
+    let failure = catch_unwind(AssertUnwindSafe(|| {
+        let items = keys(&["a"]);
+        let _ = For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/nested-initial",
+            move || items.clone(),
+            |context: &mut ForContext<MockBackend>, _key| {
+                let item = context.create_element(Tag::Button);
+                context.show(
+                    &item,
+                    None,
+                    "nested/panic",
+                    || true,
+                    |_show_context| {
+                        panic!("nested show content");
+                    },
+                );
+                vec![item]
+            },
+        );
+    }));
+
+    assert!(failure.is_err());
+    assert_eq!(runtime.backend().dom_snapshot().nodes.len(), baseline);
+    assert_eq!(
+        runtime
+            .backend()
+            .dom_snapshot()
+            .nodes
+            .iter()
+            .filter(|node| node.kind == DomNodeKind::Anchor)
+            .count(),
+        0
+    );
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+}
+
+/// A nested Show mounted on the list parent that panics rejects only the new
+/// item and keeps the committed list structure unchanged.
+/// 挂在列表父节点上的嵌套 Show panic 只拒绝新条目，已提交列表结构保持不变。
+#[test]
+fn keyed_for_nested_show_on_list_parent_panic_keeps_committed_list() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let show_runtime = runtime.clone();
+    let list = {
+        let read_items = items.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/nested-update",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                if key == "a" {
+                    let item = context.create_element(Tag::Button);
+                    let value = context.create_text("A");
+                    context.insert_before(&item, &value, None);
+                    return vec![item];
+                }
+                Show::mount(
+                    &show_runtime,
+                    context.owner(),
+                    &root,
+                    None,
+                    "nested/list-parent",
+                    || true,
+                    |_show_context| panic!("nested list content"),
+                );
+                vec![context.create_element(Tag::Button)]
+            },
+        )
+    };
+    let baseline_nodes = runtime.backend().dom_snapshot().nodes.len();
+    let baseline_anchors = runtime
+        .backend()
+        .dom_snapshot()
+        .nodes
+        .iter()
+        .filter(|node| node.kind == DomNodeKind::Anchor)
+        .count();
+    assert_eq!(baseline_anchors, 4);
+
+    let failure = catch_unwind(AssertUnwindSafe(|| items.set(keys(&["a", "b"]))));
+    assert!(failure.is_err());
+    assert_eq!(list.keys(), keys(&["a"]));
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("ATail")
+    );
+    assert_eq!(runtime.backend().dom_snapshot().nodes.len(), baseline_nodes);
+    assert_eq!(
+        runtime
+            .backend()
+            .dom_snapshot()
+            .nodes
+            .iter()
+            .filter(|node| node.kind == DomNodeKind::Anchor)
+            .count(),
+        baseline_anchors,
+        "the failed nested Show releases only its own anchors"
+    );
+    assert_eq!(runtime.backend().listener_count(), 0);
+}
+
+/// Builder mutations that target mounted nodes outside the item are rejected
+/// before they can modify the committed list.
+/// 目标为条目外部已挂载节点的构建器变更会在修改已提交列表前被拒绝。
+#[test]
+fn keyed_for_rejects_foreign_context_mutations_without_state_change() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let host_root = root;
+    let host_tail = tail;
+    let list = {
+        let read_items = items.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/foreign",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                if key == "a" {
+                    let item = context.create_element(Tag::Button);
+                    let value = context.create_text("A");
+                    context.insert_before(&item, &value, None);
+                    return vec![item];
+                }
+                let created = context.create_element(Tag::Button);
+                if key == "b" {
+                    context.insert_before(&host_root, &created, None);
+                } else {
+                    context.set_text(&host_tail, "hacked");
+                }
+                vec![created]
+            },
+        )
+    };
+    let baseline_nodes = runtime.backend().dom_snapshot().nodes.len();
+    let baseline_text = runtime
+        .backend()
+        .text_content(&root)
+        .expect("committed list text");
+    assert_eq!(baseline_text, "ATail");
+
+    for (key, expected) in [("b", "ForContext mutations"), ("c", "ForContext mutations")] {
+        let before = runtime.backend().operations().len();
+        let failure = catch_unwind(AssertUnwindSafe(|| {
+            items.set(keys(&["a", key]));
+        }));
+        let payload = failure.expect_err("foreign mutation must panic");
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        assert!(
+            message.contains(expected),
+            "unexpected panic payload: {message}"
+        );
+        assert_eq!(list.keys(), keys(&["a"]));
+        assert_eq!(
+            runtime.backend().text_content(&root).as_deref(),
+            Some("ATail")
+        );
+        assert_eq!(runtime.backend().dom_snapshot().nodes.len(), baseline_nodes);
+        let operations = runtime.backend().operations()[before..].to_vec();
+        assert!(
+            !operations
+                .iter()
+                .any(|operation| matches!(operation, BackendOp::Insert)),
+            "the rejected mutation never inserts or moves an existing node"
+        );
+        assert_eq!(runtime.backend().listener_count(), 0);
+    }
+}
+
+/// Test backend that rejects any second release of the same live node.
+/// 测试后端：拒绝同一存活节点的第二次释放。
+#[derive(Default)]
+struct StrictBackend {
+    inner: MockBackend,
+    live: BTreeSet<MockNode>,
+}
+
+impl StrictBackend {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn inner(&self) -> &MockBackend {
+        &self.inner
+    }
+
+    fn release_subtree(&mut self, node: MockNode) {
+        assert!(
+            self.live.contains(&node),
+            "strict backend rejected a duplicate release of {node:?}"
+        );
+        let snapshot = self.inner.dom_snapshot();
+        let mut pending = vec![node];
+        while let Some(current) = pending.pop() {
+            assert!(
+                self.live.remove(&current),
+                "strict backend rejected a duplicate descendant release of {current:?}"
+            );
+            let id = format!("node-{}", current.0);
+            if let Some(record) = snapshot.nodes.iter().find(|record| record.id == id) {
+                for child in &record.children {
+                    let child = child
+                        .strip_prefix("node-")
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .map(MockNode)
+                        .expect("strict backend child id");
+                    pending.push(child);
+                }
+            }
+        }
+        self.inner.release(&node);
+    }
+}
+
+impl DomBackend for StrictBackend {
+    type Node = MockNode;
+    type Listener = MockListener;
+
+    fn create_element(&mut self, tag: Tag) -> Self::Node {
+        let node = self.inner.create_element(tag);
+        self.live.insert(node);
+        node
+    }
+
+    fn create_text(&mut self, value: &str) -> Self::Node {
+        let node = self.inner.create_text(value);
+        self.live.insert(node);
+        node
+    }
+
+    fn create_anchor(&mut self) -> Self::Node {
+        let node = self.inner.create_anchor();
+        self.live.insert(node);
+        node
+    }
+
+    fn insert_before(
+        &mut self,
+        parent: &Self::Node,
+        child: &Self::Node,
+        anchor: Option<&Self::Node>,
+    ) {
+        self.inner.insert_before(parent, child, anchor);
+    }
+
+    fn remove(&mut self, node: &Self::Node) {
+        self.inner.remove(node);
+    }
+
+    fn release(&mut self, node: &Self::Node) {
+        self.release_subtree(*node);
+    }
+
+    fn set_text(&mut self, node: &Self::Node, value: &str) {
+        self.inner.set_text(node, value);
+    }
+
+    fn set_attribute(&mut self, node: &Self::Node, name: Attribute, value: Option<&str>) {
+        self.inner.set_attribute(node, name, value);
+    }
+
+    fn listen(
+        &mut self,
+        node: &Self::Node,
+        event: EventKind,
+        listener: fino::dom_api::EventListener,
+    ) -> Self::Listener {
+        self.inner.listen(node, event, listener)
+    }
+
+    fn unlisten(&mut self, listener: Self::Listener) {
+        self.inner.unlisten(listener);
+    }
+}
+
+/// Item deletion, external returned roots, and whole-list disposal release each
+/// node exactly once on a backend that rejects duplicate release.
+/// 在拒绝重复释放的后端上，条目删除、外部返回根节点与整体释放都只释放每个
+/// 节点一次。
+#[test]
+fn keyed_for_releases_each_node_once_on_strict_backend() {
+    let runtime = Runtime::new(StrictBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a", "b", "external"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = {
+        let node = runtime.backend_mut().create_text("Tail");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    let external = runtime.backend_mut().create_element(Tag::Button);
+    let list = {
+        let read_items = items.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/strict",
+            move || read_items.get(),
+            move |context: &mut ForContext<StrictBackend>, key| {
+                if key == "external" {
+                    return vec![external];
+                }
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                vec![item]
+            },
+        )
+    };
+    assert_eq!(list.len(), 3);
+
+    items.set(keys(&["b", "external"]));
+    assert_eq!(list.keys(), keys(&["b", "external"]));
+    items.set(keys(&["b"]));
+    assert_eq!(list.keys(), keys(&["b"]));
+    list.dispose();
+    list.dispose();
+    assert!(list.is_empty());
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot().nodes.len(),
+        2,
+        "only the static root and tail remain stored"
+    );
+    owner.dispose();
+}
+
+/// Common prefix/suffix and LIS placement keep stable ranges in place while a
+/// swap or a mixed insert/delete moves only the affected ranges.
+/// 公共前后缀与 LIS 放置保持稳定范围不动；交换或插入删除混合更新只移动受影响
+/// 范围。
+#[test]
+fn keyed_for_lis_keeps_prefix_suffix_and_mixed_ranges_stable() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a", "b", "c", "d"]));
+    let probe = Probe::new();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let list = {
+        let read_items = items.clone();
+        let probe_copy = probe.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/lis",
+            move || read_items.get(),
+            move |context, key| row(context, key, &probe_copy, None),
+        )
+    };
+    let handles = ["a", "b", "c", "d"].map(|key| probe.handle(key));
+
+    let before_swap = runtime.backend().operations().len();
+    items.set(keys(&["a", "c", "b", "d"]));
+    let swap = runtime.backend().operations()[before_swap..].to_vec();
+    assert_eq!(
+        swap.iter()
+            .filter(|operation| matches!(operation, BackendOp::Insert))
+            .count(),
+        3,
+        "only one of the two swapped middle ranges moves"
+    );
+    assert_eq!(probe.handle("a"), handles[0]);
+    assert_eq!(probe.handle("b"), handles[1]);
+    assert_eq!(probe.handle("c"), handles[2]);
+    assert_eq!(probe.handle("d"), handles[3]);
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("a=0c=0b=0d=0Tail")
+    );
+
+    let before_mixed = runtime.backend().operations().len();
+    items.set(keys(&["a", "x", "c"]));
+    let mixed = runtime.backend().operations()[before_mixed..].to_vec();
+    assert_eq!(
+        mixed
+            .iter()
+            .filter(|operation| matches!(operation, BackendOp::CreateElement(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        mixed
+            .iter()
+            .filter(|operation| matches!(operation, BackendOp::Release))
+            .count(),
+        8,
+        "removed b and d release text, element, and two anchors each"
+    );
+    assert_eq!(
+        mixed
+            .iter()
+            .filter(|operation| matches!(operation, BackendOp::Insert))
+            .count(),
+        4,
+        "the new item inserts its text and its complete range once"
+    );
+    assert_eq!(probe.handle("a"), handles[0]);
+    assert_eq!(probe.handle("c"), handles[2]);
+    assert_eq!(probe.run_count("a"), 1);
+    assert_eq!(probe.run_count("c"), 1);
+    assert_eq!(probe.run_count("x"), 1);
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("a=0x=0c=0Tail")
+    );
+    assert_eq!(list.keys(), keys(&["a", "x", "c"]));
+}
+
+/// Item effects use a restricted context and cannot mutate mounted siblings.
+/// 条目 Effect 使用受限上下文，不能修改已挂载的兄弟节点。
+#[test]
+fn keyed_for_effect_rejects_foreign_targets() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let host_tail = tail;
+    let list = {
+        let read_items = items.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/effect-foreign",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                if key == "a" {
+                    let item = context.create_element(Tag::Button);
+                    let value = context.create_text("A");
+                    context.insert_before(&item, &value, None);
+                    return vec![item];
+                }
+                let item = context.create_element(Tag::Button);
+                context.effect("keyed/effect-foreign/bad", move |effect| {
+                    effect.set_text(&host_tail, "hacked");
+                });
+                vec![item]
+            },
+        )
+    };
+    let failure = catch_unwind(AssertUnwindSafe(|| items.set(keys(&["a", "b"]))));
+    assert!(failure.is_err());
+    assert_eq!(list.keys(), keys(&["a"]));
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("ATail")
     );
 }

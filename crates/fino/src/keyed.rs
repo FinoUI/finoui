@@ -4,15 +4,23 @@
 //! The reconciliation shape follows the public algorithm of SolidJS `mapArray`
 //! (MIT, `solidjs/solid` commit `bc50fe5649ba4fb1ef33f26643dba56c1c002b56`,
 //! `packages/solid/src/reactive/array.ts`): common prefix and suffix, a key to
-//! position map, and one disposer per item. No source code is copied here.
+//! position map, and one disposer per item. Placement keeps the longest
+//! increasing subsequence of retained old positions in place, following Vue 3's
+//! keyed patch (MIT, `vuejs/core` commit
+//! `ff3501429d4970c37194708b055492a56d9e5be5`,
+//! `packages/runtime-core/src/renderer.ts`). No source code is copied here.
 //! Fino rejects duplicate keys instead of silently matching one occurrence,
 //! because a duplicate can only produce a mismatched or half-committed range.
 //!
 //! 协调结构参考 SolidJS `mapArray` 的公开算法（MIT 许可，`solidjs/solid`
 //! 提交 `bc50fe5649ba4fb1ef33f26643dba56c1c002b56`，
 //! `packages/solid/src/reactive/array.ts`）：公共前缀与后缀、key 到位置映射，
-//! 以及每项一个 disposer。此处未复制其源码。Fino 选择拒绝重复 key，而不是
-//! 静默匹配其中一个出现位置，因为重复 key 只会产生错配或半提交的范围。
+//! 以及每项一个 disposer。放置阶段保留旧位置的最长递增子序列，沿用 Vue 3
+//! keyed patch（MIT，`vuejs/core` 提交
+//! `ff3501429d4970c37194708b055492a56d9e5be5`，
+//! `packages/runtime-core/src/renderer.ts`）。此处未复制其源码。Fino 选择拒绝
+//! 重复 key，而不是静默匹配其中一个出现位置，因为重复 key 只会产生错配或
+//! 半提交的范围。
 
 use std::{
     collections::{HashMap, HashSet},
@@ -26,7 +34,7 @@ use send_wrapper::SendWrapper;
 use crate::{
     dom_api::{Attribute, DomBackend, Event, EventContext, EventKind, Tag},
     reactive::Owner,
-    runtime::{EffectContext, Runtime},
+    runtime::Runtime,
     show::{RangeAnchor, Show, ShowContext},
     view::with_owner,
 };
@@ -81,23 +89,72 @@ impl std::error::Error for ForError {}
 /// Owner 后回收它们。通过它注册的 Effect 与监听属于该条目 Owner。
 pub struct ForContext<B: DomBackend + 'static> {
     inner: ShowContext<B>,
+    owned: Rc<std::cell::RefCell<Vec<B::Node>>>,
+}
+
+/// Restricted effect context for one keyed item.
+/// 一个 keyed 条目使用的受限 Effect 上下文。
+///
+/// Only nodes created by the same item may be mutated. The context intentionally
+/// exposes no shared runtime or raw backend borrow.
+/// 只能修改同一条目创建的节点。该上下文刻意不暴露共享 Runtime 或原始后端借用。
+pub struct ForEffectContext<B: DomBackend + 'static> {
+    runtime: Runtime<B>,
+    owned: Rc<std::cell::RefCell<Vec<B::Node>>>,
+}
+
+impl<B: DomBackend + 'static> ForEffectContext<B> {
+    fn assert_owned(&self, node: &B::Node) {
+        assert!(
+            self.owned.borrow().iter().any(|owned| owned == node),
+            "ForEffectContext mutations must target nodes created by this item"
+        );
+    }
+
+    /// Replaces one text node created by this item.
+    /// 替换本条目创建的一个文本节点。
+    pub fn set_text(&mut self, node: &B::Node, value: &str) {
+        self.assert_owned(node);
+        self.runtime.backend_mut().set_text(node, value);
+    }
+
+    /// Sets or removes an attribute on an item-created element.
+    /// 在条目创建的元素上设置或移除属性。
+    pub fn set_attribute(&mut self, node: &B::Node, attribute: Attribute, value: Option<&str>) {
+        self.assert_owned(node);
+        self.runtime
+            .backend_mut()
+            .set_attribute(node, attribute, value);
+    }
+
+    /// Moves an item-created node inside the same item range.
+    /// 在同一条目范围内移动一个条目创建节点。
+    pub fn insert_before(&mut self, parent: &B::Node, child: &B::Node, before: Option<&B::Node>) {
+        self.assert_owned(parent);
+        self.assert_owned(child);
+        if let Some(before) = before {
+            self.assert_owned(before);
+        }
+        self.runtime
+            .backend_mut()
+            .insert_before(parent, child, before);
+    }
+}
+
+impl<B: DomBackend + 'static> fmt::Debug for ForEffectContext<B> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ForEffectContext")
+            .finish_non_exhaustive()
+    }
 }
 
 impl<B: DomBackend + 'static> ForContext<B> {
     fn new(runtime: Runtime<B>, owner: Owner) -> Self {
         Self {
             inner: ShowContext::new(runtime, owner),
+            owned: Rc::new(std::cell::RefCell::new(Vec::new())),
         }
-    }
-
-    /// Returns the shared runtime for explicit backend operations.
-    /// 返回共享 Runtime，供显式后端操作使用。
-    ///
-    /// Nodes created directly through this runtime are not tracked by the item
-    /// transaction; prefer the context creation methods.
-    /// 直接通过该 Runtime 创建的节点不参与条目事务跟踪；优先使用上下文创建方法。
-    pub fn runtime(&self) -> &Runtime<B> {
-        self.inner.runtime()
     }
 
     /// Returns the child owner for this item range.
@@ -106,57 +163,113 @@ impl<B: DomBackend + 'static> ForContext<B> {
         self.inner.owner()
     }
 
+    /// Registers cleanup that runs when this item owner is disposed.
+    /// 注册在该条目 Owner 释放时执行的清理。
+    ///
+    /// The callback can remove probe state or other per-item bookkeeping. It
+    /// runs during item owner disposal.
+    /// 回调可以清除探针状态或其它按条目维护的数据；它在条目 Owner 释放期间
+    /// 运行。
+    pub fn on_dispose(&self, cleanup: impl FnOnce() + 'static) {
+        self.inner.owner().on_dispose(cleanup);
+    }
+
+    /// Rejects a mutation that targets a node outside this item transaction.
+    /// 拒绝目标不在本条事务内的变更。
+    fn assert_owned(&self, node: &B::Node) {
+        assert!(
+            self.owned.borrow().iter().any(|owned| owned == node),
+            "ForContext mutations must target nodes created by this item"
+        );
+    }
+
     /// Creates a tracked element node.
     /// 创建一个受跟踪的元素节点。
     pub fn create_element(&mut self, tag: Tag) -> B::Node {
-        self.inner.create_element(tag)
+        let node = self.inner.create_element(tag);
+        self.owned.borrow_mut().push(node.clone());
+        node
     }
 
     /// Creates a tracked text node.
     /// 创建一个受跟踪的文本节点。
     pub fn create_text(&mut self, value: &str) -> B::Node {
-        self.inner.create_text(value)
+        let node = self.inner.create_text(value);
+        self.owned.borrow_mut().push(node.clone());
+        node
     }
 
     /// Creates a tracked anchor node.
     /// 创建一个受跟踪的锚点节点。
     pub fn create_anchor(&mut self) -> B::Node {
-        self.inner.create_anchor()
+        let node = self.inner.create_anchor();
+        self.owned.borrow_mut().push(node.clone());
+        node
     }
 
-    /// Inserts one node relative to an optional stable sibling.
-    /// 把一个节点插入到可选稳定兄弟节点之前。
+    /// Inserts one node relative to an optional sibling created by this item.
+    /// 把一个节点插入到本条目创建的某个可选兄弟节点之前。
+    ///
+    /// Both the parent and the child must have been created through this
+    /// context; foreign mounted nodes are rejected before mutation.
+    /// 父节点与子节点都必须通过本上下文创建；外部已挂载节点会在变更前被拒绝。
     pub fn insert_before(&mut self, parent: &B::Node, child: &B::Node, before: Option<&B::Node>) {
+        self.assert_owned(parent);
+        self.assert_owned(child);
+        if let Some(before) = before {
+            self.assert_owned(before);
+        }
         self.inner.insert_before(parent, child, before);
     }
 
-    /// Sets or removes a supported attribute.
-    /// 设置或移除受支持的属性。
+    /// Sets or removes a supported attribute on an item-created element.
+    /// 在条目创建的元素上设置或移除受支持的属性。
     pub fn set_attribute(&mut self, node: &B::Node, attribute: Attribute, value: Option<&str>) {
+        self.assert_owned(node);
         self.inner.set_attribute(node, attribute, value);
     }
 
-    /// Replaces one existing text node.
-    /// 替换一个现有文本节点的内容。
+    /// Replaces one text node created by this item.
+    /// 替换本条目创建的一个文本节点。
     pub fn set_text(&mut self, node: &B::Node, value: &str) {
+        self.assert_owned(node);
         self.inner.set_text(node, value);
     }
 
-    /// Registers an event listener owned by this item.
-    /// 注册一个由该条目持有的监听。
+    /// Registers an event listener on an item-created node.
+    /// 在条目创建的节点上注册监听。
     pub fn listen(
         &mut self,
         node: &B::Node,
         event: EventKind,
         callback: impl FnMut(Event, &mut EventContext) + 'static,
     ) {
+        self.assert_owned(node);
         self.inner.listen(node, event, callback);
     }
 
     /// Registers an effect owned by this item.
     /// 注册一个由该条目持有的 Effect。
-    pub fn effect(&mut self, name: &str, callback: impl FnMut(&mut EffectContext<B>) + 'static) {
-        self.inner.effect(name, callback);
+    ///
+    /// The callback receives [`ForEffectContext`], which only mutates nodes
+    /// created by the same item. The owner stops the effect before the item
+    /// range is released.
+    /// 回调接收 [`ForEffectContext`]，它只能修改同一条目创建的节点。范围释放前
+    /// Owner 会先停止 Effect。
+    pub fn effect(
+        &mut self,
+        name: &str,
+        mut callback: impl FnMut(&mut ForEffectContext<B>) + 'static,
+    ) {
+        let runtime = self.inner.runtime().clone();
+        let owned = Rc::clone(&self.owned);
+        self.inner.effect(name, move |_context| {
+            let mut effect = ForEffectContext {
+                runtime: runtime.clone(),
+                owned: Rc::clone(&owned),
+            };
+            callback(&mut effect);
+        });
     }
 
     /// Mounts a nested Show inside this item range.
@@ -173,6 +286,10 @@ impl<B: DomBackend + 'static> ForContext<B> {
         C: Fn() -> bool + 'static,
         F: FnMut(&mut ShowContext<B>) -> B::Node + 'static,
     {
+        self.assert_owned(parent);
+        if let Some(before) = before {
+            self.assert_owned(before);
+        }
         self.inner.show(parent, before, name, condition, content)
     }
 }
@@ -198,10 +315,20 @@ impl<B: DomBackend + 'static, K> ForEntry<B, K> {
     /// 先停止条目 Owner，再释放全部已创建节点与外部节点。
     fn dispose(self, runtime: &Runtime<B>) {
         self.owner.dispose();
+        let mut released: Vec<B::Node> = Vec::new();
         for node in self.created.iter().rev() {
+            if released.iter().any(|released| released == node) {
+                continue;
+            }
             runtime.backend_mut().release(node);
+            released.push(node.clone());
         }
         for node in &self.nodes {
+            if self.created.iter().any(|created| created == node)
+                || released.iter().any(|released| released == node)
+            {
+                continue;
+            }
             runtime.backend_mut().release(node);
         }
     }
@@ -505,37 +632,63 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
         let suffix_entries: Vec<_> = old_iter.collect();
 
         let mut retained = HashMap::with_capacity(middle_entries.len());
-        for entry in middle_entries {
+        for (old_index, entry) in middle_entries.into_iter().enumerate() {
             if new_mid_keys.contains(&entry.key) {
-                retained.insert(entry.key.clone(), entry);
+                retained.insert(entry.key.clone(), (old_index, entry));
             } else {
                 entry.dispose(runtime);
             }
         }
 
         let mut middle_final = Vec::with_capacity(new_mid.len());
+        let mut old_positions = Vec::with_capacity(new_mid.len());
         let mut built_iter = built.into_iter();
         for key in new_mid {
             match built_iter.next().flatten() {
-                Some(entry) => middle_final.push(entry),
-                None => middle_final.push(
-                    retained
+                Some(entry) => {
+                    middle_final.push(entry);
+                    old_positions.push(None);
+                }
+                None => {
+                    let (old_index, entry) = retained
                         .remove(key)
-                        .expect("a retained key must keep its range"),
-                ),
+                        .expect("a retained key must keep its range");
+                    middle_final.push(entry);
+                    old_positions.push(Some(old_index));
+                }
             }
         }
         debug_assert!(retained.is_empty(), "all requested keys are resolved");
 
-        // Reposition the middle from right to left so each range lands before
-        // the item that follows it. Prefix and suffix ranges never move.
-        // 从右向左重排中段，使每个范围落在其后条目之前。前后两段绝不移动。
+        // Keep the longest increasing subsequence of retained old positions in
+        // place and move only the remaining ranges. This is the same stable
+        // subsequence idea as Vue 3's keyed patch (MIT, vuejs/core commit
+        // ff3501429d4970c37194708b055492a56d9e5be5,
+        // packages/runtime-core/src/renderer.ts); new nodes use the 0 sentinel.
+        // 保留旧位置最长递增子序列中的范围，只移动其余范围。这与 Vue 3 keyed
+        // patch 的稳定子序列思路一致（MIT，vuejs/core 提交
+        // ff3501429d4970c37194708b055492a56d9e5be5，
+        // packages/runtime-core/src/renderer.ts）；新节点使用 0 哨兵。
+        let sequence: Vec<usize> = old_positions
+            .iter()
+            .map(|position| position.map_or(0, |old_index| old_index + 1))
+            .collect();
+        let stable = stable_subsequence(&sequence);
+
+        // Reposition from right to left. Stable retained ranges keep their DOM
+        // position; new or unstable ranges move before the next final item.
+        // Prefix and suffix ranges never move.
+        // 从右向左重排。稳定的保留范围保持 DOM 位置；新范围或不稳定范围移动到
+        // 下一个最终条目之前。前后两段绝不移动。
         let mut reference = suffix_entries
             .first()
             .map(|entry| entry.anchors.start().clone())
             .unwrap_or_else(|| self.anchors.end().clone());
-        for entry in middle_final.iter().rev() {
-            entry.move_before(runtime, &self.parent, &reference);
+        for index in (0..middle_final.len()).rev() {
+            let entry = &middle_final[index];
+            if old_positions[index].is_none() || !stable[index] {
+                entry.move_before(runtime, &self.parent, &reference);
+            }
             reference = entry.anchors.start().clone();
         }
 
@@ -607,6 +760,54 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> Drop fo
     fn drop(&mut self) {
         self.cleanup(true);
     }
+}
+
+/// Marks one longest increasing subsequence; zero entries are new nodes.
+/// 标记一个最长递增子序列；零表示新节点。
+///
+/// The Rust implementation follows the stable-subsequence placement used by
+/// Vue 3's `getSequence` (MIT, vuejs/core commit
+/// `ff3501429d4970c37194708b055492a56d9e5be5`,
+/// `packages/runtime-core/src/renderer.ts`). It returns a flag per element so
+/// the caller can keep retained ranges in place and move only the rest.
+/// Rust 实现沿用 Vue 3 `getSequence` 使用的稳定子序列放置策略（MIT，
+/// vuejs/core 提交 `ff3501429d4970c37194708b055492a56d9e5be5`，
+/// `packages/runtime-core/src/renderer.ts`）。它按元素返回标记，使调用方
+/// 保留既有范围、只移动其余范围。
+fn stable_subsequence(sequence: &[usize]) -> Vec<bool> {
+    let mut predecessors: Vec<Option<usize>> = vec![None; sequence.len()];
+    let mut tails: Vec<usize> = Vec::new();
+    for (index, value) in sequence.iter().copied().enumerate() {
+        if value == 0 {
+            continue;
+        }
+        let mut low = 0;
+        let mut high = tails.len();
+        while low < high {
+            let middle = (low + high) / 2;
+            if sequence[tails[middle]] < value {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        if low > 0 {
+            predecessors[index] = Some(tails[low - 1]);
+        }
+        if low == tails.len() {
+            tails.push(index);
+        } else {
+            tails[low] = index;
+        }
+    }
+
+    let mut stable = vec![false; sequence.len()];
+    let mut current = tails.last().copied();
+    while let Some(index) = current {
+        stable[index] = true;
+        current = predecessors[index];
+    }
+    stable
 }
 
 /// Rejects the first repeated key before any structural mutation.

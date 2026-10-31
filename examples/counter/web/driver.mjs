@@ -607,6 +607,7 @@ try {
     assertEqual(keyedConformance.initial_text, 'HostNextTail', 'keyed initial text');
     assertEqual(keyedConformance.phases.length, 11, 'keyed phase count');
     assert(keyedConformance.item_identity_stable, 'keyed item identity stays stable');
+    assert(keyedConformance.probe_storage_bounded, 'keyed probe storage stays bounded');
     assert(keyedConformance.static_ids_stable, 'keyed static ids stay stable');
     assert(keyedConformance.stale_write_is_noop, 'removed key writes stay local');
     assert(keyedConformance.duplicate_key_rejected, 'duplicate keys reject atomically');
@@ -615,7 +616,7 @@ try {
     assertEqual(keyedConformance.operations.create_element, 10, 'keyed create_element');
     assertEqual(keyedConformance.operations.create_text, 11, 'keyed create_text');
     assertEqual(keyedConformance.operations.create_anchor, 18, 'keyed create_anchor');
-    assertEqual(keyedConformance.operations.insert, 80, 'keyed insert moves');
+    assertEqual(keyedConformance.operations.insert, 59, 'keyed insert moves');
     assertEqual(keyedConformance.operations.release, 34, 'keyed releases');
     assertEqual(keyedConformance.operations.remove, 1, 'keyed host remove');
     assertEqual(keyedConformance.local_update.reconcile_delta, 0, 'item updates skip reconciliation');
@@ -696,7 +697,7 @@ try {
     });
     assert(reordered.same, 'reverse keeps every row and text node identity');
     assertEqual(reordered.order.join(','), 'Row C,Row B,Row A,Row X', 'reversed DOM order');
-    assert(reordered.insertBeforeDelta > 0, 'reverse moves existing ranges with insertBefore');
+    assertEqual(reordered.insertBeforeDelta, 9, 'four-item reverse keeps one stable range and moves three complete ranges');
     assertEqual(reordered.innerHtmlSets, 0, 'reverse never assigns innerHTML');
 
     const local = await page.evaluate(() => {
@@ -714,6 +715,22 @@ try {
     assertEqual(local.text, 'B=1', 'item-local click text');
     assert(local.sameButton && local.sameText, 'item-local click keeps DOM identity');
     assertEqual(local.runs.B, 1, 'item-local click never rebuilds B');
+
+    const bounded = await page.evaluate(() => {
+      const keyed = window.__finoKeyedPage;
+      for (let index = 0; index < 25; index += 1) {
+        keyed.set_keys(JSON.stringify([`K${index}`]));
+      }
+      return {
+        probes: JSON.parse(keyed.probe_keys()),
+        keys: JSON.parse(keyed.keys()),
+        runs: JSON.parse(keyed.builder_runs()),
+      };
+    });
+    assertEqual(bounded.probes.length, 1, 'probe storage keeps only live keys');
+    assertEqual(bounded.probes[0], 'K24', 'probe storage keeps the newest key');
+    assertEqual(bounded.keys[0], 'K24', 'churn commits the newest key');
+    assertEqual(Object.keys(bounded.runs).length, 1, 'builder runs stay bounded');
 
     const cleared = await page.evaluate(() => {
       const keyed = window.__finoKeyedPage;

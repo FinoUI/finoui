@@ -57,7 +57,7 @@ pub mod view;
 /// RSX authoring macro for the counter-stage subset.
 /// 计数器阶段子集的 RSX 作者宏。
 pub use fino_macros::view;
-pub use keyed::{For, ForContext, ForError};
+pub use keyed::{For, ForContext, ForEffectContext, ForError};
 /// Creates a Signal on the currently mounting View owner.
 /// 在正在挂载的 View Owner 上创建 Signal。
 pub use show::{RangeAnchor, Show};
