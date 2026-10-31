@@ -611,6 +611,20 @@ impl CaptureCollector {
         }
     }
 
+    fn visit_condition(&mut self, condition: &Expr) {
+        match condition {
+            Expr::Let(let_expression) => {
+                self.visit_expr(&let_expression.expr);
+                self.bind_pattern(&let_expression.pat);
+            }
+            Expr::Binary(binary) if matches!(binary.op, syn::BinOp::And(_)) => {
+                self.visit_condition(&binary.left);
+                self.visit_condition(&binary.right);
+            }
+            _ => self.visit_expr(condition),
+        }
+    }
+
     fn analyze_macro(&mut self, mac: &syn::Macro) {
         let Some(name) = mac
             .path
@@ -646,21 +660,38 @@ impl CaptureCollector {
         let parser = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated;
         match mac.parse_body_with(parser) {
             Ok(arguments) => {
-                if matches!(name.as_str(), "format" | "format_args")
+                let format_index = format_string_index(&name);
+                let named_parameters: BTreeSet<String> = match format_index {
+                    Some(index) => arguments
+                        .iter()
+                        .skip(index + 1)
+                        .filter_map(named_format_parameter)
+                        .map(|(name, _)| name)
+                        .collect(),
+                    None => BTreeSet::new(),
+                };
+                if let Some(index) = format_index
                     && let Some(Expr::Lit(ExprLit {
                         lit: Lit::Str(literal),
                         ..
-                    })) = arguments.first()
+                    })) = arguments.get(index)
                 {
                     let literal_value = literal.value();
                     for identifier in inline_format_identifiers(&literal_value) {
-                        if !self.is_bound(&identifier) {
+                        if !named_parameters.contains(&identifier) && !self.is_bound(&identifier) {
                             self.used.insert(identifier);
                         }
                     }
                 }
-                for argument in arguments {
-                    self.visit_expr(&argument);
+                for (index, argument) in arguments.iter().enumerate() {
+                    if let Some(format_index) = format_index
+                        && index > format_index
+                        && let Some((_name, value)) = named_format_parameter(argument)
+                    {
+                        self.visit_expr(value);
+                        continue;
+                    }
+                    self.visit_expr(argument);
                 }
             }
             Err(error) => self.record_error(syn::Error::new_spanned(
@@ -723,19 +754,20 @@ impl<'ast> Visit<'ast> for CaptureCollector {
     }
 
     fn visit_expr_if(&mut self, if_expression: &'ast syn::ExprIf) {
-        if let Expr::Let(let_expression) = &*if_expression.cond {
-            self.visit_expr(&let_expression.expr);
-            self.push_scope();
-            self.bind_pattern(&let_expression.pat);
-            self.visit_block(&if_expression.then_branch);
-            self.pop_scope();
-        } else {
-            self.visit_expr(&if_expression.cond);
-            self.visit_block(&if_expression.then_branch);
-        }
+        self.push_scope();
+        self.visit_condition(&if_expression.cond);
+        self.visit_block(&if_expression.then_branch);
+        self.pop_scope();
         if let Some((_else_token, else_branch)) = &if_expression.else_branch {
             self.visit_expr(else_branch);
         }
+    }
+
+    fn visit_expr_while(&mut self, while_expression: &'ast syn::ExprWhile) {
+        self.push_scope();
+        self.visit_condition(&while_expression.cond);
+        self.visit_block(&while_expression.body);
+        self.pop_scope();
     }
 
     fn visit_arm(&mut self, arm: &'ast syn::Arm) {
@@ -756,6 +788,30 @@ impl<'ast> Visit<'ast> for CaptureCollector {
 
     fn visit_stmt_macro(&mut self, mac: &'ast syn::StmtMacro) {
         self.analyze_macro(&mac.mac);
+    }
+}
+
+fn format_string_index(name: &str) -> Option<usize> {
+    match name {
+        "format" | "format_args" | "print" | "println" | "eprint" | "eprintln" | "panic"
+        | "todo" | "unimplemented" | "unreachable" => Some(0),
+        "write" | "writeln" | "assert" | "debug_assert" => Some(1),
+        "assert_eq" | "assert_ne" | "debug_assert_eq" | "debug_assert_ne" => Some(2),
+        _ => None,
+    }
+}
+
+fn named_format_parameter(argument: &Expr) -> Option<(String, &Expr)> {
+    let Expr::Assign(assign) = argument else {
+        return None;
+    };
+    let Expr::Path(path) = &*assign.left else {
+        return None;
+    };
+    if path.qself.is_none() && path.path.leading_colon.is_none() && path.path.segments.len() == 1 {
+        Some((path.path.segments[0].ident.to_string(), &assign.right))
+    } else {
+        None
     }
 }
 

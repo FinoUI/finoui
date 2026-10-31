@@ -503,6 +503,153 @@ fn format_inline_named_captures_are_analyzed() {
     );
 }
 
+/// `println!` uses the inline format string position for capture analysis.
+/// `println!` 按内联格式串位置参与捕获分析。
+#[test]
+fn println_inline_captures_are_analyzed() {
+    let _guard = lock();
+    let mut runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let label = String::from("label");
+    let view = View::<MockBackend>::new(move |runtime, owner| {
+        let _owner = owner;
+        fino::view! {
+            <button on:click={move || {
+                let _ = label.len();
+            }}>
+                "Value: " {move || {
+                    println!("{label}");
+                    0
+                }}
+            </button>
+        }
+    });
+    let button = view.mount(&mut runtime, &owner);
+
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Value: 0")
+    );
+}
+
+/// Named format parameters bind their own name instead of the outer variable.
+/// 命名格式参数绑定自己的名字，不捕获外层同名变量。
+#[allow(clippy::useless_format)]
+#[test]
+fn format_named_parameters_are_not_outer_captures() {
+    struct NotClone;
+
+    let _guard = lock();
+    let mut runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let value = NotClone;
+    let view = View::<MockBackend>::new(move |runtime, owner| {
+        let _owner = owner;
+        fino::view! {
+            <button on:click={move || {
+                let _ = value;
+            }}>
+                "Value: " {move || format!("{value}", value = "named")}
+            </button>
+        }
+    });
+    let button = view.mount(&mut runtime, &owner);
+
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Value: named")
+    );
+}
+
+/// `if let` chains bind left-to-right and only inside the then branch.
+/// `if let` 条件链从左到右绑定，且只在 then 分支内生效。
+#[test]
+fn if_let_chain_bindings_are_scoped() {
+    let _guard = lock();
+    let mut runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let count = owner.signal_named("test/if-let-chain", 0_i32);
+    let click_count = count.clone();
+    let view = View::<MockBackend>::new(move |runtime, owner| {
+        let _owner = owner;
+        fino::view! {
+            <button on:click={move || {
+                if let Some(first) = Some(1)
+                    && let Some(step) = Some(first + 1)
+                {
+                    click_count.update(|count| *count += step);
+                }
+            }}>
+                "Value: " {move || {
+                    if let Some(first) = Some(click_count.get())
+                        && let Some(value) = Some(first + 1)
+                    {
+                        value
+                    } else {
+                        0
+                    }
+                }}
+            </button>
+        }
+    });
+    let button = view.mount(&mut runtime, &owner);
+
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Value: 1")
+    );
+    click(&runtime, &button);
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Value: 3")
+    );
+}
+
+/// `while let` pattern bindings stay inside the loop body.
+/// `while let` 的 pattern 绑定只作用于循环体。
+#[allow(clippy::while_let_on_iterator)]
+#[test]
+fn while_let_bindings_are_scoped() {
+    let _guard = lock();
+    let mut runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let count = owner.signal_named("test/while-let", 0_i32);
+    let click_count = count.clone();
+    let view = View::<MockBackend>::new(move |runtime, owner| {
+        let _owner = owner;
+        fino::view! {
+            <button on:click={move || {
+                let mut values = std::iter::once(1);
+                let mut value = 0;
+                while let Some(next) = values.next() {
+                    value = next;
+                }
+                click_count.update(|count| *count += value);
+            }}>
+                "Count: " {move || {
+                    let mut values = std::iter::once(click_count.get());
+                    let mut value = 0;
+                    while let Some(next) = values.next() {
+                        value = next;
+                    }
+                    value
+                }}
+            </button>
+        }
+    });
+    let button = view.mount(&mut runtime, &owner);
+
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Count: 0")
+    );
+    click(&runtime, &button);
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Count: 1")
+    );
+}
+
 /// Dynamic attributes lower to an owner-scoped AttributeBinding.
 /// 动态属性下沉为 Owner 作用域内的 AttributeBinding。
 #[test]
