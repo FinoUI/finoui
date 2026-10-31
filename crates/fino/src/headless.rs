@@ -315,7 +315,23 @@ pub trait HeadlessBackend: DomBackend {
     fn listener(&self, node: &Self::Node, event: EventKind) -> Option<EventListener>;
     /// Returns the number of live listener registrations.
     /// 返回仍存活的监听注册数量。
-    fn listener_count(&self) -> usize;
+    ///
+    /// The default derives the count from the normalized operation log, so an
+    /// older backend without explicit bookkeeping stays compatible as long as
+    /// its log records `listen` and `unlisten` truthfully.
+    /// 默认从规范化操作日志推导计数，因此只要旧后端如实记录 `listen` 与
+    /// `unlisten`，即使没有专门维护计数也能保持兼容。
+    fn listener_count(&self) -> usize {
+        let mut live = 0_isize;
+        for operation in self.operation_log() {
+            match operation.operation.as_str() {
+                "listen" => live += 1,
+                "unlisten" => live = live.saturating_sub(1),
+                _ => {}
+            }
+        }
+        live.max(0) as usize
+    }
     /// Captures the logical DOM tree.
     /// 捕获逻辑 DOM 树。
     fn dom_snapshot(&self) -> DomSnapshot;
@@ -377,7 +393,7 @@ pub trait HeadlessBackend: DomBackend {
         for operation in self.operation_log() {
             match operation.operation.as_str() {
                 "create_element" | "create_text" => stats.nodes_created += 1,
-                "remove" => stats.nodes_removed += 1,
+                "remove" | "release" => stats.nodes_removed += 1,
                 "set_text" => stats.backend_set_text += 1,
                 _ => {}
             }
@@ -802,10 +818,6 @@ mod tests {
             self.0.create_text(value)
         }
 
-        fn create_anchor(&mut self) -> Self::Node {
-            self.0.create_anchor()
-        }
-
         fn insert_before(
             &mut self,
             parent: &Self::Node,
@@ -862,10 +874,6 @@ mod tests {
             self.0.listener(node, event)
         }
 
-        fn listener_count(&self) -> usize {
-            self.0.listener_count()
-        }
-
         fn dom_snapshot(&self) -> DomSnapshot {
             self.0.dom_snapshot()
         }
@@ -877,6 +885,48 @@ mod tests {
         fn operation_log(&self) -> Vec<BackendOperation> {
             self.0.operation_log()
         }
+    }
+
+    /// Keeps new backend contracts source-compatible through documented defaults.
+    /// 通过有文档的默认值保持新后端契约的源码兼容。
+    #[test]
+    fn legacy_backend_defaults_cover_anchors_listeners_and_release() {
+        let mut backend = LegacyBackend(MockBackend::new());
+        let button = backend.create_element(Tag::Button);
+        backend.set_attribute(&button, Attribute::AriaLabel, Some("Legacy"));
+        let listener = backend.listen(
+            &button,
+            EventKind::Click,
+            EventListener::new(|_event, _context| {}),
+        );
+        assert_eq!(backend.listener_count(), 1);
+        backend.unlisten(listener);
+        assert_eq!(backend.listener_count(), 0);
+
+        let anchor = backend.create_anchor();
+        assert_eq!(
+            backend.text_content(&anchor).as_deref(),
+            Some(""),
+            "the default anchor is an empty text node"
+        );
+        backend.release(&anchor);
+        assert!(
+            !backend
+                .dom_snapshot()
+                .roots
+                .contains(&format!("node-{}", anchor.0)),
+            "the released anchor is no longer a live root"
+        );
+        assert!(
+            backend
+                .dom_snapshot()
+                .nodes
+                .iter()
+                .any(|node| node.id == format!("node-{}", anchor.0)),
+            "the default release falls back to detach-only remove"
+        );
+        backend.release(&button);
+        assert!(backend.dom_snapshot().roots.is_empty());
     }
 
     /// Keeps downstream source compatibility without faking an empty tree.

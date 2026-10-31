@@ -107,18 +107,22 @@ let details = Show::mount(
     Some(&tail),
     "show/details",
     move || visible.get(),
-    move |runtime, child| details_button(runtime, child, count.clone()),
+    move |context| details_button(context, count.clone()),
 );
-owner.keep_alive(details);
 ```
 
+- `ShowContext` tracks every node, effect, and listener created during one mount. A panic in the content builder disposes the child owner, releases tracked nodes, and rethrows without advancing the condition, so a later real transition can retry.
 - The anchors are created once and stay stable. Static siblings and their `NodeId`s are never replaced.
 - The condition effect creates a child owner and content only on a real `false → true` transition; equal writes are no-ops.
-- On `true → false`, the child owner is disposed first, which stops event dispatch and releases effects and listeners, then the content nodes are detached from the parent.
-- Removed scopes keep no live effects, listeners, or frame requests. Later writes to their signals do not reach the backend.
+- On `true → false`, the child owner is disposed first, which stops event dispatch and releases effects and listeners, then the range is released from the parent.
+- `remove` remains detach-only for reinsertion probes. `release` is the terminal path used by `Show`: it frees the subtree, retained handles, and listeners so repeated toggles do not grow backend storage.
+- Released `NodeId` handles are invalid and are never reused; Native keeps generational safety.
+- A window frame request is coalesced per window, not per range. A pending request may survive a range release, but painting the released range cannot touch its nodes. Later writes to removed signals do not issue new requests.
 - Nested `Show` owners dispose recursively, and repeated `Show::dispose` or owner disposal is idempotent.
 - The parent owner owns the range; dropping the returned handle does not unmount it. Call `Show::dispose` to release it early.
 - `RangeAnchor` exposes the start and end anchor handles for future `For` and keyed range work.
+
+Backends that predate anchors and release keep compiling: `create_anchor` defaults to an empty text node, `release` defaults to detach-only `remove`, and `HeadlessBackend::listener_count` derives the live count from the operation log. Backends that retain node storage should override `release` to reclaim it. Mock snapshots expose only attached roots, while explicitly detached nodes keep their stored handle for reinsertion.
 
 ## Unified DOM API
 

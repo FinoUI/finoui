@@ -9,7 +9,7 @@ use fino::{
     metrics::RuntimeStats,
     reactive::{Owner, Signal},
     runtime::Runtime,
-    show::Show,
+    show::{Show, ShowContext},
 };
 use serde::{Deserialize, Serialize};
 
@@ -92,7 +92,7 @@ fn mount_show_with_signals<B: DomBackend + 'static>(
         Some(&tail),
         "show/details",
         move || condition_visible.get(),
-        move |runtime, child| action_button(runtime, child, action_count.clone()),
+        move |context| action_button(context, action_count.clone()),
     );
     owner.keep_alive(show);
 
@@ -100,23 +100,20 @@ fn mount_show_with_signals<B: DomBackend + 'static>(
 }
 
 fn action_button<B: DomBackend + 'static>(
-    runtime: &Runtime<B>,
-    owner: &Owner,
+    context: &mut ShowContext<B>,
     count: Signal<i32>,
 ) -> B::Node {
-    let action = runtime.backend_mut().create_element(Tag::Button);
-    runtime
-        .backend_mut()
-        .set_attribute(&action, Attribute::AriaLabel, Some("Show action"));
-    let value = runtime.backend_mut().create_text("");
-    runtime.backend_mut().insert_before(&action, &value, None);
+    let action = context.create_element(Tag::Button);
+    context.set_attribute(&action, Attribute::AriaLabel, Some("Show action"));
+    let value = context.create_text("");
+    context.insert_before(&action, &value, None);
     let read_count = count.clone();
-    runtime.effect(owner, "show/action/text", move |context| {
-        context
+    context.effect("show/action/text", move |effect| {
+        effect
             .backend_mut()
             .set_text(&value, &format!("Value: {}", read_count.get()));
     });
-    runtime.listen(owner, &action, EventKind::Click, move |_event, _context| {
+    context.listen(&action, EventKind::Click, move |_event, _context| {
         count.update(|number| *number += 1);
     });
     action
@@ -180,6 +177,12 @@ pub struct ShowConformanceReport {
     /// Whether writing an old dependency after removal touched no backend.
     /// 移除后写入旧依赖是否完全没有触达后端。
     pub stale_write_is_noop: bool,
+    /// Number of additional hide/show loops used to probe storage growth.
+    /// 用于探测存储增长的额外隐藏／显示循环次数。
+    pub storage_loops: u32,
+    /// Whether repeated toggles returned to the same live node count.
+    /// 反复切换后是否回到相同的存活节点数。
+    pub storage_stable: bool,
     /// Normalized backend operation counts.
     /// 规范化后端操作计数。
     pub operations: BTreeMap<String, u64>,
@@ -296,6 +299,8 @@ impl ShowConformanceReport {
             self.stale_write_is_noop,
             true,
         );
+        check(&mut violations, "storage_stable", self.storage_stable, true);
+        let loops = u64::from(self.storage_loops);
         check(
             &mut violations,
             "component_executions",
@@ -306,19 +311,19 @@ impl ShowConformanceReport {
             &mut violations,
             "nodes_created",
             self.final_stats.nodes_created,
-            9,
+            9 + loops * 2,
         );
         check(
             &mut violations,
             "nodes_removed",
             self.final_stats.nodes_removed,
-            5,
+            7 + loops * 2,
         );
         check(
             &mut violations,
             "backend_set_text",
             self.final_stats.backend_set_text,
-            3,
+            3 + loops,
         );
         check(
             &mut violations,
@@ -330,31 +335,37 @@ impl ShowConformanceReport {
             &mut violations,
             "create_element",
             self.operations.get("create_element").copied().unwrap_or(0),
-            4,
+            4 + loops,
         );
         check(
             &mut violations,
             "create_text",
             self.operations.get("create_text").copied().unwrap_or(0),
-            5,
+            5 + loops,
         );
         check(
             &mut violations,
             "listen",
             self.operations.get("listen").copied().unwrap_or(0),
-            3,
+            3 + loops,
         );
         check(
             &mut violations,
             "unlisten",
             self.operations.get("unlisten").copied().unwrap_or(0),
-            3,
+            3 + loops,
         );
         check(
             &mut violations,
             "remove",
             self.operations.get("remove").copied().unwrap_or(0),
-            5,
+            1,
+        );
+        check(
+            &mut violations,
+            "release",
+            self.operations.get("release").copied().unwrap_or(0),
+            6 + loops * 2,
         );
         violations
     }
@@ -447,8 +458,20 @@ pub fn run_show_conformance<B: HeadlessBackend + 'static>(
     signals.visible.set(true);
     let restored_tree = host.runtime().backend().logical_tree();
     let ids_after_restore = static_ids(&host);
-    let static_ids_stable = initial_ids == ids_after_show && initial_ids == ids_after_restore;
     checkpoints.insert("restored".to_owned(), checkpoint(&host, &root));
+
+    let storage_loops = 10;
+    let nodes_before_loops = host.dom_snapshot().nodes.len();
+    for _ in 0..storage_loops {
+        signals.visible.set(false);
+        signals.visible.set(true);
+    }
+    let nodes_after_loops = host.dom_snapshot().nodes.len();
+    let storage_stable = nodes_before_loops == nodes_after_loops;
+    let ids_after_loops = static_ids(&host);
+    let static_ids_stable = initial_ids == ids_after_show
+        && initial_ids == ids_after_restore
+        && initial_ids == ids_after_loops;
 
     let before_dispose = host.runtime_stats();
     host.dispose();
@@ -475,6 +498,8 @@ pub fn run_show_conformance<B: HeadlessBackend + 'static>(
         clicked_text,
         static_ids_stable,
         stale_write_is_noop,
+        storage_loops,
+        storage_stable,
         operations,
         final_stats,
     })

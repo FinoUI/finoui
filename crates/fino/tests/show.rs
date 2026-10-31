@@ -7,9 +7,8 @@ use fino::{
     backend_mock::{BackendOp, MockBackend, MockNode},
     dom_api::{Attribute, DomBackend, EventKind, Tag},
     headless::HeadlessBackend,
-    reactive::Owner,
     runtime::Runtime,
-    show::Show,
+    show::{Show, ShowContext},
 };
 
 fn text(backend: &mut MockBackend, parent: &MockNode, value: &str) -> MockNode {
@@ -19,23 +18,20 @@ fn text(backend: &mut MockBackend, parent: &MockNode, value: &str) -> MockNode {
 }
 
 fn action_button(
-    runtime: &Runtime<MockBackend>,
-    owner: &Owner,
+    context: &mut ShowContext<MockBackend>,
     count: fino::reactive::Signal<i32>,
 ) -> MockNode {
-    let button = runtime.backend_mut().create_element(Tag::Button);
-    runtime
-        .backend_mut()
-        .set_attribute(&button, Attribute::AriaLabel, Some("Show action"));
-    let value = runtime.backend_mut().create_text("");
-    runtime.backend_mut().insert_before(&button, &value, None);
+    let button = context.create_element(Tag::Button);
+    context.set_attribute(&button, Attribute::AriaLabel, Some("Show action"));
+    let value = context.create_text("");
+    context.insert_before(&button, &value, None);
     let read_count = count.clone();
-    runtime.effect(owner, "show/action/text", move |context| {
-        context
+    context.effect("show/action/text", move |effect| {
+        effect
             .backend_mut()
             .set_text(&value, &format!("Value: {}", read_count.get()));
     });
-    runtime.listen(owner, &button, EventKind::Click, move |_event, _context| {
+    context.listen(&button, EventKind::Click, move |_event, _context| {
         count.update(|number| *number += 1);
     });
     button
@@ -78,7 +74,7 @@ fn show_only_rebuilds_its_dynamic_range() {
             Some(&tail),
             "show/details",
             move || visible.get(),
-            move |runtime, child| action_button(runtime, child, count.clone()),
+            move |context| action_button(context, count.clone()),
         )
     };
 
@@ -140,6 +136,19 @@ fn show_only_rebuilds_its_dynamic_range() {
         Some("BeforeAfter")
     );
     assert_eq!(runtime.backend().listener_count(), 0);
+    let hidden_snapshot = runtime.backend().dom_snapshot();
+    assert_eq!(
+        hidden_snapshot.roots,
+        vec!["node-1".to_owned()],
+        "released Show content does not become a live snapshot root"
+    );
+    assert!(
+        hidden_snapshot
+            .nodes
+            .iter()
+            .all(|node| node.attributes.get("aria-label") != Some(&"Show action".to_owned())),
+        "released Show content leaves the stored snapshot"
+    );
     assert_eq!(owner.snapshot().effects.len(), 2);
     assert!(
         !owner.snapshot().effects[1].active,
@@ -152,7 +161,7 @@ fn show_only_rebuilds_its_dynamic_range() {
         .expect("listener is released");
     let remove = hide_ops
         .iter()
-        .position(|operation| matches!(operation, BackendOp::Remove))
+        .position(|operation| matches!(operation, BackendOp::Release))
         .expect("content is removed");
     assert!(
         unlisten < remove,
@@ -161,7 +170,7 @@ fn show_only_rebuilds_its_dynamic_range() {
     assert!(
         !hide_ops
             .iter()
-            .any(|operation| matches!(operation, BackendOp::Remove))
+            .any(|operation| matches!(operation, BackendOp::Release))
             || remove > unlisten
     );
 
@@ -211,8 +220,8 @@ fn show_only_rebuilds_its_dynamic_range() {
     );
     assert_eq!(
         runtime.backend().dom_snapshot().nodes.len(),
-        initial_ids + 4,
-        "detached old range nodes stay historical while only one range is live"
+        initial_ids + 2,
+        "released range storage does not accumulate across toggles"
     );
 }
 
@@ -244,25 +253,19 @@ fn nested_show_owners_dispose_idempotently() {
             Some(&tail),
             "show/outer-range",
             move || outer_visible.get(),
-            move |runtime, child| {
-                let panel = runtime.backend_mut().create_element(Tag::Button);
-                runtime.backend_mut().set_attribute(
-                    &panel,
-                    Attribute::AriaLabel,
-                    Some("Outer panel"),
-                );
-                let label = runtime.backend_mut().create_text("Outer");
-                runtime.backend_mut().insert_before(&panel, &label, None);
+            move |context| {
+                let panel = context.create_element(Tag::Button);
+                context.set_attribute(&panel, Attribute::AriaLabel, Some("Outer panel"));
+                let label = context.create_text("Outer");
+                context.insert_before(&panel, &label, None);
                 let inner_visible = inner_visible.clone();
                 let slot = Rc::clone(&inner_slot);
-                let inner = Show::mount(
-                    runtime,
-                    child,
+                let inner = context.show(
                     &panel,
                     None,
                     "show/inner-range",
                     move || inner_visible.get(),
-                    |runtime, _owner| runtime.backend_mut().create_text("Inner"),
+                    |context| context.create_text("Inner"),
                 );
                 *slot.borrow_mut() = Some(inner);
                 panel
@@ -343,9 +346,9 @@ fn show_range_removes_every_node_between_anchors() {
             Some(&tail),
             "show/many",
             move || visible.get(),
-            |runtime, _owner| {
-                let one = runtime.backend_mut().create_text("one");
-                let two = runtime.backend_mut().create_text("two");
+            |context| {
+                let one = context.create_text("one");
+                let two = context.create_text("two");
                 vec![one, two]
             },
         )
@@ -392,7 +395,7 @@ fn condition_effect_drops_stale_dependencies() {
                     fallback.get()
                 }
             },
-            |runtime, _owner| runtime.backend_mut().create_text("visible"),
+            |context| context.create_text("visible"),
         )
     };
 
@@ -439,7 +442,7 @@ fn dropping_the_show_handle_keeps_the_parent_owned_range() {
             None,
             "show/handle",
             move || visible.get(),
-            |runtime, _owner| runtime.backend_mut().create_text("visible"),
+            |context| context.create_text("visible"),
         );
     }
 
@@ -453,5 +456,145 @@ fn dropping_the_show_handle_keeps_the_parent_owned_range() {
         runtime.backend().text_content(&root).as_deref(),
         Some(""),
         "parent disposal removes the range and anchors"
+    );
+}
+
+/// Proves a panic in the content builder leaves no child effect, listener, or node,
+/// and a later real transition retries the mount.
+/// 验证内容构建器 panic 后不残留子 Effect、监听或节点，并且后续真实切换可重试挂载。
+#[test]
+fn failed_content_mount_cleans_up_and_can_retry() {
+    use std::{
+        cell::Cell,
+        panic::{AssertUnwindSafe, catch_unwind},
+    };
+
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let visible = owner.signal_named("show/visible", false);
+    let panic_once = Rc::new(Cell::new(true));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+
+    let show = {
+        let visible = visible.clone();
+        let panic_once = Rc::clone(&panic_once);
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/panic",
+            move || visible.get(),
+            move |context| {
+                let button = context.create_element(Tag::Button);
+                context.set_attribute(&button, Attribute::AriaLabel, Some("Panic action"));
+                let value = context.create_text("value");
+                context.insert_before(&button, &value, None);
+                let observed = context.owner().signal_named("show/panic/observed", 0);
+                context.effect("show/panic/effect", move |effect| {
+                    let _ = observed.get();
+                    let _ = effect.backend_mut();
+                });
+                context.listen(&button, EventKind::Click, |_event, _context| {});
+                if panic_once.replace(false) {
+                    panic!("content builder failed");
+                }
+                button
+            },
+        )
+    };
+
+    let nodes_before_failure = runtime.backend().dom_snapshot().nodes.len();
+    let operations_before_failure = runtime.backend().operations().len();
+    let failure = catch_unwind(AssertUnwindSafe(|| visible.set(true)));
+    assert!(failure.is_err(), "the builder panic must propagate");
+    assert!(!show.is_mounted());
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        nodes_before_failure,
+        "tracked nodes created before the panic are released"
+    );
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("Tail")
+    );
+    assert!(
+        owner
+            .snapshot()
+            .effects
+            .iter()
+            .all(|effect| effect.name != "show/panic/effect" || !effect.active),
+        "the failed child effect is inactive"
+    );
+    assert!(
+        runtime.backend().operations()[operations_before_failure..]
+            .iter()
+            .any(|operation| matches!(operation, BackendOp::Release)),
+        "the failed transaction releases its created nodes"
+    );
+
+    visible.set(false);
+    visible.set(true);
+    assert!(show.is_mounted());
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("valueTail")
+    );
+    assert_eq!(runtime.backend().listener_count(), 1);
+}
+
+/// Proves Mock anchors are never valid text targets.
+/// 验证 Mock 锚点绝不是合法的文本写入目标。
+#[test]
+fn mock_anchor_rejects_text_writes() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let mut backend = MockBackend::new();
+    let anchor = backend.create_anchor();
+    let text = backend.create_text("text");
+    let rejected = catch_unwind(AssertUnwindSafe(|| backend.set_text(&anchor, "leak")));
+    assert!(rejected.is_err(), "writing an anchor must fail");
+    backend.set_text(&text, "changed");
+    assert_eq!(backend.text_content(&text).as_deref(), Some("changed"));
+}
+
+/// Proves an initially-true failed mount also releases its anchors.
+/// 验证初始为 true 的失败挂载同样释放锚点。
+#[test]
+fn initial_failed_mount_releases_anchors() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let baseline = runtime.backend().dom_snapshot().nodes.len();
+
+    let failure = catch_unwind(AssertUnwindSafe(|| {
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/initial-panic",
+            || true,
+            |context| {
+                let _ = context.create_element(Tag::Button);
+                let _ = context.create_text("value");
+                context.effect("show/initial-panic/effect", |_effect| {});
+                panic!("initial content failed");
+            },
+        );
+    }));
+
+    assert!(failure.is_err());
+    assert_eq!(runtime.backend().dom_snapshot().nodes.len(), baseline);
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("Tail"),
+        "the static sibling survives a failed initial mount"
     );
 }

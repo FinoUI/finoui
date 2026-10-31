@@ -489,6 +489,7 @@ try {
   let conformance;
   let detachReinsert;
   let remount;
+  let anchorMisuse;
   let showConformance;
   await runCheck('conformance_reports_shared_runtime_stats', async () => {
     const serialized = await page.evaluate(() => window.fino.run_conformance());
@@ -556,8 +557,19 @@ try {
     assert(showConformance.static_ids_stable, 'static Show ids stay stable');
     assert(showConformance.stale_write_is_noop, 'removed dependencies do not reach the DOM');
     assertEqual(showConformance.operations.create_anchor, 2, 'Show create_anchor operations');
-    assertEqual(showConformance.operations.remove, 5, 'Show remove operations');
-    assertEqual(showConformance.operations.unlisten, 3, 'Show unlisten operations');
+    assert(showConformance.storage_stable, 'Show storage does not grow across toggles');
+    assertEqual(showConformance.storage_loops, 10, 'Show storage loop count');
+    assertEqual(showConformance.operations.remove, 1, 'Show remove operations');
+    assertEqual(showConformance.operations.release, 26, 'Show release operations');
+    assertEqual(showConformance.operations.unlisten, 13, 'Show unlisten operations');
+  });
+
+  await runCheck('anchor_nodes_reject_text_writes', async () => {
+    const serialized = await page.evaluate(() => window.fino.run_anchor_misuse_probe());
+    anchorMisuse = JSON.parse(serialized);
+    assertEqual(anchorMisuse.schema, 1, 'anchor misuse probe schema');
+    assertEqual(anchorMisuse.anchor_accepts_text, false, 'anchors must reject set_text');
+    assertEqual(anchorMisuse.text_accepts_text, true, 'text nodes must accept set_text');
   });
 
   await runCheck('web_remount_restores_reachability', async () => {
@@ -593,6 +605,10 @@ try {
     `${JSON.stringify(remount, null, 2)}\n`,
   );
   fs.writeFileSync(
+    path.join(outDir, 'anchor_misuse.json'),
+    `${JSON.stringify(anchorMisuse, null, 2)}\n`,
+  );
+  fs.writeFileSync(
     path.join(outDir, 'show_conformance.json'),
     `${JSON.stringify(showConformance, null, 2)}\n`,
   );
@@ -612,6 +628,7 @@ try {
         'conformance.json',
         'detach_reinsert.json',
         'remount.json',
+        'anchor_misuse.json',
         'show_conformance.json',
       ],
     })}\n`,

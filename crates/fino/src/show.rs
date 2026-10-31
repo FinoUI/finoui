@@ -1,11 +1,21 @@
 //! Range-anchored conditional mounting without virtual-DOM reruns.
 //! 使用范围锚点的条件挂载，不触发虚拟 DOM 式的整树重跑。
 
-use std::{cell::RefCell, fmt, rc::Rc};
+use std::{
+    cell::RefCell,
+    fmt,
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    rc::Rc,
+};
 
 use send_wrapper::SendWrapper;
 
-use crate::{dom_api::DomBackend, reactive::Owner, runtime::Runtime, view::with_owner};
+use crate::{
+    dom_api::{Attribute, DomBackend, Event, EventContext, EventKind, Tag},
+    reactive::Owner,
+    runtime::{EffectContext, Runtime},
+    view::with_owner,
+};
 
 /// A stable start/end pair that marks one dynamic child range.
 /// 标记一个动态子范围的一对稳定起止锚点。
@@ -67,8 +77,8 @@ impl<B: DomBackend + 'static> RangeAnchor<B> {
     /// Removes both anchors after the range has been released.
     /// 在范围释放后移除两个锚点。
     pub fn remove_anchors(&self, runtime: &Runtime<B>) {
-        runtime.backend_mut().remove(&self.end);
-        runtime.backend_mut().remove(&self.start);
+        runtime.backend_mut().release(&self.end);
+        runtime.backend_mut().release(&self.start);
     }
 }
 
@@ -77,6 +87,134 @@ impl<B: DomBackend> fmt::Debug for RangeAnchor<B> {
         formatter
             .debug_struct("RangeAnchor")
             .finish_non_exhaustive()
+    }
+}
+
+/// Transactional construction context for one [`Show`] content mount.
+/// 一次 [`Show`] 内容挂载使用的事务性构建上下文。
+///
+/// Nodes created through this context are tracked so a panic in the content
+/// builder can release them after disposing the child owner. Effects and
+/// listeners registered through it belong to the child owner.
+/// 通过该上下文创建的节点会被跟踪，因此内容构建器 panic 时可以在释放子
+/// Owner 后回收它们。通过它注册的 Effect 与监听属于子 Owner。
+pub struct ShowContext<B: DomBackend + 'static> {
+    runtime: Runtime<B>,
+    owner: Owner,
+    created: Vec<B::Node>,
+}
+
+impl<B: DomBackend + 'static> ShowContext<B> {
+    fn new(runtime: Runtime<B>, owner: Owner) -> Self {
+        Self {
+            runtime,
+            owner,
+            created: Vec::new(),
+        }
+    }
+
+    /// Returns the shared runtime for explicit backend operations.
+    /// 返回共享 Runtime，供显式后端操作使用。
+    ///
+    /// Nodes created directly through this runtime are not tracked by the
+    /// mount transaction; prefer the context creation methods.
+    /// 直接通过该 Runtime 创建的节点不参与挂载事务跟踪；优先使用上下文创建方法。
+    pub fn runtime(&self) -> &Runtime<B> {
+        &self.runtime
+    }
+
+    /// Returns the child owner for this range.
+    /// 返回该范围的子 Owner。
+    pub fn owner(&self) -> &Owner {
+        &self.owner
+    }
+
+    /// Creates a tracked element node.
+    /// 创建一个受跟踪的元素节点。
+    pub fn create_element(&mut self, tag: Tag) -> B::Node {
+        let node = self.runtime.backend_mut().create_element(tag);
+        self.created.push(node.clone());
+        node
+    }
+
+    /// Creates a tracked text node.
+    /// 创建一个受跟踪的文本节点。
+    pub fn create_text(&mut self, value: &str) -> B::Node {
+        let node = self.runtime.backend_mut().create_text(value);
+        self.created.push(node.clone());
+        node
+    }
+
+    /// Creates a tracked range anchor.
+    /// 创建一个受跟踪的范围锚点。
+    pub fn create_anchor(&mut self) -> B::Node {
+        let node = self.runtime.backend_mut().create_anchor();
+        self.created.push(node.clone());
+        node
+    }
+
+    /// Inserts one node relative to an optional stable sibling.
+    /// 把一个节点插入到可选稳定兄弟节点之前。
+    pub fn insert_before(&mut self, parent: &B::Node, child: &B::Node, before: Option<&B::Node>) {
+        self.runtime
+            .backend_mut()
+            .insert_before(parent, child, before);
+    }
+
+    /// Sets or removes a supported attribute.
+    /// 设置或移除受支持的属性。
+    pub fn set_attribute(&mut self, node: &B::Node, attribute: Attribute, value: Option<&str>) {
+        self.runtime
+            .backend_mut()
+            .set_attribute(node, attribute, value);
+    }
+
+    /// Replaces one existing text node.
+    /// 替换一个现有文本节点的内容。
+    pub fn set_text(&mut self, node: &B::Node, value: &str) {
+        self.runtime.backend_mut().set_text(node, value);
+    }
+
+    /// Registers an event listener owned by this range.
+    /// 注册一个由该范围持有的监听。
+    pub fn listen(
+        &mut self,
+        node: &B::Node,
+        event: EventKind,
+        callback: impl FnMut(Event, &mut EventContext) + 'static,
+    ) {
+        self.runtime.listen(&self.owner, node, event, callback);
+    }
+
+    /// Registers an effect owned by this range.
+    /// 注册一个由该范围持有的 Effect。
+    pub fn effect(&mut self, name: &str, callback: impl FnMut(&mut EffectContext<B>) + 'static) {
+        self.runtime.effect(&self.owner, name, callback);
+    }
+
+    /// Mounts a nested Show using this range as its parent owner.
+    /// 以该范围作为父 Owner 挂载一个嵌套 Show。
+    pub fn show<C, F>(
+        &mut self,
+        parent: &B::Node,
+        before: Option<&B::Node>,
+        name: &str,
+        condition: C,
+        content: F,
+    ) -> Show<B>
+    where
+        C: Fn() -> bool + 'static,
+        F: FnMut(&mut ShowContext<B>) -> B::Node + 'static,
+    {
+        Show::mount(
+            &self.runtime,
+            &self.owner,
+            parent,
+            before,
+            name,
+            condition,
+            content,
+        )
     }
 }
 
@@ -124,7 +262,7 @@ impl<B: DomBackend + 'static> Show<B> {
     ) -> Self
     where
         C: Fn() -> bool + 'static,
-        F: FnMut(&mut Runtime<B>, &Owner) -> B::Node + 'static,
+        F: FnMut(&mut ShowContext<B>) -> B::Node + 'static,
     {
         Self::mount_many(
             runtime,
@@ -133,7 +271,7 @@ impl<B: DomBackend + 'static> Show<B> {
             before,
             name,
             condition,
-            move |runtime, owner| vec![content(runtime, owner)],
+            move |context| vec![content(context)],
         )
     }
 
@@ -150,7 +288,7 @@ impl<B: DomBackend + 'static> Show<B> {
     ) -> Self
     where
         C: Fn() -> bool + 'static,
-        F: FnMut(&mut Runtime<B>, &Owner) -> Vec<B::Node> + 'static,
+        F: FnMut(&mut ShowContext<B>) -> Vec<B::Node> + 'static,
     {
         let control = owner.child();
         let anchors = RangeAnchor::create(runtime, parent, before);
@@ -228,20 +366,24 @@ impl<B: DomBackend + 'static> Show<B> {
 struct ActiveRange<B: DomBackend> {
     owner: Owner,
     nodes: Vec<B::Node>,
+    created: Vec<B::Node>,
 }
 
 impl<B: DomBackend + 'static> ActiveRange<B> {
-    /// Stops the child owner before detaching its nodes from the parent.
-    /// 在从父节点分离内容前先释放子 Owner。
+    /// Stops the child owner before releasing its nodes and retained handles.
+    /// 在释放节点与保留句柄前先停止子 Owner。
     fn dispose(self, runtime: &Runtime<B>) {
         self.owner.dispose();
+        for node in self.created.iter().rev() {
+            runtime.backend_mut().release(node);
+        }
         for node in &self.nodes {
-            runtime.backend_mut().remove(node);
+            runtime.backend_mut().release(node);
         }
     }
 }
 
-type ContentBuilder<B> = Box<dyn FnMut(&mut Runtime<B>, &Owner) -> Vec<<B as DomBackend>::Node>>;
+type ContentBuilder<B> = Box<dyn FnMut(&mut ShowContext<B>) -> Vec<<B as DomBackend>::Node>>;
 
 struct ShowState<B: DomBackend + 'static> {
     runtime: Runtime<B>,
@@ -266,27 +408,53 @@ impl<B: DomBackend + 'static> ShowState<B> {
         if self.last == Some(next) {
             return;
         }
-        self.last = Some(next);
         if next {
             self.mount_range(runtime);
+            self.last = Some(true);
         } else {
             self.unmount_range(runtime);
+            self.last = Some(false);
         }
     }
 
     /// Creates a child owner and mounts its content inside the anchor range.
     /// 创建子 Owner，并把其内容挂载到锚点范围内。
+    ///
+    /// A panic in the builder disposes the child owner and releases every
+    /// tracked creation before resuming the unwind, so `last` is not advanced.
+    /// 构建器 panic 时，在继续展开前释放子 Owner 与全部已跟踪创建节点，
+    /// 因此 `last` 不会前进。
     fn mount_range(&mut self, runtime: &mut Runtime<B>) {
         if self.active.is_some() {
             return;
         }
         let owner = self.control.child();
-        let mut child_runtime = runtime.clone();
-        let nodes = with_owner(&owner, || (self.content)(&mut child_runtime, &owner));
-        for node in &nodes {
-            self.anchors.insert(runtime, &self.parent, node);
+        let mut context = ShowContext::new(runtime.clone(), owner.clone());
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let nodes = with_owner(&owner, || (self.content)(&mut context));
+            for node in &nodes {
+                self.anchors.insert(runtime, &self.parent, node);
+            }
+            nodes
+        }));
+        match outcome {
+            Ok(nodes) => {
+                let created = std::mem::take(&mut context.created);
+                self.active = Some(ActiveRange {
+                    owner,
+                    nodes,
+                    created,
+                });
+            }
+            Err(payload) => {
+                let created = std::mem::take(&mut context.created);
+                owner.dispose();
+                for node in created.iter().rev() {
+                    runtime.backend_mut().release(node);
+                }
+                resume_unwind(payload);
+            }
         }
-        self.active = Some(ActiveRange { owner, nodes });
     }
 
     /// Disposes the child owner and then removes its nodes.

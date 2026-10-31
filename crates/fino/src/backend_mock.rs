@@ -76,6 +76,9 @@ pub enum BackendOp {
     /// Detaches one node.
     /// 分离一个节点。
     Remove,
+    /// Detaches and releases one node subtree.
+    /// 分离并释放一个节点子树。
+    Release,
 }
 
 impl BackendOp {
@@ -92,6 +95,7 @@ impl BackendOp {
             Self::Listen(_) => "listen",
             Self::Unlisten(_) => "unlisten",
             Self::Remove => "remove",
+            Self::Release => "release",
         }
     }
 }
@@ -184,6 +188,41 @@ impl MockBackend {
     /// 返回仍存活的监听注册数量。
     pub fn listener_count(&self) -> usize {
         self.listeners.len()
+    }
+
+    /// Releases one stored subtree from the leaves up and invalidates its handles.
+    /// 从叶子向上释放一个存储子树，并使其中句柄失效。
+    fn release_subtree(&mut self, node: MockNode) {
+        let Some(data) = self.nodes.get(&node) else {
+            return;
+        };
+        let children = match data {
+            MockNodeData::Element { children, .. } => children.clone(),
+            MockNodeData::Text { .. } | MockNodeData::Anchor { .. } => Vec::new(),
+        };
+        for child in children {
+            self.release_subtree(child);
+        }
+        let listeners: Vec<u64> = self
+            .listeners
+            .iter()
+            .filter_map(|(id, registration)| (registration.node == node).then_some(*id))
+            .collect();
+        for listener in listeners {
+            if let Some(registration) = self.listeners.remove(&listener) {
+                self.operations
+                    .push(BackendOp::Unlisten(registration.event));
+            }
+        }
+        if let Some(parent) = self.nodes.get(&node).and_then(MockNodeData::parent)
+            && let Some(MockNodeData::Element { children, .. }) = self.nodes.get_mut(&parent)
+        {
+            Self::parent_children(children, node);
+        }
+        self.roots.remove(&node);
+        if self.nodes.remove(&node).is_some() {
+            self.operations.push(BackendOp::Release);
+        }
     }
 
     fn allocate_node(&mut self) -> MockNode {
@@ -374,6 +413,12 @@ impl DomBackend for MockBackend {
         self.operations.push(BackendOp::Insert);
     }
 
+    /// Detaches and releases the node and every stored descendant.
+    /// 分离并释放该节点及其全部已存后代。
+    fn release(&mut self, node: &Self::Node) {
+        self.release_subtree(*node);
+    }
+
     /// Detaches only the selected node and records removal even for a root.
     /// 仅分离目标节点；即使目标是根节点也记录 Remove 操作。
     fn remove(&mut self, node: &Self::Node) {
@@ -518,10 +563,9 @@ impl HeadlessBackend for MockBackend {
     /// 使用稳定语义 ID 与创建顺序节点序列化完整树。
     fn dom_snapshot(&self) -> DomSnapshot {
         let roots = self
-            .nodes
+            .roots
             .iter()
-            .filter(|(_, data)| data.parent().is_none())
-            .map(|(node, _)| format!("node-{}", node.0))
+            .map(|node| format!("node-{}", node.0))
             .collect();
         let nodes = self
             .nodes

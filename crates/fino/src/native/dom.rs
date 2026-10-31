@@ -55,6 +55,9 @@ enum NativeBackendOp {
     Remove {
         node: u64,
     },
+    Release {
+        node: u64,
+    },
     SetText {
         node: u64,
         value: String,
@@ -78,6 +81,7 @@ impl NativeBackendOp {
             Self::CreateAnchor { .. } => "create_anchor",
             Self::Insert { .. } => "insert",
             Self::Remove { .. } => "remove",
+            Self::Release { .. } => "release",
             Self::SetText { .. } => "set_text",
             Self::SetAttribute { .. } => "set_attribute",
             Self::Listen(_) => "listen",
@@ -540,6 +544,40 @@ impl NativeDom {
         self.signals.take_frame_request()
     }
 
+    /// Releases one stored subtree from the leaves up and invalidates its handles.
+    /// 从叶子向上释放一个存储子树，并使其句柄失效。
+    fn release_subtree(&mut self, node: NodeId) {
+        let Some(data) = self.nodes.get(node) else {
+            return;
+        };
+        let children = data.children.clone();
+        for child in children {
+            self.release_subtree(child);
+        }
+        let listeners: Vec<u64> = self
+            .listeners
+            .iter()
+            .filter_map(|(id, registration)| (registration.node == node).then_some(*id))
+            .collect();
+        for listener in listeners {
+            if let Some(registration) = self.listeners.remove(&listener) {
+                self.emit(NativeBackendOp::Unlisten(registration.event));
+            }
+        }
+        if let Some(parent) = self.nodes.get(node).and_then(|data| data.parent)
+            && let Some(parent_data) = self.nodes.get_mut(parent)
+        {
+            parent_data.children.retain(|candidate| *candidate != node);
+        }
+        self.roots.retain(|root| *root != node);
+        let stable = self.nodes.get(node).map(|data| data.stable_id);
+        self.nodes.remove(node);
+        if let Some(stable) = stable {
+            self.emit(NativeBackendOp::Release { node: stable });
+            self.mark_structural_change();
+        }
+    }
+
     fn ensure_text_layout(
         &mut self,
         node: NodeId,
@@ -801,6 +839,12 @@ impl DomBackend for NativeDom {
             anchor: anchor_id,
         });
         self.mark_structural_change();
+    }
+
+    /// Detaches and releases the node subtree, invalidating generational handles.
+    /// 分离并释放节点子树，使 generational 句柄失效。
+    fn release(&mut self, node: &Self::Node) {
+        self.release_subtree(*node);
     }
 
     /// Detaches only the selected node while keeping descendants and handle storage alive.

@@ -70,6 +70,7 @@ enum WebBackendOp {
     Listen(EventKind),
     Unlisten(EventKind),
     Remove,
+    Release,
 }
 
 impl WebBackendOp {
@@ -86,6 +87,7 @@ impl WebBackendOp {
             Self::Listen(_) => "listen",
             Self::Unlisten(_) => "unlisten",
             Self::Remove => "remove",
+            Self::Release => "release",
         }
     }
 }
@@ -311,6 +313,46 @@ impl DomBackend {
             }),
         }
     }
+
+    /// Reports whether `set_text` accepts this handle; anchors are never text targets.
+    /// 报告 `set_text` 是否接受该句柄；锚点绝不是文本写入目标。
+    pub fn accepts_text(&self, node: &WebNode) -> bool {
+        node.tag.is_none() && !node.anchor && self.record_id(&node.node).is_some()
+    }
+
+    /// Releases one tracked subtree from the leaves up and drops its records.
+    /// 从叶子向上释放一个受跟踪子树，并丢弃其记录。
+    fn release_subtree(&mut self, node: &WebNode) {
+        if self.record_id(&node.node).is_none() {
+            return;
+        }
+        let children: Vec<WebNode> = Self::child_nodes(&node.node)
+            .iter()
+            .filter_map(|child| self.record(child))
+            .collect();
+        for child in children {
+            self.release_subtree(&child);
+        }
+        let listeners: Vec<u64> = self
+            .listeners
+            .iter()
+            .filter_map(|(id, registration)| {
+                registration
+                    .node
+                    .is_same_node(Some(&node.node))
+                    .then_some(*id)
+            })
+            .collect();
+        for listener in listeners {
+            crate::dom_api::DomBackend::unlisten(self, WebListener(listener));
+        }
+        if let Some(parent) = node.node.parent_node() {
+            let _ = parent.remove_child(&node.node);
+        }
+        self.nodes
+            .retain(|record| !record.node.node.is_same_node(Some(&node.node)));
+        self.emit(WebBackendOp::Release);
+    }
 }
 
 impl crate::dom_api::DomBackend for DomBackend {
@@ -370,6 +412,12 @@ impl crate::dom_api::DomBackend for DomBackend {
         self.emit(WebBackendOp::Insert);
     }
 
+    /// Detaches and releases the real node subtree and its tracked handles.
+    /// 分离并释放真实节点子树及其受跟踪句柄。
+    fn release(&mut self, node: &Self::Node) {
+        self.release_subtree(node);
+    }
+
     /// Detaches only the selected real node and removes it from the reachable tree.
     /// 仅分离选定的真实节点，并把它移出可达树。
     fn remove(&mut self, node: &Self::Node) {
@@ -386,7 +434,7 @@ impl crate::dom_api::DomBackend for DomBackend {
     /// 仅替换现有文本节点的 `nodeValue`。
     fn set_text(&mut self, node: &Self::Node, value: &str) {
         assert!(
-            node.tag.is_none() && self.record_id(&node.node).is_some(),
+            self.accepts_text(node),
             "set_text requires a tracked text node"
         );
         if node.node.node_value().as_deref() == Some(value) {

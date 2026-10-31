@@ -107,18 +107,22 @@ let details = Show::mount(
     Some(&tail),
     "show/details",
     move || visible.get(),
-    move |runtime, child| details_button(runtime, child, count.clone()),
+    move |context| details_button(context, count.clone()),
 );
-owner.keep_alive(details);
 ```
 
+- `ShowContext` 跟踪一次挂载中创建的每个节点、Effect 与监听。内容构建器 panic 时会释放子 Owner、回收已跟踪节点并重新抛出，且不推进条件，后续真实切换可以重试。
 - 锚点只创建一次并保持稳定；静态兄弟及其 `NodeId` 绝不替换。
 - 条件 Effect 只在真正的 `false → true` 切换时创建子 Owner 与内容；写入相同值不执行操作。
-- `true → false` 时先释放子 Owner，停止事件分发并解绑 Effect 与监听，再从父节点分离内容节点。
-- 被移除作用域不保留任何存活 Effect、监听或帧请求；之后写入其 Signal 不会触达后端。
+- `true → false` 时先释放子 Owner，停止事件分发并解绑 Effect 与监听，再从父节点释放范围。
+- `remove` 仍只做分离，供重插探针使用。`release` 是 `Show` 使用的终止路径：释放子树、保留句柄与监听，因此反复切换不会增长后端存储。
+- 已释放的 `NodeId` 句柄失效且不会复用；Native 继续保证 generational 安全。
+- 窗口帧请求按窗口合并，而不是按范围关联。范围释放后仍可能保留一个待处理窗口请求，但绘制已释放范围不会触达其节点；之后写入被移除 Signal 也不会产生新请求。
 - 嵌套 `Show` Owner 递归释放，重复调用 `Show::dispose` 或 Owner 释放均幂等。
 - 动态范围由父 Owner 持有；丢弃返回句柄不会卸载它。调用 `Show::dispose` 可提前释放。
 - `RangeAnchor` 暴露起止锚点句柄，供后续 `For` 与 keyed 范围能力复用。
+
+早于锚点与释放能力的后端仍可编译：`create_anchor` 默认创建空文本节点，`release` 默认回退到只分离的 `remove`，`HeadlessBackend::listener_count` 从操作日志推导存活数。会保留节点存储的后端应覆盖 `release` 以真正回收。Mock 快照只暴露已挂载根；显式分离的节点保留存储句柄以便重插。
 
 ## 统一 DOM API
 

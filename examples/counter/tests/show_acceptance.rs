@@ -32,6 +32,9 @@ fn show_reports_shared_structure_events_and_counters() {
     assert_eq!(mock.operations, native.operations);
     assert_eq!(mock.static_ids_stable, native.static_ids_stable);
     assert_eq!(mock.stale_write_is_noop, native.stale_write_is_noop);
+    assert!(mock.storage_stable);
+    assert!(native.storage_stable);
+    assert_eq!(mock.storage_loops, 10);
     assert_eq!(
         mock.final_stats.component_executions,
         native.final_stats.component_executions
@@ -160,4 +163,176 @@ fn show_scenario_cli_uses_the_explicit_mount() {
         assert_eq!(result["counters"]["component_executions"], 1);
         assert_eq!(result["steps"].as_array().map(Vec::len), Some(10));
     }
+}
+
+/// Proves repeated NativeOffscreen toggles release arena storage and invalidate
+/// generational handles instead of accumulating detached subtrees.
+/// 验证 NativeOffscreen 反复切换会释放 arena 存储并使 generational 句柄失效，
+/// 而不是累积分离子树。
+#[test]
+fn native_show_toggles_release_arena_storage() {
+    use std::{cell::RefCell, rc::Rc};
+
+    use fino::{
+        dom_api::{Attribute, DomBackend, Tag},
+        headless::HeadlessBackend as _,
+        native::{NodeId, Size, offscreen_backend},
+        runtime::Runtime,
+        show::{Show, ShowContext},
+    };
+
+    let backend = offscreen_backend(Size::new(800.0, 600.0), 1.0);
+    let runtime = Runtime::new(backend);
+    let owner = runtime.create_owner();
+    let visible = owner.signal_named("show/storage", false);
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = runtime.backend_mut().create_text("Tail");
+    runtime.backend_mut().insert_before(&root, &tail, None);
+    let action_slot: Rc<RefCell<Option<NodeId>>> = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&action_slot);
+    let show = {
+        let visible = visible.clone();
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/storage",
+            move || visible.get(),
+            move |context: &mut ShowContext<_>| {
+                let action = context.create_element(Tag::Button);
+                context.set_attribute(&action, Attribute::AriaLabel, Some("Storage action"));
+                let value = context.create_text("value");
+                context.insert_before(&action, &value, None);
+                *slot.borrow_mut() = Some(action);
+                action
+            },
+        )
+    };
+
+    let baseline = runtime.backend().dom_snapshot().nodes.len();
+    for _ in 0..50 {
+        visible.set(true);
+        visible.set(false);
+    }
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        baseline,
+        "50 hide/show loops must not grow native arena storage"
+    );
+    let old = action_slot.borrow_mut().take().expect("last action handle");
+    assert!(
+        !runtime.backend().contains(old),
+        "released NodeId handles must not stay live"
+    );
+
+    visible.set(true);
+    let new = action_slot.borrow_mut().take().expect("new action handle");
+    assert_ne!(old, new, "a released generational NodeId is never reused");
+    assert!(runtime.backend().contains(new));
+    assert_eq!(runtime.backend().dom_snapshot().nodes.len(), baseline + 2);
+    assert!(show.is_mounted());
+}
+
+/// Proves a pending window frame survives a released range without retaining
+/// its content, and later stale signal writes do not request another frame.
+/// 验证已释放范围不会把内容留在待处理窗口帧中，且之后旧 Signal 写入不再请求帧。
+#[test]
+fn native_show_pending_frame_after_release_is_safe() {
+    use fino::{
+        dom_api::{Attribute, DomBackend, Tag},
+        headless::HeadlessBackend as _,
+        native::{Size, WindowConstraints, WindowId, offscreen_backend},
+        runtime::Runtime,
+        show::{Show, ShowContext},
+    };
+
+    let backend = offscreen_backend(Size::new(800.0, 600.0), 1.0);
+    let runtime = Runtime::new(backend);
+    let owner = runtime.create_owner();
+    let visible = owner.signal_named("show/frame", false);
+    let count = owner.signal_named("show/frame-count", 0);
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = runtime.backend_mut().create_text("Tail");
+    runtime.backend_mut().insert_before(&root, &tail, None);
+    let show = {
+        let visible = visible.clone();
+        let count = count.clone();
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/frame-range",
+            move || visible.get(),
+            move |context: &mut ShowContext<_>| {
+                let action = context.create_element(Tag::Button);
+                context.set_attribute(&action, Attribute::AriaLabel, Some("Frame action"));
+                let value = context.create_text("stale");
+                context.insert_before(&action, &value, None);
+                let read_count = count.clone();
+                context.effect("show/frame/text", move |effect| {
+                    effect
+                        .backend_mut()
+                        .set_text(&value, &read_count.get().to_string());
+                });
+                action
+            },
+        )
+    };
+
+    visible.set(true);
+    assert!(runtime.backend().frame_request_pending());
+    visible.set(false);
+    assert!(
+        runtime.backend().take_frame_request(),
+        "the coalesced window request remains valid after release"
+    );
+    assert!(!runtime.backend().frame_request_pending());
+
+    let operations = runtime.backend().operation_log().len();
+    count.set(1);
+    assert_eq!(
+        runtime.backend().operation_log().len(),
+        operations,
+        "the removed text effect no longer touches the backend"
+    );
+    assert!(!runtime.backend().frame_request_pending());
+
+    let window = WindowId::new(1);
+    let viewport = Size::new(800.0, 600.0);
+    let _ = runtime
+        .backend_mut()
+        .layout(WindowConstraints::new(window, viewport));
+    let list = runtime.backend_mut().paint(window, viewport);
+    let painted = serde_json::to_string(&list.to_snapshot()).expect("display list JSON");
+    assert!(
+        !painted.contains("\"stale\"") && !painted.contains("\"1\""),
+        "a pending frame cannot paint released range content"
+    );
+    assert_eq!(
+        runtime.backend().text_content(root).as_deref(),
+        Some("Tail")
+    );
+    assert!(!show.is_mounted());
+}
+
+/// Proves Native anchors are never valid text targets.
+/// 验证 Native 锚点绝不是合法的文本写入目标。
+#[test]
+fn native_anchor_rejects_text_writes() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use fino::{
+        dom_api::DomBackend,
+        native::{Size, offscreen_backend},
+    };
+
+    let mut backend = offscreen_backend(Size::new(800.0, 600.0), 1.0);
+    let anchor = backend.create_anchor();
+    let text = backend.create_text("text");
+    let rejected = catch_unwind(AssertUnwindSafe(|| backend.set_text(&anchor, "leak")));
+    assert!(rejected.is_err(), "writing an anchor must fail");
+    backend.set_text(&text, "changed");
+    assert_eq!(backend.text_content(text).as_deref(), Some("changed"));
 }

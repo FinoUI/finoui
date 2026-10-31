@@ -105,6 +105,7 @@ fn web_headless_runs_the_same_scenario_with_real_dom_probes() {
         "scenario_dom_matches_live_dom",
         "conformance_reports_shared_runtime_stats",
         "detach_reinsert_matches_shared_semantics",
+        "anchor_nodes_reject_text_writes",
         "web_remount_restores_reachability",
     ] {
         assert!(

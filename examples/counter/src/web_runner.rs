@@ -124,6 +124,30 @@ pub fn run_show_conformance_probe() -> Result<String, JsValue> {
         .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))
 }
 
+/// Whether an anchor is rejected as a text target while a real text node is accepted.
+/// 锚点是否被拒绝作为文本目标，而真实文本节点被接受。
+#[derive(Serialize)]
+struct AnchorMisuseProbe {
+    schema: u32,
+    anchor_accepts_text: bool,
+    text_accepts_text: bool,
+}
+
+/// Proves the Web backend keeps anchors invisible to `set_text`, matching Mock and Native.
+/// 验证 Web 后端让锚点对 `set_text` 保持不可见，与 Mock 和 Native 一致。
+#[wasm_bindgen]
+pub fn run_anchor_misuse_probe() -> Result<String, JsValue> {
+    let mut backend = DomBackend::new();
+    let anchor = backend.create_anchor();
+    let text = backend.create_text("text");
+    serde_json::to_string(&AnchorMisuseProbe {
+        schema: 1,
+        anchor_accepts_text: backend.accepts_text(&anchor),
+        text_accepts_text: backend.accepts_text(&text),
+    })
+    .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))
+}
+
 /// Observable state around remove and `mount_to_body`.
 /// remove 与 `mount_to_body` 前后的可观测状态。
 #[derive(Serialize)]
