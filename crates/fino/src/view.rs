@@ -1,7 +1,7 @@
 //! Backend-neutral RSX authoring support used by the `view!` macro.
 //! `view!` 宏使用的后端无关 RSX 作者支持。
 
-use std::{cell::RefCell, fmt};
+use std::{any::Any, cell::RefCell, fmt, rc::Rc};
 
 use crate::{
     dom_api::{Attribute, DomBackend, Event, EventContext, EventKind, Tag},
@@ -19,16 +19,12 @@ thread_local! {
 /// 在正在挂载的 View 所属 Owner 上创建 Signal。
 ///
 /// ```
-/// use fino::{signal, view::View};
+/// use fino::{backend_mock::MockBackend, reactive::Owner, runtime::Runtime, signal};
 ///
-/// let view = View::<fino::backend_mock::MockBackend>::new(|runtime, _owner| {
-///     let count = signal(0);
-///     let mut template = fino::view::Template::new();
-///     let root = template.element(None, fino::dom_api::Tag::Button);
-///     let _count = count.get();
-///     let nodes = template.mount(runtime);
-///     fino::view::ViewOutput::new(nodes[root].clone(), Vec::new())
-/// });
+/// let runtime = Runtime::new(MockBackend::new());
+/// let owner = runtime.create_owner();
+/// let count = fino::view::with_owner(&owner, || signal(0));
+/// assert_eq!(count.get(), 0);
 /// ```
 pub fn signal<T: 'static>(value: T) -> Signal<T> {
     current_owner().signal(value)
@@ -65,6 +61,22 @@ fn with_current_owner<T>(owner: &Owner, build: impl FnOnce() -> T) -> T {
     let previous = CURRENT_OWNER.with(|current| current.replace(Some(owner.clone())));
     let _guard = OwnerGuard(previous);
     build()
+}
+
+/// Runs a component factory with an owner available to `signal()` calls.
+/// 在组件工厂执行期间提供可供 `signal()` 使用的 Owner。
+pub fn with_owner<T>(owner: &Owner, component: impl FnOnce() -> T) -> T {
+    with_current_owner(owner, component)
+}
+
+/// Constructs and mounts a component factory inside one mount context.
+/// 在一个挂载上下文中构建并挂载组件工厂。
+pub fn mount_component<B, C>(runtime: &mut Runtime<B>, owner: &Owner, component: C) -> B::Node
+where
+    B: DomBackend + 'static,
+    C: FnOnce() -> View,
+{
+    with_current_owner(owner, component).mount(runtime, owner)
 }
 
 /// Static template node description.
@@ -363,18 +375,90 @@ impl<B: DomBackend> fmt::Debug for ViewOutput<B> {
     }
 }
 
-type ViewBuilder<B> = Box<dyn FnOnce(&mut Runtime<B>, &Owner) -> ViewOutput<B>>;
+/// Backend-erased node handle used while a `view!` closure is being mounted.
+/// `view!` 闭包挂载期间使用的后端擦除节点句柄。
+pub type ErasedNode = Rc<dyn Any>;
+
+/// Mount context supplied to the macro-generated closure.
+/// 提供给宏生成闭包的挂载上下文。
+pub trait ViewContext {
+    /// Mounts static template nodes and returns erased handles.
+    /// 挂载静态模板节点并返回擦除句柄。
+    fn mount_template(&mut self, template: &Template) -> Vec<ErasedNode>;
+    /// Binds a dynamic text reader to an existing node.
+    /// 将动态文本读取闭包绑定到现有节点。
+    fn mount_text(&mut self, node: &ErasedNode, binding: TextBinding);
+    /// Binds a dynamic attribute reader to an existing element.
+    /// 将动态属性读取闭包绑定到现有元素。
+    fn mount_attribute(&mut self, node: &ErasedNode, binding: AttributeBinding);
+    /// Binds an event listener to an existing element.
+    /// 将事件监听器绑定到现有元素。
+    fn mount_event(&mut self, node: &ErasedNode, binding: EventBinding);
+}
+
+struct TypedViewContext<'a, B: DomBackend> {
+    runtime: &'a mut Runtime<B>,
+    owner: &'a Owner,
+}
+
+impl<B: DomBackend + 'static> ViewContext for TypedViewContext<'_, B> {
+    fn mount_template(&mut self, template: &Template) -> Vec<ErasedNode> {
+        template
+            .mount(self.runtime)
+            .into_iter()
+            .map(|node| Rc::new(node) as ErasedNode)
+            .collect()
+    }
+
+    fn mount_text(&mut self, node: &ErasedNode, binding: TextBinding) {
+        let node = downcast_node::<B>(node, "text");
+        binding.mount(self.runtime, self.owner, &node);
+    }
+
+    fn mount_attribute(&mut self, node: &ErasedNode, binding: AttributeBinding) {
+        let node = downcast_node::<B>(node, "attribute");
+        binding.mount(self.runtime, self.owner, &node);
+    }
+
+    fn mount_event(&mut self, node: &ErasedNode, binding: EventBinding) {
+        let node = downcast_node::<B>(node, "event");
+        binding.mount(self.runtime, self.owner, &node);
+    }
+}
+
+fn downcast_node<B: DomBackend>(node: &ErasedNode, kind: &str) -> B::Node {
+    node.downcast_ref::<B::Node>()
+        .unwrap_or_else(|| panic!("view {kind} node has the wrong backend type"))
+        .clone()
+}
+
+/// Backend-erased output returned by one `view!` build closure.
+/// 一次 `view!` 构建闭包返回的后端擦除输出。
+pub struct BuildOutput {
+    root: ErasedNode,
+    text_slots: Vec<ErasedNode>,
+}
+
+impl BuildOutput {
+    /// Creates a build output for macro-generated code.
+    /// 为宏生成代码创建构建输出。
+    pub fn new(root: ErasedNode, text_slots: Vec<ErasedNode>) -> Self {
+        Self { root, text_slots }
+    }
+}
+
+type ViewBuilder = Box<dyn FnOnce(&mut dyn ViewContext) -> BuildOutput>;
 
 /// A component that executes once and builds a mounted view.
 /// 只执行一次并构建已挂载视图的组件。
-pub struct View<B: DomBackend> {
-    build: ViewBuilder<B>,
+pub struct View {
+    build: ViewBuilder,
 }
 
-impl<B: DomBackend + 'static> View<B> {
+impl View {
     /// Creates a component from a one-shot build closure.
     /// 从一次性构建闭包创建组件。
-    pub fn new(build: impl FnOnce(&mut Runtime<B>, &Owner) -> ViewOutput<B> + 'static) -> Self {
+    pub fn new(build: impl FnOnce(&mut dyn ViewContext) -> BuildOutput + 'static) -> Self {
         Self {
             build: Box::new(build),
         }
@@ -382,19 +466,38 @@ impl<B: DomBackend + 'static> View<B> {
 
     /// Mounts the component once and returns its root node.
     /// 只挂载组件一次并返回根节点。
-    pub fn mount(self, runtime: &mut Runtime<B>, owner: &Owner) -> B::Node {
+    pub fn mount<B: DomBackend + 'static>(
+        self,
+        runtime: &mut Runtime<B>,
+        owner: &Owner,
+    ) -> B::Node {
         self.mount_with_slots(runtime, owner).root
     }
 
     /// Mounts the component once and returns root and dynamic text slots.
     /// 只挂载组件一次并返回根节点与动态文本槽。
-    pub fn mount_with_slots(self, runtime: &mut Runtime<B>, owner: &Owner) -> ViewOutput<B> {
+    pub fn mount_with_slots<B: DomBackend + 'static>(
+        self,
+        runtime: &mut Runtime<B>,
+        owner: &Owner,
+    ) -> ViewOutput<B> {
+        let View { build } = self;
         runtime.component_executions().increment();
-        with_current_owner(owner, || (self.build)(runtime, owner))
+        let output = with_current_owner(owner, || {
+            let mut context = TypedViewContext { runtime, owner };
+            build(&mut context)
+        });
+        let root = downcast_node::<B>(&output.root, "root");
+        let text_slots = output
+            .text_slots
+            .iter()
+            .map(|node| downcast_node::<B>(node, "text slot"))
+            .collect();
+        ViewOutput::new(root, text_slots)
     }
 }
 
-impl<B: DomBackend> fmt::Debug for View<B> {
+impl fmt::Debug for View {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("View").finish_non_exhaustive()
     }

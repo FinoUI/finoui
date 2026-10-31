@@ -20,18 +20,16 @@ fn lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn counter() -> View<MockBackend> {
-    View::<MockBackend>::new(|runtime, owner| {
-        let count = signal(0);
-        fino::view! {
-            <button
-                aria-label="Increment counter"
-                on:click={move || count.update(|value| *value += 1)}
-            >
-                "Count: " {move || count.get()}
-            </button>
-        }
-    })
+fn counter() -> View {
+    let count = signal(0);
+    fino::view! {
+        <button
+            aria-label="Increment counter"
+            on:click={move || count.update(|value| *value += 1)}
+        >
+            "Count: " {move || count.get()}
+        </button>
+    }
 }
 
 fn manual_counter(runtime: &mut Runtime<MockBackend>, owner: &Owner) -> MockNode {
@@ -90,7 +88,7 @@ fn view_counter_matches_manual_identity_and_component_execution() {
     let _guard = lock();
     let mut runtime = Runtime::new(MockBackend::new());
     let owner = runtime.create_owner();
-    let button = counter().mount(&mut runtime, &owner);
+    let button = fino::view::mount_component(&mut runtime, &owner, counter);
 
     assert_eq!(runtime.component_executions().get(), 1);
     assert_eq!(owner.snapshot().effects[0].name, "view/text/2");
@@ -143,7 +141,7 @@ fn view_counter_batches_one_text_commit() {
     let _guard = lock();
     let mut runtime = Runtime::new(MockBackend::new());
     let owner = runtime.create_owner();
-    let button = counter().mount(&mut runtime, &owner);
+    let button = fino::view::mount_component(&mut runtime, &owner, counter);
     let initial_operations = runtime.backend().operations().len();
 
     batch(|| {
@@ -175,17 +173,14 @@ fn view_counter_disposal_is_idempotent() {
     let owner = runtime.create_owner();
     let count = owner.signal_named("counter/count", 0_i32);
     let mount_count = count.clone();
-    let view = View::<MockBackend>::new(move |runtime, owner| {
-        let _owner = owner;
-        fino::view! {
-            <button
-                aria-label="Increment counter"
-                on:click={move || mount_count.update(|value| *value += 1)}
-            >
-                "Count: " {move || mount_count.get()}
-            </button>
-        }
-    });
+    let view: View = fino::view! {
+        <button
+            aria-label="Increment counter"
+            on:click={move || mount_count.update(|value| *value += 1)}
+        >
+            "Count: " {move || mount_count.get()}
+        </button>
+    };
     let button = view.mount(&mut runtime, &owner);
 
     owner.dispose();
@@ -210,7 +205,7 @@ fn view_counter_matches_manual_construction() {
     let _guard = lock();
     let mut macro_runtime = Runtime::new(MockBackend::new());
     let macro_owner = macro_runtime.create_owner();
-    let macro_button = counter().mount(&mut macro_runtime, &macro_owner);
+    let macro_button = fino::view::mount_component(&mut macro_runtime, &macro_owner, counter);
 
     let mut manual_runtime = Runtime::new(MockBackend::new());
     let manual_owner = manual_runtime.create_owner();
@@ -270,17 +265,14 @@ fn generated_locals_do_not_shadow_caller_bindings() {
     let __fino_template = 40_i32;
     let __fino_nodes = 2_i32;
     let __fino_node_0 = 1_i32;
-    let view = View::<MockBackend>::new(move |runtime, owner| {
-        let _owner = owner;
-        fino::view! {
-            <button
-                fino:name="hygiene"
-                on:click={move || click_count.update(|value| *value += __fino_nodes)}
-            >
-                "Total: " {move || __fino_template + __fino_node_0 + click_count.get()}
-            </button>
-        }
-    });
+    let view: View = fino::view! {
+        <button
+            fino:name="hygiene"
+            on:click={move || click_count.update(|value| *value += __fino_nodes)}
+        >
+            "Total: " {move || __fino_template + __fino_node_0 + click_count.get()}
+        </button>
+    };
     let button = view.mount(&mut runtime, &owner);
 
     assert_eq!(owner.snapshot().effects[0].name, "hygiene/text");
@@ -307,17 +299,14 @@ fn let_initializer_captures_outer_signal_before_shadowing() {
     let owner = runtime.create_owner();
     let count = owner.signal_named("test/let-shadow", 0_i32);
     let click_count = count.clone();
-    let view = View::<MockBackend>::new(move |runtime, owner| {
-        let _owner = owner;
-        fino::view! {
-            <button on:click={move || click_count.update(|value| *value += 1)}>
-                "Value: " {move || {
-                    let count = click_count.get();
-                    count
-                }}
-            </button>
-        }
-    });
+    let view: View = fino::view! {
+        <button on:click={move || click_count.update(|value| *value += 1)}>
+            "Value: " {move || {
+                let count = click_count.get();
+                count
+            }}
+        </button>
+    };
     let button = view.mount(&mut runtime, &owner);
 
     assert_eq!(
@@ -340,14 +329,11 @@ fn format_macro_arguments_are_captured() {
     let owner = runtime.create_owner();
     let count = owner.signal_named("test/format", 0_i32);
     let click_count = count.clone();
-    let view = View::<MockBackend>::new(move |runtime, owner| {
-        let _owner = owner;
-        fino::view! {
-            <button on:click={move || click_count.update(|value| *value += 1)}>
-                "Count: " {move || format!("{}", click_count.get())}
-            </button>
-        }
-    });
+    let view: View = fino::view! {
+        <button on:click={move || click_count.update(|value| *value += 1)}>
+            "Count: " {move || format!("{}", click_count.get())}
+        </button>
+    };
     let button = view.mount(&mut runtime, &owner);
 
     assert_eq!(
@@ -373,24 +359,21 @@ fn if_let_bindings_are_scoped_to_the_branch() {
     let owner = runtime.create_owner();
     let count = owner.signal_named("test/if-let", 0_i32);
     let click_count = count.clone();
-    let view = View::<MockBackend>::new(move |runtime, owner| {
-        let _owner = owner;
-        fino::view! {
-            <button on:click={move || {
-                if let Some(value) = Some(1) {
-                    click_count.update(|count| *count += value);
+    let view: View = fino::view! {
+        <button on:click={move || {
+            if let Some(value) = Some(1) {
+                click_count.update(|count| *count += value);
+            }
+        }}>
+            "Value: " {move || {
+                if let Some(value) = Some(click_count.get()) {
+                    value
+                } else {
+                    0
                 }
-            }}>
-                "Value: " {move || {
-                    if let Some(value) = Some(click_count.get()) {
-                        value
-                    } else {
-                        0
-                    }
-                }}
-            </button>
-        }
-    });
+            }}
+        </button>
+    };
     let button = view.mount(&mut runtime, &owner);
 
     assert_eq!(
@@ -413,17 +396,14 @@ fn match_guards_capture_shared_signals() {
     let owner = runtime.create_owner();
     let count = owner.signal_named("test/guard", 0_i32);
     let click_count = count.clone();
-    let view = View::<MockBackend>::new(move |runtime, owner| {
-        let _owner = owner;
-        fino::view! {
-            <button on:click={move || click_count.update(|value| *value += 1)}>
-                "Value: " {move || match Some(7) {
-                    Some(value) if click_count.get() >= value - 7 => value,
-                    _ => -1,
-                }}
-            </button>
-        }
-    });
+    let view: View = fino::view! {
+        <button on:click={move || click_count.update(|value| *value += 1)}>
+            "Value: " {move || match Some(7) {
+                Some(value) if click_count.get() >= value - 7 => value,
+                _ => -1,
+            }}
+        </button>
+    };
     let button = view.mount(&mut runtime, &owner);
 
     assert_eq!(
@@ -450,17 +430,14 @@ fn vec_semicolon_arguments_are_analyzed() {
     let owner = runtime.create_owner();
     let count = owner.signal_named("test/vec", 0_i32);
     let click_count = count.clone();
-    let view = View::<MockBackend>::new(move |runtime, owner| {
-        let _owner = owner;
-        fino::view! {
-            <button on:click={move || click_count.update(|value| *value += 1)}>
-                "Count: " {move || {
-                    let values = vec![click_count.get(); 2];
-                    values[0]
-                }}
-            </button>
-        }
-    });
+    let view: View = fino::view! {
+        <button on:click={move || click_count.update(|value| *value += 1)}>
+            "Count: " {move || {
+                let values = vec![click_count.get(); 2];
+                values[0]
+            }}
+        </button>
+    };
     let button = view.mount(&mut runtime, &owner);
 
     assert_eq!(
@@ -485,16 +462,13 @@ fn format_inline_named_captures_are_analyzed() {
     let mut runtime = Runtime::new(MockBackend::new());
     let owner = runtime.create_owner();
     let label = String::from("label");
-    let view = View::<MockBackend>::new(move |runtime, owner| {
-        let _owner = owner;
-        fino::view! {
-            <button on:click={move || {
-                let _ = label.len();
-            }}>
-                "Value: " {move || format!("{label}")}
-            </button>
-        }
-    });
+    let view: View = fino::view! {
+        <button on:click={move || {
+            let _ = label.len();
+        }}>
+            "Value: " {move || format!("{label}")}
+        </button>
+    };
     let button = view.mount(&mut runtime, &owner);
 
     assert_eq!(
@@ -511,19 +485,16 @@ fn println_inline_captures_are_analyzed() {
     let mut runtime = Runtime::new(MockBackend::new());
     let owner = runtime.create_owner();
     let label = String::from("label");
-    let view = View::<MockBackend>::new(move |runtime, owner| {
-        let _owner = owner;
-        fino::view! {
-            <button on:click={move || {
-                let _ = label.len();
-            }}>
-                "Value: " {move || {
-                    println!("{label}");
-                    0
-                }}
-            </button>
-        }
-    });
+    let view: View = fino::view! {
+        <button on:click={move || {
+            let _ = label.len();
+        }}>
+            "Value: " {move || {
+                println!("{label}");
+                0
+            }}
+        </button>
+    };
     let button = view.mount(&mut runtime, &owner);
 
     assert_eq!(
@@ -543,16 +514,13 @@ fn format_named_parameters_are_not_outer_captures() {
     let mut runtime = Runtime::new(MockBackend::new());
     let owner = runtime.create_owner();
     let value = NotClone;
-    let view = View::<MockBackend>::new(move |runtime, owner| {
-        let _owner = owner;
-        fino::view! {
-            <button on:click={move || {
-                let _ = value;
-            }}>
-                "Value: " {move || format!("{value}", value = "named")}
-            </button>
-        }
-    });
+    let view: View = fino::view! {
+        <button on:click={move || {
+            let _ = value;
+        }}>
+            "Value: " {move || format!("{value}", value = "named")}
+        </button>
+    };
     let button = view.mount(&mut runtime, &owner);
 
     assert_eq!(
@@ -570,28 +538,25 @@ fn if_let_chain_bindings_are_scoped() {
     let owner = runtime.create_owner();
     let count = owner.signal_named("test/if-let-chain", 0_i32);
     let click_count = count.clone();
-    let view = View::<MockBackend>::new(move |runtime, owner| {
-        let _owner = owner;
-        fino::view! {
-            <button on:click={move || {
-                if let Some(first) = Some(1)
-                    && let Some(step) = Some(first + 1)
+    let view: View = fino::view! {
+        <button on:click={move || {
+            if let Some(first) = Some(1)
+                && let Some(step) = Some(first + 1)
+            {
+                click_count.update(|count| *count += step);
+            }
+        }}>
+            "Value: " {move || {
+                if let Some(first) = Some(click_count.get())
+                    && let Some(value) = Some(first + 1)
                 {
-                    click_count.update(|count| *count += step);
+                    value
+                } else {
+                    0
                 }
-            }}>
-                "Value: " {move || {
-                    if let Some(first) = Some(click_count.get())
-                        && let Some(value) = Some(first + 1)
-                    {
-                        value
-                    } else {
-                        0
-                    }
-                }}
-            </button>
-        }
-    });
+            }}
+        </button>
+    };
     let button = view.mount(&mut runtime, &owner);
 
     assert_eq!(
@@ -615,28 +580,25 @@ fn while_let_bindings_are_scoped() {
     let owner = runtime.create_owner();
     let count = owner.signal_named("test/while-let", 0_i32);
     let click_count = count.clone();
-    let view = View::<MockBackend>::new(move |runtime, owner| {
-        let _owner = owner;
-        fino::view! {
-            <button on:click={move || {
-                let mut values = std::iter::once(1);
+    let view: View = fino::view! {
+        <button on:click={move || {
+            let mut values = std::iter::once(1);
+            let mut value = 0;
+            while let Some(next) = values.next() {
+                value = next;
+            }
+            click_count.update(|count| *count += value);
+        }}>
+            "Count: " {move || {
+                let mut values = std::iter::once(click_count.get());
                 let mut value = 0;
                 while let Some(next) = values.next() {
                     value = next;
                 }
-                click_count.update(|count| *count += value);
-            }}>
-                "Count: " {move || {
-                    let mut values = std::iter::once(click_count.get());
-                    let mut value = 0;
-                    while let Some(next) = values.next() {
-                        value = next;
-                    }
-                    value
-                }}
-            </button>
-        }
-    });
+                value
+            }}
+        </button>
+    };
     let button = view.mount(&mut runtime, &owner);
 
     assert_eq!(
@@ -659,14 +621,11 @@ fn view_dynamic_attribute_updates_the_existing_element() {
     let owner = runtime.create_owner();
     let label = owner.signal_named("test/label", "First");
     let build_label = label.clone();
-    let view = View::<MockBackend>::new(move |runtime, owner| {
-        let _owner = owner;
-        fino::view! {
-            <button aria-label={move || build_label.get()}>
-                "Label"
-            </button>
-        }
-    });
+    let view: View = fino::view! {
+        <button aria-label={move || build_label.get()}>
+            "Label"
+        </button>
+    };
     let button = view.mount(&mut runtime, &owner);
 
     let attribute = |runtime: &Runtime<MockBackend>| {

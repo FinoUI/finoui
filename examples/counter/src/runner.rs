@@ -21,7 +21,7 @@ use crate::{conformance::ConformanceReport, counter};
 /// Mounts the shared counter component and returns its root node.
 /// 挂载共享计数器组件并返回其根节点。
 pub fn mount_counter<B: DomBackend + 'static>(runtime: &mut Runtime<B>, owner: &Owner) -> B::Node {
-    counter().mount(runtime, owner)
+    fino::view::mount_component(runtime, owner, counter)
 }
 
 /// Mounts the counter against an application-owned shared count signal.

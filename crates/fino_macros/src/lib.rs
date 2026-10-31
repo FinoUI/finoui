@@ -75,6 +75,7 @@ impl Default for Builder {
             next_node: 0,
             template_ident: hidden_ident("__fino_template"),
             nodes_ident: hidden_ident("__fino_nodes"),
+            context_ident: hidden_ident("__fino_context"),
             node_idents: Vec::new(),
             name: None,
         }
@@ -89,6 +90,7 @@ struct Builder {
     next_node: usize,
     template_ident: Ident,
     nodes_ident: Ident,
+    context_ident: Ident,
     node_idents: Vec<Ident>,
     name: Option<String>,
 }
@@ -166,6 +168,7 @@ impl Builder {
             next_node: _,
             template_ident,
             nodes_ident,
+            context_ident,
             node_idents: _,
             name: _,
         } = self;
@@ -189,23 +192,29 @@ impl Builder {
                     name,
                     closure: _,
                 } => quote! {
-                    ::fino::view::TextBinding::new(#name, #expression)
-                        .mount(runtime, owner, &#nodes_ident[#node]);
+                    #context_ident.mount_text(
+                        &#nodes_ident[#node],
+                        ::fino::view::TextBinding::new(#name, #expression),
+                    );
                 },
                 Binding::Attribute {
                     node,
                     attribute,
                     closure: _,
                 } => quote! {
-                    ::fino::view::AttributeBinding::new(
-                        ::fino::dom_api::Attribute::#attribute,
-                        #expression,
-                    )
-                    .mount(runtime, owner, &#nodes_ident[#node]);
+                    #context_ident.mount_attribute(
+                        &#nodes_ident[#node],
+                        ::fino::view::AttributeBinding::new(
+                            ::fino::dom_api::Attribute::#attribute,
+                            #expression,
+                        ),
+                    );
                 },
                 Binding::Event { node, closure: _ } => quote! {
-                    ::fino::view::EventBinding::click(#expression)
-                        .mount(runtime, owner, &#nodes_ident[#node]);
+                    #context_ident.mount_event(
+                        &#nodes_ident[#node],
+                        ::fino::view::EventBinding::click(#expression),
+                    );
                 },
             }
         });
@@ -213,16 +222,20 @@ impl Builder {
             .iter()
             .map(|slot| quote! { #nodes_ident[#slot].clone() });
 
-        quote! {{
-            let mut #template_ident = ::fino::view::Template::new();
-            #(#template)*
-            let #nodes_ident = #template_ident.mount(runtime);
-            #(#bindings)*
-            ::fino::view::ViewOutput::new(
-                #nodes_ident[0].clone(),
-                ::std::vec![#(#slots),*],
+        quote! {
+            ::fino::view::View::new(
+                move |#context_ident: &mut dyn ::fino::view::ViewContext| {{
+                    let mut #template_ident = ::fino::view::Template::new();
+                    #(#template)*
+                    let #nodes_ident = #context_ident.mount_template(&#template_ident);
+                    #(#bindings)*
+                    ::fino::view::BuildOutput::new(
+                        #nodes_ident[0].clone(),
+                        ::std::vec![#(#slots),*],
+                    )
+                }},
             )
-        }}
+        }
     }
 
     fn element(

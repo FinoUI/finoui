@@ -53,4 +53,4 @@ pub mod view;
 pub use fino_macros::view;
 /// Creates a Signal on the currently mounting View owner.
 /// 在正在挂载的 View Owner 上创建 Signal。
-pub use view::{View, signal, signal_named};
+pub use view::{View, mount_component, signal, signal_named, with_owner};
