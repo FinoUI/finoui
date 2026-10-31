@@ -802,30 +802,33 @@ try {
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fs.writeFileSync(destination, contents);
   }
-  fs.writeFileSync(
-    path.join(outDir, 'conformance.json'),
-    `${JSON.stringify(conformance, null, 2)}\n`,
-  );
-  fs.writeFileSync(
-    path.join(outDir, 'detach_reinsert.json'),
-    `${JSON.stringify(detachReinsert, null, 2)}\n`,
-  );
-  fs.writeFileSync(
-    path.join(outDir, 'remount.json'),
-    `${JSON.stringify(remount, null, 2)}\n`,
-  );
-  fs.writeFileSync(
-    path.join(outDir, 'anchor_misuse.json'),
-    `${JSON.stringify(anchorMisuse, null, 2)}\n`,
-  );
-  fs.writeFileSync(
-    path.join(outDir, 'show_conformance.json'),
-    `${JSON.stringify(showConformance, null, 2)}\n`,
-  );
-  fs.writeFileSync(
-    path.join(outDir, 'keyed_conformance.json'),
-    `${JSON.stringify(keyedConformance, null, 2)}\n`,
-  );
+  const scenarioPassed = bundle.result.status === 'passed';
+  if (scenarioPassed) {
+    fs.writeFileSync(
+      path.join(outDir, 'conformance.json'),
+      `${JSON.stringify(conformance, null, 2)}\n`,
+    );
+    fs.writeFileSync(
+      path.join(outDir, 'detach_reinsert.json'),
+      `${JSON.stringify(detachReinsert, null, 2)}\n`,
+    );
+    fs.writeFileSync(
+      path.join(outDir, 'remount.json'),
+      `${JSON.stringify(remount, null, 2)}\n`,
+    );
+    fs.writeFileSync(
+      path.join(outDir, 'anchor_misuse.json'),
+      `${JSON.stringify(anchorMisuse, null, 2)}\n`,
+    );
+    fs.writeFileSync(
+      path.join(outDir, 'show_conformance.json'),
+      `${JSON.stringify(showConformance, null, 2)}\n`,
+    );
+    fs.writeFileSync(
+      path.join(outDir, 'keyed_conformance.json'),
+      `${JSON.stringify(keyedConformance, null, 2)}\n`,
+    );
+  }
   fs.writeFileSync(
     path.join(outDir, 'browser.json'),
     `${JSON.stringify({ schema: 1, backend: 'web-headless', status: 'passed', checks }, null, 2)}\n`,
@@ -839,12 +842,16 @@ try {
       conformance,
       artifacts: [
         ...Object.keys(bundle.artifacts),
-        'conformance.json',
-        'detach_reinsert.json',
-        'remount.json',
-        'anchor_misuse.json',
-        'show_conformance.json',
-        'keyed_conformance.json',
+        ...(scenarioPassed
+          ? [
+              'conformance.json',
+              'detach_reinsert.json',
+              'remount.json',
+              'anchor_misuse.json',
+              'show_conformance.json',
+              'keyed_conformance.json',
+            ]
+          : []),
       ],
     })}\n`,
   );

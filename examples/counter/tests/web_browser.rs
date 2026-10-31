@@ -391,6 +391,15 @@ fn failed_web_rerun_clears_stale_captures_and_keeps_unrelated_files() {
         String::from_utf8_lossy(&first.stderr)
     );
     assert!(run_dir.join("captures/step-4/dom.json").is_file());
+    let keyed_report: Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("keyed_conformance.json")).expect("keyed report"),
+    )
+    .expect("keyed report JSON");
+    assert_eq!(keyed_report["status"], "passed");
+    fs::write(run_dir.join("keyed_conformance.json"), "stale keyed report")
+        .expect("stale keyed report");
+    fs::write(run_dir.join("show_conformance.json"), "stale show report")
+        .expect("stale show report");
 
     fs::write(run_dir.join("keep.txt"), "unrelated").expect("unrelated file");
     fs::create_dir_all(run_dir.join("notes")).expect("notes directory");
@@ -414,6 +423,19 @@ fn failed_web_rerun_clears_stale_captures_and_keeps_unrelated_files() {
     assert_eq!(result["errors"][0]["code"], "UI_ASSERT_TEXT");
 
     assert!(!run_dir.join("captures").exists(), "stale captures removed");
+    for name in [
+        "keyed_conformance.json",
+        "show_conformance.json",
+        "conformance.json",
+        "detach_reinsert.json",
+        "remount.json",
+        "anchor_misuse.json",
+    ] {
+        assert!(
+            !run_dir.join(name).exists(),
+            "stale managed report removed: {name}"
+        );
+    }
     assert_eq!(
         fs::read_to_string(run_dir.join("keep.txt")).expect("unrelated file kept"),
         "unrelated"
