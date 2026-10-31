@@ -16,6 +16,7 @@ pub use crate::error::ToolError;
 use crate::{
     dom_api::Selector,
     headless::{Environment, ExecutionCounters, HeadlessBackend, HeadlessHost, SnapshotKind},
+    metrics::RuntimeStats,
     reactive::Owner,
     runtime::Runtime,
 };
@@ -196,6 +197,9 @@ pub struct ScenarioResult {
     /// Acceptance counters.
     /// 验收计数。
     pub counters: ExecutionCounters,
+    /// Unified runtime counters shared by every conformance backend.
+    /// 每个一致性后端共享的统一运行时计数。
+    pub runtime_stats: RuntimeStats,
     /// Structured failures in execution order.
     /// 按执行顺序排列的结构化失败。
     pub errors: Vec<ToolError>,
@@ -383,6 +387,7 @@ fn execute_on_host<B: HeadlessBackend + 'static>(
         captures,
         snapshots,
         counters: host.execution_counters(),
+        runtime_stats: host.runtime_stats(),
         errors,
     };
     sink.write("result.json", &json_bytes(&result, "result.json")?)?;

@@ -11,7 +11,7 @@ use crate::{
     dom_api::{Attribute, DomBackend, EventKind, EventListener, Role, Selector, Tag},
     headless::{
         A11yNodeSnapshot, A11ySnapshot, BackendOperation, DomNodeKind, DomNodeSnapshot,
-        DomSnapshot, HeadlessBackend, SnapshotKind,
+        DomSnapshot, HeadlessBackend, LogicalNodeSnapshot, LogicalTreeSnapshot, SnapshotKind,
     },
 };
 
@@ -225,6 +225,48 @@ impl MockBackend {
         }
         nodes
     }
+
+    /// Projects one reachable node into a handle-free logical tree.
+    /// 把一个可达节点投影为不含句柄的逻辑树节点。
+    fn logical_node(&self, node: MockNode) -> Option<LogicalNodeSnapshot> {
+        match self.nodes.get(&node)? {
+            MockNodeData::Element {
+                tag,
+                attributes,
+                children,
+                ..
+            } => Some(LogicalNodeSnapshot {
+                kind: DomNodeKind::Element,
+                tag: Some(
+                    match tag {
+                        Tag::Button => "button",
+                    }
+                    .to_owned(),
+                ),
+                text: None,
+                attributes: attributes
+                    .iter()
+                    .map(|(name, value)| {
+                        let name = match name {
+                            Attribute::AriaLabel => "aria-label",
+                        };
+                        (name.to_owned(), value.clone())
+                    })
+                    .collect(),
+                children: children
+                    .iter()
+                    .filter_map(|child| self.logical_node(*child))
+                    .collect(),
+            }),
+            MockNodeData::Text { value, .. } => Some(LogicalNodeSnapshot {
+                kind: DomNodeKind::Text,
+                tag: None,
+                text: Some(value.clone()),
+                attributes: BTreeMap::new(),
+                children: Vec::new(),
+            }),
+        }
+    }
 }
 
 impl DomBackend for MockBackend {
@@ -330,6 +372,9 @@ impl DomBackend for MockBackend {
         let Some(MockNodeData::Text { value: current, .. }) = self.nodes.get_mut(node) else {
             panic!("set_text target must be an existing text node");
         };
+        if current == value {
+            return;
+        }
         *current = value.to_owned();
         self.operations.push(BackendOp::SetText {
             node: *node,
@@ -551,6 +596,19 @@ impl HeadlessBackend for MockBackend {
                 details: serde_json::to_value(operation).unwrap_or(Value::Null),
             })
             .collect()
+    }
+
+    /// Serializes only attached nodes and never exposes mock handles.
+    /// 仅序列化已挂载节点，绝不暴露 Mock 句柄。
+    fn logical_tree(&self) -> LogicalTreeSnapshot {
+        LogicalTreeSnapshot {
+            schema: 1,
+            roots: self
+                .roots
+                .iter()
+                .filter_map(|root| self.logical_node(*root))
+                .collect(),
+        }
     }
 }
 

@@ -44,6 +44,8 @@ PointerInput { window, position }
 
 A white-space or accessibility-only write does not request a frame. Writing the same text is a no-op. Repeated requests before a presented frame coalesce into one.
 
+`NativeDom::set_button_color` is a paint-only change: it requests paint without shaping or layout. `WindowContext::runtime_stats()` exposes the shared `RuntimeStats` for one window, including actual `shaped_texts`, `layout_nodes`, and coalesced `frames_requested`. Width-only changes rerun line layout for visible text without reshaping unchanged content.
+
 ## Lifecycle
 
 - `resize` updates logical viewport, invalidates layout, and keeps the DOM and count.

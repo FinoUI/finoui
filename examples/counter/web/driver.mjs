@@ -453,6 +453,45 @@ try {
     assertEqual(pageErrors.length, 0, 'page errors');
   });
 
+  // Reloads so the conformance sequence mounts into a clean body.
+  // 重新加载，使一致性序列挂载到干净的 body。
+  await page.goto(`${origin}/index.html`);
+  await page.waitForFunction(() => window.fino instanceof Object);
+
+  let conformance;
+  await runCheck('conformance_reports_shared_runtime_stats', async () => {
+    const serialized = await page.evaluate(() => window.fino.run_conformance());
+    conformance = JSON.parse(serialized);
+    assertEqual(conformance.schema, 1, 'conformance schema');
+    assertEqual(conformance.backend, 'web-headless', 'conformance backend');
+    assertEqual(conformance.checkpoints.mounted.component_executions, 1, 'mounted component executions');
+    assertEqual(conformance.checkpoints.mounted.effect_executions, 1, 'mounted effect executions');
+    assertEqual(conformance.checkpoints.mounted.backend_set_text, 1, 'mounted text commits');
+    assertEqual(conformance.checkpoints.mounted.nodes_created, 3, 'mounted node creations');
+    assertEqual(conformance.checkpoints.text_changed.backend_set_text, 2, 'text change commits');
+    assertEqual(conformance.checkpoints.clicked.backend_set_text, 3, 'click text commits');
+    assertEqual(conformance.event.text_after, 'Count: !2', 'clicked text');
+    assert(conformance.event.handled, 'click must be handled');
+    assertEqual(conformance.event.selector_matches, 1, 'clicked selector matches');
+    assertEqual(conformance.batch.final_text, 'Count: !102', 'batched text');
+    assertEqual(conformance.batch.set_text_delta, 1, 'batch text commits');
+    assertEqual(conformance.batch.nodes_created_delta, 0, 'batch node creations');
+    assertEqual(conformance.batch.nodes_removed_delta, 0, 'batch node removals');
+    assertEqual(conformance.batch.frames_requested_delta, 0, 'batch frame requests');
+    assertEqual(conformance.unmount.selector_matches, 0, 'unmounted selector matches');
+    assertEqual(conformance.unmount.a11y_nodes, 0, 'unmounted a11y nodes');
+    assertEqual(conformance.unmount.nodes_removed_delta, 1, 'unmount removals');
+    assertEqual(conformance.final_tree.roots.length, 0, 'unmounted logical tree');
+    assertEqual(conformance.operations.create_element, 1, 'create_element operations');
+    assertEqual(conformance.operations.create_text, 3, 'create_text operations');
+    assertEqual(conformance.operations.insert, 4, 'insert operations');
+    assertEqual(conformance.operations.set_attribute, 3, 'set_attribute operations');
+    assertEqual(conformance.operations.listen, 1, 'listen operations');
+    assertEqual(conformance.operations.set_text, 4, 'set_text operations');
+    assertEqual(conformance.operations.unlisten, 1, 'unlisten operations');
+    assertEqual(conformance.operations.remove, 1, 'remove operations');
+  });
+
   // Writes the exact artifact bytes the wasm run produced.
   // 写入 wasm 运行产生的精确产物字节。
   for (const [relative, contents] of Object.entries(bundle.artifacts)) {
@@ -460,6 +499,10 @@ try {
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fs.writeFileSync(destination, contents);
   }
+  fs.writeFileSync(
+    path.join(outDir, 'conformance.json'),
+    `${JSON.stringify(conformance, null, 2)}\n`,
+  );
   fs.writeFileSync(
     path.join(outDir, 'browser.json'),
     `${JSON.stringify({ schema: 1, backend: 'web-headless', status: 'passed', checks }, null, 2)}\n`,
@@ -470,7 +513,8 @@ try {
       status: 'passed',
       result: bundle.result,
       checks,
-      artifacts: Object.keys(bundle.artifacts),
+      conformance,
+      artifacts: [...Object.keys(bundle.artifacts), 'conformance.json'],
     })}\n`,
   );
 } catch (error) {

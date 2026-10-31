@@ -31,6 +31,14 @@ fn native_offscreen_runs_the_same_counter_scenario() {
     assert_eq!(result.counters.component_executions, 1);
     assert_eq!(result.counters.effect_executions, 2);
     assert_eq!(result.counters.frame, 1);
+    assert_eq!(result.runtime_stats.component_executions, 1);
+    assert_eq!(result.runtime_stats.effect_executions, 2);
+    assert_eq!(result.runtime_stats.backend_set_text, 2);
+    assert_eq!(result.runtime_stats.nodes_created, 3);
+    assert_eq!(result.runtime_stats.nodes_removed, 0);
+    assert_eq!(result.runtime_stats.shaped_texts, 0);
+    assert_eq!(result.runtime_stats.layout_nodes, 0);
+    assert_eq!(result.runtime_stats.frames_requested, 1);
     assert!(result.errors.is_empty());
 
     let dom = inspect_artifact(&run_dir, SnapshotKind::Dom).expect("DOM inspection");
@@ -75,6 +83,8 @@ fn native_offscreen_captures_layout_and_display_list() {
     let result = run_native_offscreen_scenario(&scenario, &run_dir).expect("native capture run");
 
     assert_eq!(result.status, Status::Passed);
+    assert_eq!(result.runtime_stats.shaped_texts, 2);
+    assert_eq!(result.runtime_stats.layout_nodes, 3);
     let capture = result.captures.last().expect("layout capture");
     assert_eq!(capture.artifacts["layout"], "captures/step-5/layout.json");
     assert_eq!(

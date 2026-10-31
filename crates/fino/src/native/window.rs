@@ -13,6 +13,8 @@ use super::{
 };
 use crate::{
     dom_api::{Event, EventContext, EventKind, Role, Selector},
+    headless::HeadlessBackend,
+    metrics::RuntimeStats,
     reactive::Owner,
     runtime::Runtime,
     text::TextEngine,
@@ -395,6 +397,24 @@ impl WindowContext {
     /// 返回合并帧请求数。
     pub fn frame_requests(&self) -> u64 {
         self.signals().frame_requests()
+    }
+
+    /// Returns unified runtime counters for this window only.
+    /// 仅返回该窗口的统一运行时计数。
+    pub fn runtime_stats(&self) -> RuntimeStats {
+        let reactive = self
+            .owner
+            .snapshot_with_component_executions(self.runtime.component_executions().get());
+        let effect_executions = reactive
+            .effects
+            .iter()
+            .map(|effect| effect.executions)
+            .sum();
+        RuntimeStats::from_parts(
+            reactive.component_executions,
+            effect_executions,
+            self.runtime.backend().backend_stats(),
+        )
     }
 
     /// Runs layout in this window's own coordinate space.
@@ -880,6 +900,15 @@ mod tests {
         assert!(
             !second.frame_request_pending(),
             "unrelated window stays idle"
+        );
+        let stats = first.runtime_stats();
+        assert_eq!(stats.component_executions, 1);
+        assert_eq!(stats.backend_set_text, 2, "initial 0 and clicked 1");
+        assert_eq!(stats.nodes_created, 3);
+        assert_eq!(stats.nodes_removed, 0);
+        assert_eq!(
+            stats.frames_requested, 2,
+            "initial mount plus one click frame for the affected window"
         );
     }
 

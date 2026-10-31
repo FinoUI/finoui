@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     dom_api::{DomBackend, Event, EventContext, EventKind, EventListener, Role, Selector},
+    metrics::{BackendStats, RuntimeStats},
     reactive::{Owner, ReactiveSnapshot},
     runtime::Runtime,
 };
@@ -231,6 +232,39 @@ pub struct A11ySnapshot {
     pub nodes: Vec<A11yNodeSnapshot>,
 }
 
+/// Backend-neutral logical node without ids, addresses, or platform handles.
+/// 不含 ID、地址或平台句柄的后端无关逻辑节点。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LogicalNodeSnapshot {
+    /// Node kind.
+    /// 节点种类。
+    pub kind: DomNodeKind,
+    /// Element tag, when applicable.
+    /// 适用时的元素标签。
+    pub tag: Option<String>,
+    /// Text content for text nodes.
+    /// 文本节点的文本内容。
+    pub text: Option<String>,
+    /// Stable attribute mapping.
+    /// 稳定属性映射。
+    pub attributes: BTreeMap<String, String>,
+    /// Children in committed order.
+    /// 按提交顺序排列的子节点。
+    pub children: Vec<LogicalNodeSnapshot>,
+}
+
+/// Versioned reachable logical tree used by cross-backend conformance.
+/// 跨后端一致性检查使用的版本化可达逻辑树。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LogicalTreeSnapshot {
+    /// Snapshot schema version.
+    /// 快照 schema 版本。
+    pub schema: u32,
+    /// Attached roots in stable creation order.
+    /// 按稳定创建顺序排列的已挂载根节点。
+    pub roots: Vec<LogicalNodeSnapshot>,
+}
+
 /// One structured trace event with no wall-clock timestamp.
 /// 不含实际时间戳的单条结构化 trace 事件。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -285,6 +319,28 @@ pub trait HeadlessBackend: DomBackend {
     /// Returns normalized structured operations in stable order.
     /// 按稳定顺序返回规范化结构化操作。
     fn operation_log(&self) -> Vec<BackendOperation>;
+    /// Captures the reachable logical tree without platform handles.
+    /// 捕获不含平台句柄的可达逻辑树。
+    fn logical_tree(&self) -> LogicalTreeSnapshot;
+    /// Derives shared counters from the normalized operation log.
+    /// 从规范化操作日志推导共享计数。
+    fn operation_stats(&self) -> BackendStats {
+        let mut stats = BackendStats::default();
+        for operation in self.operation_log() {
+            match operation.operation.as_str() {
+                "create_element" | "create_text" => stats.nodes_created += 1,
+                "remove" => stats.nodes_removed += 1,
+                "set_text" => stats.backend_set_text += 1,
+                _ => {}
+            }
+        }
+        stats
+    }
+    /// Returns backend-side runtime counters; platform extras default to zero.
+    /// 返回后端侧运行时计数；平台特有计数默认为零。
+    fn backend_stats(&self) -> BackendStats {
+        self.operation_stats()
+    }
     /// Captures real layout state when the backend supports it.
     /// 后端支持时捕获真实布局状态。
     fn layout_snapshot(&mut self) -> Option<Value> {
@@ -536,6 +592,22 @@ impl<B: HeadlessBackend + 'static> HeadlessHost<B> {
     pub fn reactive_snapshot(&self) -> ReactiveSnapshot {
         self.owner
             .snapshot_with_component_executions(self.runtime.component_executions().get())
+    }
+
+    /// Returns the unified runtime counters for the current host instance.
+    /// 返回当前 Host 实例的统一运行时计数。
+    pub fn runtime_stats(&self) -> RuntimeStats {
+        let reactive = self.reactive_snapshot();
+        let effect_executions = reactive
+            .effects
+            .iter()
+            .map(|effect| effect.executions)
+            .sum();
+        RuntimeStats::from_parts(
+            reactive.component_executions,
+            effect_executions,
+            self.runtime.backend().backend_stats(),
+        )
     }
 
     /// Returns acceptance counters for the current host instance.

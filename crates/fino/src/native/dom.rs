@@ -18,8 +18,9 @@ use crate::{
     dom_api::{Attribute, DomBackend, EventKind, EventListener, Role, Selector, Tag},
     headless::{
         A11yNodeSnapshot, A11ySnapshot, BackendOperation, DomNodeKind, DomNodeSnapshot,
-        DomSnapshot, HeadlessBackend, SnapshotKind,
+        DomSnapshot, HeadlessBackend, LogicalNodeSnapshot, LogicalTreeSnapshot, SnapshotKind,
     },
+    metrics::BackendStats,
     text::{ShapedText, TextConstraints, TextEngine, TextLayout, TextSpec},
 };
 
@@ -148,6 +149,9 @@ pub struct NativeDom {
     last_layout: Option<LayoutSnapshot>,
     last_display_list: Option<DisplayList>,
     style: ButtonStyle,
+    button_color: Color,
+    shaped_texts: u64,
+    layout_nodes: u64,
 }
 
 impl NativeDom {
@@ -215,6 +219,9 @@ impl NativeDom {
             last_layout: None,
             last_display_list: None,
             style: ButtonStyle::default(),
+            button_color: Color::rgba(0.14, 0.16, 0.21, 1.0),
+            shaped_texts: 0,
+            layout_nodes: 0,
         }
     }
 
@@ -253,6 +260,16 @@ impl NativeDom {
         self.layout_dirty = true;
         self.damage = Damage::full();
         self.signals.mark_layout_dirty();
+    }
+
+    /// Updates the button fill color and requests paint without layout or shaping.
+    /// 更新按钮填充色，并只请求绘制，不触发布局或 shaping。
+    pub fn set_button_color(&mut self, color: Color) {
+        if color == self.button_color {
+            return;
+        }
+        self.button_color = color;
+        self.signals.mark_paint_dirty();
     }
 
     /// Returns the stable creation-order identifier for a live node.
@@ -369,6 +386,7 @@ impl NativeDom {
             }
         }
 
+        self.layout_nodes += boxes.len() as u64;
         let dirty_nodes = std::mem::take(&mut self.dirty_nodes);
         for node in dirty_nodes {
             if let Some(rect) = self.bounds.get(&node).copied() {
@@ -415,12 +433,7 @@ impl NativeDom {
             let Some(bounds) = self.bounds.get(&root).copied() else {
                 continue;
             };
-            list.push(context.rect(
-                root,
-                node.stable_id,
-                bounds,
-                Color::rgba(0.14, 0.16, 0.21, 1.0),
-            ));
+            list.push(context.rect(root, node.stable_id, bounds, self.button_color));
             for child in &node.children {
                 let Some(child_node) = self.nodes.get(*child) else {
                     continue;
@@ -537,6 +550,7 @@ impl NativeDom {
 
         if binding.shaped.is_none() {
             binding.shaped = Some(engine.borrow_mut().shape(&binding.spec));
+            self.shaped_texts += 1;
         }
         let shaped = binding
             .shaped
@@ -663,6 +677,45 @@ impl NativeDom {
             .get(node)
             .map(|data| data.stable_id)
             .expect("node must exist")
+    }
+
+    /// Projects one reachable node into a handle-free logical tree.
+    /// 把一个可达节点投影为不含句柄的逻辑树节点。
+    fn logical_node(&self, node: NodeId) -> Option<LogicalNodeSnapshot> {
+        let data = self.nodes.get(node)?;
+        let (kind, tag, text, attributes) = match data.kind {
+            NodeKind::Element(Tag::Button) => (
+                DomNodeKind::Element,
+                Some("button".to_owned()),
+                None,
+                data.attributes
+                    .iter()
+                    .map(|(name, value)| {
+                        let name = match name {
+                            Attribute::AriaLabel => "aria-label",
+                        };
+                        (name.to_owned(), value.clone())
+                    })
+                    .collect(),
+            ),
+            NodeKind::Text => (
+                DomNodeKind::Text,
+                None,
+                data.text.as_ref().map(|text| text.spec.text.clone()),
+                BTreeMap::new(),
+            ),
+        };
+        Some(LogicalNodeSnapshot {
+            kind,
+            tag,
+            text,
+            attributes,
+            children: data
+                .children
+                .iter()
+                .filter_map(|child| self.logical_node(*child))
+                .collect(),
+        })
     }
 }
 
@@ -967,6 +1020,30 @@ impl HeadlessBackend for NativeDom {
         self.operations.clone()
     }
 
+    /// Adds native text, layout, and frame work to the shared operation counters.
+    /// 把原生文本、布局与帧工作量加入共享操作计数。
+    fn backend_stats(&self) -> BackendStats {
+        let mut stats = self.operation_stats();
+        stats.shaped_texts = self.shaped_texts;
+        stats.layout_nodes = self.layout_nodes;
+        stats.frames_requested = self.signals.frame_requests();
+        stats
+    }
+
+    /// Serializes only attached native nodes and never exposes generational handles.
+    /// 仅序列化已挂载原生节点，绝不暴露 generational 句柄。
+    fn logical_tree(&self) -> LogicalTreeSnapshot {
+        let mut roots = self.roots.clone();
+        roots.sort_by_key(|node| self.nodes.get(*node).map(|data| data.stable_id));
+        LogicalTreeSnapshot {
+            schema: 1,
+            roots: roots
+                .into_iter()
+                .filter_map(|root| self.logical_node(root))
+                .collect(),
+        }
+    }
+
     fn layout_snapshot(&mut self) -> Option<Value> {
         let snapshot = self.layout(WindowConstraints::new(self.window, self.viewport));
         Some(json!(snapshot))
@@ -1124,6 +1201,82 @@ mod tests {
         let committed = dom.signals().snapshot();
         assert_eq!(committed.layout_generation, 2);
         assert!(!committed.layout_dirty);
+    }
+
+    /// Paint-only and width-only changes keep shaping stable while layout stays observable.
+    /// 仅绘制与仅宽度变化保持 shaping 稳定，同时布局工作量仍可观测。
+    #[test]
+    fn backend_stats_separate_paint_from_text_and_layout_work() {
+        let mut dom = dom();
+        let (_button, _prefix, value) = button_with_text(&mut dom);
+        let created = dom.backend_stats();
+        assert_eq!(created.nodes_created, 3);
+        assert_eq!(created.backend_set_text, 0);
+        assert_eq!(created.shaped_texts, 0);
+        assert_eq!(created.layout_nodes, 0);
+
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let laid_out = dom.backend_stats();
+        assert_eq!(laid_out.shaped_texts, 2);
+        assert_eq!(laid_out.layout_nodes, 3);
+        let _ = dom.take_frame_request();
+
+        // A color change only requests paint; it must not shape or lay out text.
+        // 颜色变化只请求绘制，不得 shaping 或布局文本。
+        dom.set_button_color(Color::rgba(0.2, 0.3, 0.4, 1.0));
+        let painted = dom.backend_stats();
+        assert_eq!(painted.shaped_texts, laid_out.shaped_texts);
+        assert_eq!(painted.layout_nodes, laid_out.layout_nodes);
+        assert_eq!(painted.frames_requested, laid_out.frames_requested + 1);
+        dom.set_button_color(Color::rgba(0.2, 0.3, 0.4, 1.0));
+        assert_eq!(
+            dom.backend_stats().frames_requested,
+            painted.frames_requested,
+            "the same color is a no-op"
+        );
+        dom.paint(dom.window(), dom.viewport());
+        let after_paint = dom.backend_stats();
+        assert_eq!(after_paint.shaped_texts, painted.shaped_texts);
+        assert_eq!(after_paint.layout_nodes, painted.layout_nodes);
+
+        // A width change re-lays out both visible text nodes without reshaping either.
+        // 宽度变化会重新布局两个可见文本节点，但不会重新 shaping。
+        dom.set_viewport(Size::new(900.0, 600.0), 1.0);
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let resized = dom.backend_stats();
+        assert_eq!(resized.shaped_texts, after_paint.shaped_texts);
+        assert_eq!(resized.layout_nodes, after_paint.layout_nodes + 3);
+
+        // A numeric text change keeps node counts stable and shapes only that node.
+        // 数字文本变化保持节点数稳定，并且只 shaping 该节点。
+        dom.set_text(&value, "1");
+        let changed = dom.backend_stats();
+        assert_eq!(changed.nodes_created, created.nodes_created);
+        assert_eq!(changed.nodes_removed, created.nodes_removed);
+        assert_eq!(changed.backend_set_text, 1);
+        assert_eq!(changed.shaped_texts, resized.shaped_texts);
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        assert_eq!(
+            dom.backend_stats().shaped_texts,
+            resized.shaped_texts + 1,
+            "only the changed text reshapes"
+        );
+    }
+
+    /// Writing the same text does not commit or request a frame.
+    /// 写入相同文本不会提交，也不会请求帧。
+    #[test]
+    fn same_text_is_a_backend_no_op() {
+        let mut dom = dom();
+        let (_button, _prefix, value) = button_with_text(&mut dom);
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let _ = dom.take_frame_request();
+        let before = dom.backend_stats();
+
+        dom.set_text(&value, "0");
+
+        assert_eq!(dom.backend_stats(), before);
+        assert!(!dom.frame_request_pending());
     }
 
     /// Layout and display-list snapshots contain real window-tagged geometry.

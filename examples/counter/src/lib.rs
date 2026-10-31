@@ -7,6 +7,10 @@ use fino::{
     runtime::Runtime,
 };
 
+/// Shared cross-backend conformance sequence and stable report.
+/// 共享的跨后端一致性序列与稳定报告。
+pub mod conformance;
+
 /// Counter-owned smoke checks and scenario invocation.
 /// 计数器示例拥有的冒烟检查与场景调用。
 pub mod runner;
@@ -40,25 +44,35 @@ pub fn mount_counter_with_count<B: DomBackend + 'static>(
     count: Signal<i32>,
 ) -> B::Node {
     runtime.component_executions().increment();
-    build_counter(runtime, owner, count)
+    build_counter(runtime, owner, count).0
 }
 
 pub(crate) fn mount_counter_with_state<B: DomBackend + 'static>(
     runtime: &mut Runtime<B>,
     owner: &Owner,
 ) -> (B::Node, Signal<i32>) {
+    let (button, _value, count) = mount_counter_with_nodes(runtime, owner);
+    (button, count)
+}
+
+/// Mounts the counter and returns the dynamic value node used by conformance probes.
+/// 挂载计数器，并返回一致性探针使用的动态文本节点。
+pub(crate) fn mount_counter_with_nodes<B: DomBackend + 'static>(
+    runtime: &mut Runtime<B>,
+    owner: &Owner,
+) -> (B::Node, B::Node, Signal<i32>) {
     runtime.component_executions().increment();
 
     let count = owner.signal_named("counter/count", 0_i32);
-    let button = build_counter(runtime, owner, count.clone());
-    (button, count)
+    let (button, value) = build_counter(runtime, owner, count.clone());
+    (button, value, count)
 }
 
 fn build_counter<B: DomBackend + 'static>(
     runtime: &mut Runtime<B>,
     owner: &Owner,
     count: Signal<i32>,
-) -> B::Node {
+) -> (B::Node, B::Node) {
     let button = runtime.backend_mut().create_element(Tag::Button);
     let prefix = runtime.backend_mut().create_text("Count: ");
     let value = runtime.backend_mut().create_text("");
@@ -81,7 +95,7 @@ fn build_counter<B: DomBackend + 'static>(
         cx.backend_mut().set_text(&text_node, &next);
     });
 
-    button
+    (button, value)
 }
 
 #[cfg(test)]

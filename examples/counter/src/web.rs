@@ -75,6 +75,17 @@ impl Default for CounterPage {
     }
 }
 
+/// Runs the shared conformance sequence against the real browser DOM.
+/// 针对真实浏览器 DOM 运行共享一致性序列。
+#[wasm_bindgen]
+pub fn run_conformance() -> Result<String, JsValue> {
+    let host = HeadlessHost::new(DomBackend::new(), Environment::default());
+    let report = crate::conformance::run_conformance(host)
+        .map_err(|message| tool_error("UI_CONFORMANCE", message))?;
+    serde_json::to_string(&report)
+        .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))
+}
+
 /// Artifacts returned to the browser driver for persistence.
 /// 返回给浏览器驱动以便持久化的产物。
 #[derive(Serialize)]

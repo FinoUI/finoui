@@ -8,6 +8,7 @@ use std::{
 };
 
 use fino::{headless::SnapshotKind, inspect::inspect_artifact};
+use fino_counter::{conformance::ConformanceReport, runner::run_mock_conformance};
 use serde_json::Value;
 
 /// Builds the example binary command used by browser acceptance tests.
@@ -87,6 +88,7 @@ fn web_headless_runs_the_same_scenario_with_real_dom_probes() {
         "tab_order_reaches_button",
         "scenario_executes_in_chromium",
         "scenario_dom_matches_live_dom",
+        "conformance_reports_shared_runtime_stats",
     ] {
         assert!(
             checks
@@ -95,6 +97,18 @@ fn web_headless_runs_the_same_scenario_with_real_dom_probes() {
             "missing passing browser check {expected}"
         );
     }
+
+    let mut web: ConformanceReport = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("conformance.json")).expect("conformance file"),
+    )
+    .expect("conformance JSON");
+    let mock = run_mock_conformance().expect("mock conformance");
+    assert_eq!(web.backend, "web-headless");
+    web.backend = mock.backend.clone();
+    assert_eq!(
+        web, mock,
+        "Web and Mock must agree on trees, events, operations, and shared counters"
+    );
 }
 
 /// Proves a failed rerun removes stale captures without deleting unrelated files.

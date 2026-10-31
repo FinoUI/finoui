@@ -40,6 +40,14 @@ fn mock_scenario_writes_deterministic_snapshots_and_trace() {
     assert_eq!(first.counters.effect_executions, 2);
     assert_eq!(first.counters.frame, 1);
     assert_eq!(first.counters.virtual_time_ms, 16);
+    assert_eq!(first.runtime_stats.component_executions, 1);
+    assert_eq!(first.runtime_stats.effect_executions, 2);
+    assert_eq!(first.runtime_stats.backend_set_text, 2);
+    assert_eq!(first.runtime_stats.nodes_created, 3);
+    assert_eq!(first.runtime_stats.nodes_removed, 0);
+    assert_eq!(first.runtime_stats.shaped_texts, 0);
+    assert_eq!(first.runtime_stats.layout_nodes, 0);
+    assert_eq!(first.runtime_stats.frames_requested, 0);
     assert_eq!(first.captures.len(), 1);
     assert_eq!(first.captures[0].step, 4);
     assert!(first.steps.iter().all(|step| step.status == Status::Passed));

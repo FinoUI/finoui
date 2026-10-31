@@ -7,9 +7,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use fino::scenario::{self, ScenarioResult, Status, ToolError};
 #[cfg(not(target_arch = "wasm32"))]
 use fino_counter::browser::run_web_scenario;
+use fino_counter::runner::{check_counter, run_mock_conformance, run_mock_scenario};
 #[cfg(not(target_arch = "wasm32"))]
-use fino_counter::runner::run_native_offscreen_scenario;
-use fino_counter::runner::{check_counter, run_mock_scenario};
+use fino_counter::runner::{run_native_offscreen_conformance, run_native_offscreen_scenario};
 use serde::Serialize;
 
 #[derive(Parser)]
@@ -34,6 +34,14 @@ enum Command {
     Scenario {
         #[command(subcommand)]
         command: ScenarioCommand,
+    },
+    /// Runs the cross-backend conformance sequence and prints its stable report.
+    /// 运行跨后端一致性序列并输出稳定报告。
+    Conformance {
+        #[arg(long, value_enum)]
+        backend: ConformanceBackend,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
     },
     /// Opens the native winit/wgpu counter window.
     /// 打开原生 winit/wgpu 计数器窗口。
@@ -66,6 +74,13 @@ enum Backend {
     Mock,
     #[cfg(not(target_arch = "wasm32"))]
     WebHeadless,
+    #[cfg(not(target_arch = "wasm32"))]
+    NativeOffscreen,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ConformanceBackend {
+    Mock,
     #[cfg(not(target_arch = "wasm32"))]
     NativeOffscreen,
 }
@@ -143,6 +158,39 @@ fn run() -> ExitCode {
                     exit_status(failed)
                 }
                 Err(error) => output_error(error, format),
+            }
+        }
+        Command::Conformance { backend, format } => {
+            let run = match backend {
+                ConformanceBackend::Mock => run_mock_conformance(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ConformanceBackend::NativeOffscreen => run_native_offscreen_conformance(),
+            };
+            match run {
+                Ok(report) => {
+                    if format == OutputFormat::Json {
+                        print_json(&report);
+                    } else {
+                        println!(
+                            "conformance {}: {} (set_text {}, nodes +{} / -{}, frames {})",
+                            report.backend,
+                            status_name(if report.final_tree.roots.is_empty() {
+                                Status::Passed
+                            } else {
+                                Status::Failed
+                            }),
+                            report.final_stats.backend_set_text,
+                            report.final_stats.nodes_created,
+                            report.final_stats.nodes_removed,
+                            report.final_stats.frames_requested,
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(message) => output_error(
+                    ToolError::for_backend("UI_CONFORMANCE", message, "conformance"),
+                    format,
+                ),
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
