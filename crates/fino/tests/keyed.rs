@@ -15,7 +15,7 @@ use fino::{
     keyed::{For, ForContext},
     reactive::Signal,
     runtime::Runtime,
-    show::Show,
+    show::{RangeAnchor, Show},
 };
 
 fn text(backend: &mut MockBackend, parent: &MockNode, value: &str) -> MockNode {
@@ -1130,6 +1130,11 @@ fn keyed_for_rejects_foreign_context_mutations_without_state_change() {
 struct StrictBackend {
     inner: MockBackend,
     live: BTreeSet<MockNode>,
+    insert_count: std::cell::Cell<usize>,
+    panic_insert_at: std::cell::Cell<Option<usize>>,
+    panic_insert_budget: std::cell::Cell<usize>,
+    anchor_count: std::cell::Cell<usize>,
+    panic_anchor_at: std::cell::Cell<Option<usize>>,
 }
 
 impl StrictBackend {
@@ -1143,6 +1148,17 @@ impl StrictBackend {
 
     fn contains(&self, node: MockNode) -> bool {
         self.live.contains(&node)
+    }
+
+    fn panic_inserts_after(&self, delta: usize, budget: usize) {
+        self.panic_insert_at
+            .set(Some(self.insert_count.get() + delta));
+        self.panic_insert_budget.set(budget);
+    }
+
+    fn panic_anchor_after(&self, delta: usize) {
+        self.panic_anchor_at
+            .set(Some(self.anchor_count.get() + delta));
     }
 
     fn release_subtree(&mut self, node: MockNode) {
@@ -1190,6 +1206,16 @@ impl DomBackend for StrictBackend {
     }
 
     fn create_anchor(&mut self) -> Self::Node {
+        let count = self.anchor_count.get() + 1;
+        self.anchor_count.set(count);
+        if self
+            .panic_anchor_at
+            .get()
+            .is_some_and(|panic_at| count >= panic_at)
+        {
+            self.panic_anchor_at.set(None);
+            panic!("injected anchor create panic");
+        }
         let node = self.inner.create_anchor();
         self.live.insert(node);
         node
@@ -1201,6 +1227,21 @@ impl DomBackend for StrictBackend {
         child: &Self::Node,
         anchor: Option<&Self::Node>,
     ) {
+        let count = self.insert_count.get() + 1;
+        self.insert_count.set(count);
+        if self
+            .panic_insert_at
+            .get()
+            .is_some_and(|panic_at| count >= panic_at)
+            && self.panic_insert_budget.get() > 0
+        {
+            let remaining = self.panic_insert_budget.get() - 1;
+            self.panic_insert_budget.set(remaining);
+            if remaining == 0 {
+                self.panic_insert_at.set(None);
+            }
+            panic!("injected move panic");
+        }
         self.inner.insert_before(parent, child, anchor);
     }
 
@@ -2225,4 +2266,645 @@ fn keyed_for_terminal_owner_panic_still_releases_range() {
     let after_dispose = runtime.backend().operations().len();
     list.dispose();
     assert_eq!(runtime.backend().operations().len(), after_dispose);
+}
+
+/// Two keys cannot return the same external node; initial mount rejects it
+/// deterministically and releases each staged resource once.
+/// 两个 key 不能返回同一个外部节点；初始挂载会确定性拒绝，并只释放每个暂存
+/// 资源一次。
+#[test]
+fn keyed_for_initial_shared_external_node_is_rejected() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let external = runtime.backend_mut().create_element(Tag::Button);
+    let items = keys(&["a", "b"]);
+
+    let error = match For::try_mount(
+        &runtime,
+        &owner,
+        &root,
+        Some(&tail),
+        "keyed/shared-initial",
+        move || items.clone(),
+        move |_context: &mut ForContext<MockBackend>, _key| vec![external],
+    ) {
+        Ok(_) => panic!("shared external node must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, "UI_FOR_SHARED_NODE");
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "only the static root and tail remain"
+    );
+    assert_eq!(runtime.backend().listener_count(), 0);
+}
+
+/// A shared external node in an update is rejected atomically without releasing
+/// the retained entry's node; a later valid update recovers.
+/// 更新中的共享外部节点会被原子拒绝，不释放保留条目的节点；后续合法更新可恢复。
+#[test]
+fn keyed_for_update_shared_external_node_preserves_retained_owner() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let external = runtime.backend_mut().create_element(Tag::Button);
+    let external_id = format!("node-{}", external.0);
+    let list = {
+        let read_items = items.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/shared-update",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                if key == "a" {
+                    return vec![external];
+                }
+                if key == "b" {
+                    return vec![external];
+                }
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                vec![item]
+            },
+        )
+    };
+    let baseline = runtime.backend().dom_snapshot().nodes.len();
+    assert!(
+        runtime
+            .backend()
+            .dom_snapshot()
+            .nodes
+            .iter()
+            .any(|node| node.id == external_id)
+    );
+
+    items.set(keys(&["a", "b"]));
+
+    assert_eq!(
+        list.last_error().as_ref().map(|error| error.code.as_str()),
+        Some("UI_FOR_SHARED_NODE")
+    );
+    assert_eq!(list.keys(), keys(&["a"]));
+    assert_eq!(runtime.backend().dom_snapshot().nodes.len(), baseline);
+    assert!(
+        runtime
+            .backend()
+            .dom_snapshot()
+            .nodes
+            .iter()
+            .any(|node| node.id == external_id),
+        "the retained entry still owns the shared external node"
+    );
+
+    items.set(keys(&["a", "c"]));
+    assert!(list.last_error().is_none());
+    assert_eq!(list.keys(), keys(&["a", "c"]));
+    list.dispose();
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "the external node is released exactly once at terminal disposal"
+    );
+}
+
+/// Multiple staged entries with panicking cleanups do not interrupt rollback or
+/// override the later builder payload.
+/// 多个暂存条目的清理 panic 不会中断回滚，也不会覆盖后续构建器 payload。
+#[test]
+fn keyed_for_staged_cleanup_panics_keep_builder_payload() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let b_cleanup = Rc::new(std::cell::Cell::new(0_u32));
+    let c_cleanup = Rc::new(std::cell::Cell::new(0_u32));
+    let list = {
+        let read_items = items.clone();
+        let b_cleanup = Rc::clone(&b_cleanup);
+        let c_cleanup = Rc::clone(&c_cleanup);
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/staged-panics",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                match key.as_str() {
+                    "b" => {
+                        let cleanup = Rc::clone(&b_cleanup);
+                        context.on_dispose(move || {
+                            cleanup.set(cleanup.get() + 1);
+                            panic!("b cleanup");
+                        });
+                    }
+                    "c" => {
+                        let cleanup = Rc::clone(&c_cleanup);
+                        context.on_dispose(move || {
+                            cleanup.set(cleanup.get() + 1);
+                            panic!("c cleanup");
+                        });
+                    }
+                    "d" => panic!("d builder panic"),
+                    _ => {}
+                }
+                vec![item]
+            },
+        )
+    };
+    let baseline = runtime.backend().dom_snapshot().nodes.len();
+
+    let failure = catch_unwind(AssertUnwindSafe(|| items.set(keys(&["a", "b", "c", "d"]))));
+    let payload = failure.expect_err("d builder panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "d builder panic");
+    assert_eq!(b_cleanup.get(), 1, "b staged cleanup still ran");
+    assert_eq!(c_cleanup.get(), 1, "c staged cleanup still ran");
+    assert_eq!(list.keys(), keys(&["a"]));
+    assert_eq!(runtime.backend().dom_snapshot().nodes.len(), baseline);
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert!(
+        owner
+            .snapshot()
+            .effects
+            .iter()
+            .all(|effect| { effect.name != "keyed/staged-panics/reconcile" || effect.active })
+    );
+
+    items.set(keys(&["a", "e"]));
+    assert_eq!(list.keys(), keys(&["a", "e"]));
+    list.dispose();
+    assert_eq!(runtime.backend().dom_snapshot().nodes.len(), 2);
+}
+
+/// A staged dispose request still performs terminal cleanup even when a staged
+/// cleanup panics, and that cleanup payload survives.
+/// 暂存清理 panic 时，暂存 dispose 请求仍完成终止清理，并保留该清理 payload。
+#[test]
+fn keyed_for_staged_dispose_with_cleanup_panic_is_terminal() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let slot: ForSlot = Rc::new(RefCell::new(None));
+    let list = {
+        let read_items = items.clone();
+        let builder_slot = Rc::clone(&slot);
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/staged-dispose",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                if key == "b" {
+                    context.on_dispose(|| panic!("b staged cleanup"));
+                    if let Some(list) = builder_slot.borrow().as_ref() {
+                        list.dispose();
+                    }
+                }
+                vec![item]
+            },
+        )
+    };
+    let list = Rc::new(list);
+    *slot.borrow_mut() = Some(Rc::clone(&list));
+
+    let failure = catch_unwind(AssertUnwindSafe(|| items.set(keys(&["a", "b"]))));
+    let payload = failure.expect_err("cleanup panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "b staged cleanup");
+    assert!(list.is_empty());
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "old entries, staged entries, and anchors are released"
+    );
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+    let after_dispose = runtime.backend().operations().len();
+    items.set(keys(&["c"]));
+    list.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+}
+
+/// Disposing the parent owner from a live builder records a terminal request
+/// even though reconciliation owns the state, then releases every range.
+/// 在构建器内释放父 Owner 时，即使协调持有状态，也会记录终止请求并释放全部范围。
+#[test]
+fn keyed_for_parent_owner_dispose_in_builder_is_terminal() {
+    let runtime = Runtime::new(MockBackend::new());
+    let signals_owner = runtime.create_owner();
+    let parent_owner = runtime.create_owner();
+    let items = signals_owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let list = {
+        let read_items = items.clone();
+        let parent = parent_owner.clone();
+        For::mount(
+            &runtime,
+            &parent_owner,
+            &root,
+            Some(&tail),
+            "keyed/parent-dispose",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                if key == "b" {
+                    parent.dispose();
+                }
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                vec![item]
+            },
+        )
+    };
+    items.set(keys(&["a", "b"]));
+
+    assert!(list.is_empty());
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "the live builder request releases old and new ranges"
+    );
+    assert!(
+        signals_owner
+            .snapshot()
+            .effects
+            .iter()
+            .all(|effect| !effect.active)
+    );
+    let after_dispose = runtime.backend().operations().len();
+    items.set(keys(&["c"]));
+    list.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+}
+
+/// A backend move panic mid-placement restores the old keys, DOM order, and
+/// identity before propagating, so retrying the same update succeeds.
+/// 放置中途的后端 move panic 会先恢复旧 keys、DOM 顺序与身份，再传播；重试同一
+/// 更新可以成功。
+#[test]
+fn keyed_for_move_panic_rolls_back_and_retries() {
+    let runtime = Runtime::new(StrictBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a", "b", "c"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = {
+        let node = runtime.backend_mut().create_text("Tail");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    let handles: Rc<RefCell<BTreeMap<String, MockNode>>> = Rc::new(RefCell::new(BTreeMap::new()));
+    let list = {
+        let read_items = items.clone();
+        let handles = Rc::clone(&handles);
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/move-panic",
+            move || read_items.get(),
+            move |context: &mut ForContext<StrictBackend>, key| {
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                handles.borrow_mut().insert(key.to_owned(), item);
+                vec![item]
+            },
+        )
+    };
+    let baseline_nodes = runtime.backend().inner().dom_snapshot().nodes.len();
+    let initial_handles = ["a", "b", "c"].map(|key| *handles.borrow().get(key).unwrap());
+    runtime.backend().panic_inserts_after(4, 1);
+
+    let failure = catch_unwind(AssertUnwindSafe(|| items.set(keys(&["c", "b", "a"]))));
+    let payload = failure.expect_err("move panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "injected move panic");
+    assert_eq!(list.keys(), keys(&["a", "b", "c"]));
+    assert_eq!(
+        runtime.backend().inner().text_content(&root).as_deref(),
+        Some("abcTail")
+    );
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot().nodes.len(),
+        baseline_nodes,
+        "rollback restores the old DOM without leaking staged entries"
+    );
+    for (index, key) in ["a", "b", "c"].iter().enumerate() {
+        assert_eq!(
+            handles.borrow().get(*key).copied(),
+            Some(initial_handles[index]),
+            "{key} keeps its NodeId across rollback"
+        );
+    }
+
+    items.set(keys(&["c", "b", "a"]));
+    assert_eq!(list.keys(), keys(&["c", "b", "a"]));
+    assert_eq!(
+        runtime.backend().inner().text_content(&root).as_deref(),
+        Some("cbaTail")
+    );
+    for (index, key) in ["a", "b", "c"].iter().enumerate() {
+        assert_eq!(
+            handles.borrow().get(*key).copied(),
+            Some(initial_handles[index])
+        );
+    }
+    list.dispose();
+    assert_eq!(runtime.backend().inner().dom_snapshot().nodes.len(), 2);
+}
+
+/// If rollback itself panics, the list enters terminal cleanup, preserves the
+/// first backend payload, and cannot be revived.
+/// 若回滚自身也 panic，列表进入终止清理，保留首个后端 payload，且不可复活。
+#[test]
+fn keyed_for_move_panic_rollback_failure_is_terminal() {
+    let runtime = Runtime::new(StrictBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a", "b", "c"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = {
+        let node = runtime.backend_mut().create_text("Tail");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    let list = {
+        let read_items = items.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/move-panic-terminal",
+            move || read_items.get(),
+            |context: &mut ForContext<StrictBackend>, key| {
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                vec![item]
+            },
+        )
+    };
+    runtime.backend().panic_inserts_after(1, 2);
+
+    let failure = catch_unwind(AssertUnwindSafe(|| items.set(keys(&["c", "b", "a"]))));
+    let payload = failure.expect_err("first panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "injected move panic");
+    assert!(list.is_empty());
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot().nodes.len(),
+        2,
+        "terminal cleanup releases every range and anchor"
+    );
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+    let after_dispose = runtime.backend().inner().operations().len();
+    items.set(keys(&["d"]));
+    list.dispose();
+    assert_eq!(runtime.backend().inner().operations().len(), after_dispose);
+}
+
+/// RangeAnchor create and insert failures release partial anchors without
+/// touching static siblings and preserve the backend payload.
+/// RangeAnchor 创建或插入失败会释放部分锚点，不触碰静态兄弟，并保留后端 payload。
+#[test]
+fn range_anchor_create_failures_are_transactional() {
+    for (label, arm) in [("create", 0_u8), ("first_insert", 1), ("second_insert", 2)] {
+        let runtime = Runtime::new(StrictBackend::new());
+        let root = runtime.backend_mut().create_element(Tag::Button);
+        let tail = {
+            let node = runtime.backend_mut().create_text("Tail");
+            runtime.backend_mut().insert_before(&root, &node, None);
+            node
+        };
+        match arm {
+            0 => runtime.backend().panic_anchor_after(2),
+            1 => runtime.backend().panic_inserts_after(1, 1),
+            2 => runtime.backend().panic_inserts_after(2, 1),
+            _ => unreachable!(),
+        }
+        let failure = catch_unwind(AssertUnwindSafe(|| {
+            let _ = RangeAnchor::create(&runtime, &root, Some(&tail));
+        }));
+        let payload = failure.expect_err("anchor creation must fail");
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|value| (*value).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        assert!(
+            message.contains("injected"),
+            "{label}: unexpected payload {message}"
+        );
+        assert_eq!(
+            runtime.backend().inner().dom_snapshot().nodes.len(),
+            2,
+            "{label}: partial anchors are released and static nodes remain"
+        );
+        assert_eq!(
+            runtime.backend().inner().text_content(&root).as_deref(),
+            Some("Tail")
+        );
+    }
+}
+
+/// RangeAnchor move_before ignores a start self-reference, rejects end or
+/// external-node references before mutation, and still moves normally.
+/// RangeAnchor move_before 对 start 自引用 no-op，在变更前拒绝 end 或外部节点
+/// 引用，并保持正常移动。
+#[test]
+fn range_anchor_move_before_reference_contract() {
+    let runtime = Runtime::new(StrictBackend::new());
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let prefix = {
+        let node = runtime.backend_mut().create_text("P");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    let middle = {
+        let node = runtime.backend_mut().create_text("M");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    let anchor = RangeAnchor::create(&runtime, &root, Some(&middle));
+    let external = runtime.backend_mut().create_text("X");
+    anchor.insert(&runtime, &root, &external);
+    let tail = {
+        let node = runtime.backend_mut().create_text("T");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    assert_eq!(
+        runtime.backend().inner().text_content(&root).as_deref(),
+        Some("PXMT")
+    );
+    let baseline = runtime.backend().inner().dom_snapshot().nodes.len();
+
+    let before_start = runtime.backend().inner().operations().len();
+    anchor.move_before(&runtime, &root, &[external], Some(anchor.start()));
+    assert_eq!(
+        runtime.backend().inner().operations().len(),
+        before_start,
+        "a start self-reference is a zero-operation no-op"
+    );
+
+    for (label, reference) in [("end", anchor.end()), ("external", &external)] {
+        let before = runtime.backend().inner().operations().len();
+        let failure = catch_unwind(AssertUnwindSafe(|| {
+            anchor.move_before(&runtime, &root, &[external], Some(reference));
+        }));
+        let payload = failure.expect_err("inside-range reference must be rejected");
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|value| (*value).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        assert!(
+            message.contains("must not be inside the moving range"),
+            "{label}: unexpected payload {message}"
+        );
+        assert_eq!(
+            runtime.backend().inner().operations().len(),
+            before,
+            "{label}: rejection performs no backend operations"
+        );
+        assert_eq!(
+            runtime.backend().inner().text_content(&root).as_deref(),
+            Some("PXMT")
+        );
+    }
+
+    let before_move = runtime.backend().inner().operations().len();
+    anchor.move_before(&runtime, &root, &[external], Some(&tail));
+    assert!(
+        runtime.backend().inner().operations().len() > before_move,
+        "normal movement still emits backend operations"
+    );
+    assert_eq!(
+        runtime.backend().inner().text_content(&root).as_deref(),
+        Some("PMXT")
+    );
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot().nodes.len(),
+        baseline
+    );
+    let ids: Vec<_> = [prefix, middle, tail]
+        .iter()
+        .map(|node| format!("node-{}", node.0))
+        .collect();
+    let snapshot = runtime.backend().inner().dom_snapshot();
+    for id in ids {
+        assert!(snapshot.nodes.iter().any(|node| node.id == id));
+    }
+}
+
+/// Nested Show inside a keyed item uses a scoped context and cannot mutate the
+/// retained host or sibling nodes.
+/// keyed 条目内的嵌套 Show 使用受限上下文，不能修改保留的宿主或兄弟节点。
+#[test]
+fn keyed_for_nested_show_scope_rejects_foreign_mutation() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let host_tail = tail;
+    let list = {
+        let read_items = items.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/nested-scope",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                if key.as_str() == "a" {
+                    let item = context.create_element(Tag::Button);
+                    let value = context.create_text("a");
+                    context.insert_before(&item, &value, None);
+                    return vec![item];
+                }
+                let item = context.create_element(Tag::Button);
+                if key.as_str() == "b" {
+                    context.show(
+                        &item,
+                        None,
+                        "keyed/nested-scope/show",
+                        || true,
+                        move |nested| {
+                            nested.set_text(&host_tail, "hacked");
+                            nested.create_text("never")
+                        },
+                    );
+                } else {
+                    let value = context.create_text(key);
+                    context.insert_before(&item, &value, None);
+                }
+                vec![item]
+            },
+        )
+    };
+    let baseline = runtime.backend().dom_snapshot().nodes.len();
+    let failure = catch_unwind(AssertUnwindSafe(|| items.set(keys(&["a", "b"]))));
+    let payload = failure.expect_err("foreign nested mutation must panic");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert!(
+        message.contains("ForShowContext mutations must target nodes created by this nested range"),
+        "unexpected payload: {message}"
+    );
+    assert_eq!(list.keys(), keys(&["a"]));
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("aTail")
+    );
+    assert_eq!(runtime.backend().dom_snapshot().nodes.len(), baseline);
+    assert_eq!(runtime.backend().listener_count(), 0);
+
+    items.set(keys(&["a", "c"]));
+    assert_eq!(list.keys(), keys(&["a", "c"]));
+    list.dispose();
+    assert_eq!(runtime.backend().dom_snapshot().nodes.len(), 2);
 }

@@ -69,6 +69,14 @@ impl ForError {
             index,
         }
     }
+
+    fn shared_node() -> Self {
+        Self {
+            code: "UI_FOR_SHARED_NODE".to_owned(),
+            message: "the same external node was returned by more than one key".to_owned(),
+            index: 0,
+        }
+    }
 }
 
 impl fmt::Display for ForError {
@@ -146,6 +154,148 @@ impl<B: DomBackend + 'static> fmt::Debug for ForEffectContext<B> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ForEffectContext")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Item-scoped context for a nested Show inside a keyed item.
+/// keyed 条目内嵌套 Show 使用的条目作用域上下文。
+///
+/// It exposes only nodes created by this nested mount and never exposes a raw
+/// runtime or backend borrow.
+/// 它只暴露本次嵌套挂载创建的节点，绝不暴露原始 Runtime 或后端借用。
+pub struct ForShowContext<'a, B: DomBackend + 'static> {
+    inner: &'a mut ShowContext<B>,
+    runtime: Runtime<B>,
+    owned: Rc<std::cell::RefCell<Vec<B::Node>>>,
+}
+
+impl<'a, B: DomBackend + 'static> ForShowContext<'a, B> {
+    fn new(inner: &'a mut ShowContext<B>) -> Self {
+        let runtime = inner.runtime().clone();
+        Self {
+            inner,
+            runtime,
+            owned: Rc::new(std::cell::RefCell::new(Vec::new())),
+        }
+    }
+
+    fn assert_owned(&self, node: &B::Node) {
+        assert!(
+            self.owned.borrow().iter().any(|owned| owned == node),
+            "ForShowContext mutations must target nodes created by this nested range"
+        );
+    }
+
+    /// Creates a tracked element node.
+    /// 创建一个受跟踪的元素节点。
+    pub fn create_element(&mut self, tag: Tag) -> B::Node {
+        let node = self.inner.create_element(tag);
+        self.owned.borrow_mut().push(node.clone());
+        node
+    }
+
+    /// Creates a tracked text node.
+    /// 创建一个受跟踪的文本节点。
+    pub fn create_text(&mut self, value: &str) -> B::Node {
+        let node = self.inner.create_text(value);
+        self.owned.borrow_mut().push(node.clone());
+        node
+    }
+
+    /// Creates a tracked anchor node.
+    /// 创建一个受跟踪的锚点节点。
+    pub fn create_anchor(&mut self) -> B::Node {
+        let node = self.inner.create_anchor();
+        self.owned.borrow_mut().push(node.clone());
+        node
+    }
+
+    /// Inserts a nested-range-created node before another nested-range node.
+    /// 把一个嵌套范围创建节点插入到另一个嵌套范围节点之前。
+    pub fn insert_before(&mut self, parent: &B::Node, child: &B::Node, before: Option<&B::Node>) {
+        self.assert_owned(parent);
+        self.assert_owned(child);
+        if let Some(before) = before {
+            self.assert_owned(before);
+        }
+        self.inner.insert_before(parent, child, before);
+    }
+
+    /// Sets or removes an attribute on a nested-range-created element.
+    /// 在嵌套范围创建的元素上设置或移除属性。
+    pub fn set_attribute(&mut self, node: &B::Node, attribute: Attribute, value: Option<&str>) {
+        self.assert_owned(node);
+        self.inner.set_attribute(node, attribute, value);
+    }
+
+    /// Replaces a nested-range-created text node.
+    /// 替换嵌套范围创建的文本节点。
+    pub fn set_text(&mut self, node: &B::Node, value: &str) {
+        self.assert_owned(node);
+        self.inner.set_text(node, value);
+    }
+
+    /// Registers a listener on a nested-range-created node.
+    /// 在嵌套范围创建的节点上注册监听。
+    pub fn listen(
+        &mut self,
+        node: &B::Node,
+        event: EventKind,
+        callback: impl FnMut(Event, &mut EventContext) + 'static,
+    ) {
+        self.assert_owned(node);
+        self.inner.listen(node, event, callback);
+    }
+
+    /// Mounts a further nested Show with the same item-scoped restrictions.
+    /// 以相同的条目作用域限制挂载更深一层的嵌套 Show。
+    pub fn show<C, F>(
+        &mut self,
+        parent: &B::Node,
+        before: Option<&B::Node>,
+        name: &str,
+        condition: C,
+        mut content: F,
+    ) -> Show<B>
+    where
+        C: Fn() -> bool + 'static,
+        F: FnMut(&mut ForShowContext<'_, B>) -> B::Node + 'static,
+    {
+        self.assert_owned(parent);
+        if let Some(before) = before {
+            self.assert_owned(before);
+        }
+        self.inner
+            .show(parent, before, name, condition, move |inner| {
+                let mut context = ForShowContext::new(inner);
+                content(&mut context)
+            })
+    }
+
+    /// Registers a nested-range effect with only nested-range-owned mutations.
+    /// 注册只允许修改嵌套范围节点的 Effect。
+    pub fn effect(
+        &mut self,
+        name: &str,
+        mut callback: impl FnMut(&mut ForEffectContext<B>) + 'static,
+    ) {
+        let runtime = self.runtime.clone();
+        let owned = Rc::clone(&self.owned);
+        self.inner.effect(name, move |_context| {
+            let mut effect = ForEffectContext {
+                runtime: runtime.clone(),
+                owned: Rc::clone(&owned),
+            };
+            callback(&mut effect);
+        });
+    }
+}
+
+impl<B: DomBackend + 'static> fmt::Debug for ForShowContext<'_, B> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ForShowContext")
             .finish_non_exhaustive()
     }
 }
@@ -290,17 +440,21 @@ impl<B: DomBackend + 'static> ForContext<B> {
         before: Option<&B::Node>,
         name: &str,
         condition: C,
-        content: F,
+        mut content: F,
     ) -> Show<B>
     where
         C: Fn() -> bool + 'static,
-        F: FnMut(&mut ShowContext<B>) -> B::Node + 'static,
+        F: FnMut(&mut ForShowContext<'_, B>) -> B::Node + 'static,
     {
         self.assert_owned(parent);
         if let Some(before) = before {
             self.assert_owned(before);
         }
-        self.inner.show(parent, before, name, condition, content)
+        self.inner
+            .show(parent, before, name, condition, move |inner| {
+                let mut context = ForShowContext::new(inner);
+                content(&mut context)
+            })
     }
 }
 
@@ -335,6 +489,34 @@ impl<B: DomBackend + 'static, K> ForEntry<B, K> {
         if let Some(payload) = terminate_owner_and_nodes(owner, nodes, runtime, None) {
             resume_unwind(payload);
         }
+    }
+
+    /// Rejects one staged entry without releasing nodes still owned elsewhere.
+    /// 拒绝一个暂存条目，同时不释放仍由其它条目拥有的节点。
+    fn dispose_rejected(
+        self,
+        runtime: &Runtime<B>,
+        existing_nodes: &[B::Node],
+        claimed: &mut Vec<B::Node>,
+        first_panic: Option<Box<dyn std::any::Any + Send>>,
+    ) -> Option<Box<dyn std::any::Any + Send>> {
+        let ForEntry {
+            owner,
+            nodes: returned_nodes,
+            created,
+            ..
+        } = self;
+        let mut nodes = created;
+        for node in returned_nodes {
+            if existing_nodes.iter().any(|existing| existing == &node)
+                || claimed.iter().any(|claimed| claimed == &node)
+            {
+                continue;
+            }
+            claimed.push(node.clone());
+            nodes.push(node);
+        }
+        terminate_owner_and_nodes(owner, nodes, runtime, first_panic)
     }
 
     /// Moves the complete item range before one reference node.
@@ -456,15 +638,25 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> For<B, 
                 move |_context, runtime| {
                     let mut state = effect_state.borrow_mut();
                     let update = catch_unwind(AssertUnwindSafe(|| state.update(runtime)));
-                    if state.dispose_requested.get() {
-                        state.request_terminal();
-                    }
+                    let terminal = if state.dispose_requested.get() {
+                        catch_unwind(AssertUnwindSafe(|| state.request_terminal())).err()
+                    } else {
+                        None
+                    };
                     let dispose_control = state.take_control_dispose_pending();
                     drop(state);
-                    if dispose_control {
-                        effect_control.dispose();
-                    }
+                    let control_panic = if dispose_control {
+                        catch_unwind(AssertUnwindSafe(|| effect_control.dispose())).err()
+                    } else {
+                        None
+                    };
                     if let Err(payload) = update {
+                        resume_unwind(payload);
+                    }
+                    if let Some(payload) = terminal {
+                        resume_unwind(payload);
+                    }
+                    if let Some(payload) = control_panic {
                         resume_unwind(payload);
                     }
                 },
@@ -497,7 +689,9 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> For<B, 
         }
 
         let cleanup_state = SendWrapper::new(Rc::downgrade(&state));
+        let cleanup_request = SendWrapper::new(Rc::clone(&dispose_requested));
         control.register_cleanup(move || {
+            cleanup_request.set(true);
             if let Some(state) = cleanup_state.upgrade()
                 && let Ok(mut state) = state.try_borrow_mut()
             {
@@ -632,6 +826,20 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
         }
     }
 
+    /// Collects every node owned by committed entries.
+    /// 收集已提交条目拥有的全部节点。
+    fn committed_nodes(&self) -> Vec<B::Node> {
+        let mut nodes = Vec::new();
+        for entry in &self.entries {
+            for node in entry.created.iter().chain(&entry.nodes) {
+                if !nodes.iter().any(|current| current == node) {
+                    nodes.push(node.clone());
+                }
+            }
+        }
+        nodes
+    }
+
     /// Reuses retained ranges, creates only new keys, and moves whole ranges.
     /// 复用保留范围，只创建新 key，并整体移动范围。
     fn reconcile(&mut self, new_keys: Vec<K>, runtime: &mut Runtime<B>) {
@@ -678,24 +886,166 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
             }
         }));
         if let Err(payload) = build {
+            let existing_nodes = self.committed_nodes();
+            let mut first_panic: Option<Box<dyn std::any::Any + Send>> = Some(payload);
+            let mut claimed = Vec::new();
             for entry in built.into_iter().flatten() {
-                entry.dispose(runtime);
+                first_panic =
+                    entry.dispose_rejected(runtime, &existing_nodes, &mut claimed, first_panic);
             }
             if self.dispose_requested.get() {
-                self.request_terminal();
+                let terminal = catch_unwind(AssertUnwindSafe(|| self.request_terminal())).err();
+                if first_panic.is_none() {
+                    first_panic = terminal;
+                }
             }
-            resume_unwind(payload);
+            if let Some(payload) = first_panic {
+                resume_unwind(payload);
+            }
+            return;
         }
         if self.dispose_requested.get() {
+            let existing_nodes = self.committed_nodes();
+            let mut first_panic = None;
+            let mut claimed = Vec::new();
             for entry in built.into_iter().flatten() {
-                entry.dispose(runtime);
+                first_panic =
+                    entry.dispose_rejected(runtime, &existing_nodes, &mut claimed, first_panic);
             }
-            self.request_terminal();
+            let terminal = catch_unwind(AssertUnwindSafe(|| self.request_terminal())).err();
+            if first_panic.is_none() {
+                first_panic = terminal;
+            }
+            if let Some(payload) = first_panic {
+                resume_unwind(payload);
+            }
             return;
         }
 
-        // Commit: release removed entries in old order, then reuse the rest.
-        // 提交：按旧顺序释放被移除条目，然后复用其余条目。
+        let existing_nodes = self.committed_nodes();
+        let mut staging_nodes: Vec<(B::Node, usize)> = Vec::new();
+        let mut shared_node = false;
+        for (index, entry) in built.iter().enumerate() {
+            let Some(entry) = entry else {
+                continue;
+            };
+            let mut owned = entry.created.clone();
+            owned.extend(entry.nodes.iter().cloned());
+            let mut in_entry: Vec<B::Node> = Vec::new();
+            for node in owned {
+                if in_entry.iter().any(|current| current == &node) {
+                    continue;
+                }
+                if existing_nodes.iter().any(|existing| existing == &node)
+                    || staging_nodes
+                        .iter()
+                        .any(|(staged, owner)| staged == &node && *owner != index)
+                {
+                    shared_node = true;
+                    break;
+                }
+                in_entry.push(node.clone());
+                if !staging_nodes.iter().any(|(staged, _)| staged == &node) {
+                    staging_nodes.push((node, index));
+                }
+            }
+            if shared_node {
+                break;
+            }
+        }
+        if shared_node {
+            let mut first_panic = None;
+            let mut claimed = Vec::new();
+            for entry in built.into_iter().flatten() {
+                first_panic =
+                    entry.dispose_rejected(runtime, &existing_nodes, &mut claimed, first_panic);
+            }
+            self.last_error = Some(ForError::shared_node());
+            if self.dispose_requested.get() {
+                let terminal = catch_unwind(AssertUnwindSafe(|| self.request_terminal())).err();
+                if first_panic.is_none() {
+                    first_panic = terminal;
+                }
+            }
+            if let Some(payload) = first_panic {
+                resume_unwind(payload);
+            }
+            return;
+        }
+
+        // Keep the committed entries in place until placement succeeds. A
+        // backend panic can then restore the old middle order and keep the
+        // committed keys unchanged.
+        // 在放置成功前保持已提交条目原位。后端 panic 时即可恢复旧中段顺序，
+        // 并保持已提交 key 不变。
+        let mut source: Vec<Option<usize>> = Vec::with_capacity(new_mid.len());
+        for (mid_index, key) in new_mid.iter().enumerate() {
+            if built[mid_index].is_some() {
+                source.push(None);
+            } else {
+                let absolute = (prefix..old_len - suffix)
+                    .find(|index| &self.entries[*index].key == key)
+                    .expect("a retained key must keep its range");
+                source.push(Some(absolute));
+            }
+        }
+        let old_positions: Vec<Option<usize>> = source
+            .iter()
+            .map(|absolute| absolute.map(|absolute| absolute - prefix))
+            .collect();
+        let sequence: Vec<usize> = old_positions
+            .iter()
+            .map(|position| position.map_or(0, |old_index| old_index + 1))
+            .collect();
+        let stable = stable_subsequence(&sequence);
+
+        let place = catch_unwind(AssertUnwindSafe(|| {
+            let mut reference = if suffix > 0 {
+                self.entries[old_len - suffix].anchors.start().clone()
+            } else {
+                self.anchors.end().clone()
+            };
+            for index in (0..new_mid.len()).rev() {
+                let entry = match source[index] {
+                    Some(absolute) => &self.entries[absolute],
+                    None => built[index].as_ref().expect("built entry must exist"),
+                };
+                if source[index].is_none() || !stable[index] {
+                    entry.move_before(runtime, &self.parent, &reference);
+                }
+                reference = entry.anchors.start().clone();
+            }
+        }));
+
+        if let Err(payload) = place {
+            let rollback = catch_unwind(AssertUnwindSafe(|| {
+                let mut reference = if suffix > 0 {
+                    self.entries[old_len - suffix].anchors.start().clone()
+                } else {
+                    self.anchors.end().clone()
+                };
+                for absolute in (prefix..old_len - suffix).rev() {
+                    let entry = &self.entries[absolute];
+                    entry.move_before(runtime, &self.parent, &reference);
+                    reference = entry.anchors.start().clone();
+                }
+            }));
+            let mut first_panic: Option<Box<dyn std::any::Any + Send>> = Some(payload);
+            for entry in built.into_iter().flatten() {
+                first_panic = entry.dispose_rejected(runtime, &[], &mut Vec::new(), first_panic);
+            }
+            if self.dispose_requested.get() || rollback.is_err() {
+                let terminal = catch_unwind(AssertUnwindSafe(|| self.request_terminal())).err();
+                if first_panic.is_none() {
+                    first_panic = terminal;
+                }
+            }
+            if let Some(payload) = first_panic {
+                resume_unwind(payload);
+            }
+            return;
+        }
+
         let old_entries = std::mem::take(&mut self.entries);
         let mut old_iter = old_entries.into_iter();
         let prefix_entries: Vec<_> = old_iter.by_ref().take(prefix).collect();
@@ -713,21 +1063,16 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
         }
 
         let mut middle_final = Vec::with_capacity(new_mid.len());
-        let mut old_positions = Vec::with_capacity(new_mid.len());
         let mut built_iter = built.into_iter();
         for key in new_mid {
             match built_iter.next().flatten() {
-                Some(entry) => {
-                    middle_final.push(entry);
-                    old_positions.push(None);
-                }
-                None => {
-                    let (old_index, entry) = retained
+                Some(entry) => middle_final.push(entry),
+                None => middle_final.push(
+                    retained
                         .remove(key)
-                        .expect("a retained key must keep its range");
-                    middle_final.push(entry);
-                    old_positions.push(Some(old_index));
-                }
+                        .expect("a retained key must keep its range")
+                        .1,
+                ),
             }
         }
         debug_assert!(retained.is_empty(), "all requested keys are resolved");
@@ -744,66 +1089,21 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
             self.entries = prefix_entries;
             self.entries.extend(middle_final);
             self.entries.extend(suffix_entries);
-            self.request_terminal();
+            let terminal = catch_unwind(AssertUnwindSafe(|| self.request_terminal())).err();
+            if first_panic.is_none() {
+                first_panic = terminal;
+            }
             if let Some(payload) = first_panic {
                 resume_unwind(payload);
             }
             return;
         }
-
-        // Keep the longest increasing subsequence of retained old positions in
-        // place and move only the remaining ranges. This is the same stable
-        // subsequence idea as Vue 3's keyed patch (MIT, vuejs/core commit
-        // ff3501429d4970c37194708b055492a56d9e5be5,
-        // packages/runtime-core/src/renderer.ts); new nodes use the 0 sentinel.
-        // 保留旧位置最长递增子序列中的范围，只移动其余范围。这与 Vue 3 keyed
-        // patch 的稳定子序列思路一致（MIT，vuejs/core 提交
-        // ff3501429d4970c37194708b055492a56d9e5be5，
-        // packages/runtime-core/src/renderer.ts）；新节点使用 0 哨兵。
-        let sequence: Vec<usize> = old_positions
-            .iter()
-            .map(|position| position.map_or(0, |old_index| old_index + 1))
-            .collect();
-        let stable = stable_subsequence(&sequence);
-
-        // Reposition from right to left. Stable retained ranges keep their DOM
-        // position; new or unstable ranges move before the next final item.
-        // Prefix and suffix ranges never move.
-        // 从右向左重排。稳定的保留范围保持 DOM 位置；新范围或不稳定范围移动到
-        // 下一个最终条目之前。前后两段绝不移动。
-        let commit = catch_unwind(AssertUnwindSafe(|| {
-            let mut reference = suffix_entries
-                .first()
-                .map(|entry| entry.anchors.start().clone())
-                .unwrap_or_else(|| self.anchors.end().clone());
-            for index in (0..middle_final.len()).rev() {
-                let entry = &middle_final[index];
-                if old_positions[index].is_none() || !stable[index] {
-                    entry.move_before(runtime, &self.parent, &reference);
-                }
-                reference = entry.anchors.start().clone();
-            }
-        }));
-
         self.entries = prefix_entries;
         self.entries.extend(middle_final);
         self.entries.extend(suffix_entries);
-        if self.dispose_requested.get() {
-            self.request_terminal();
-            if let Some(payload) = first_panic {
-                resume_unwind(payload);
-            }
-            if let Err(payload) = commit {
-                resume_unwind(payload);
-            }
-            return;
-        }
         self.last_keys = Some(new_keys);
         self.last_error = None;
         if let Some(payload) = first_panic {
-            resume_unwind(payload);
-        }
-        if let Err(payload) = commit {
             resume_unwind(payload);
         }
     }

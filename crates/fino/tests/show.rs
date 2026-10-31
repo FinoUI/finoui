@@ -1018,3 +1018,74 @@ fn show_builder_panic_wins_over_owner_cleanup_panic() {
         "the failed content effect is inactive"
     );
 }
+
+/// Disposing the parent owner from a Show content builder is recorded and
+/// completes terminal range and anchor cleanup.
+/// 在 Show 内容构建器内释放父 Owner 会被记录，并完成范围与锚点终止清理。
+#[test]
+fn show_parent_owner_dispose_in_content_builder_is_terminal() {
+    let runtime = Runtime::new(MockBackend::new());
+    let signals_owner = runtime.create_owner();
+    let parent_owner = runtime.create_owner();
+    let visible = signals_owner.signal_named("show/parent-dispose", false);
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let show = {
+        let visible = visible.clone();
+        let parent = parent_owner.clone();
+        Show::mount(
+            &runtime,
+            &parent_owner,
+            &root,
+            Some(&tail),
+            "show/parent-dispose",
+            move || visible.get(),
+            move |context: &mut ShowContext<MockBackend>| {
+                parent.dispose();
+                context.create_element(Tag::Button)
+            },
+        )
+    };
+    visible.set(true);
+
+    assert!(!show.is_mounted());
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "content and anchors are released after the parent request"
+    );
+    assert!(
+        signals_owner
+            .snapshot()
+            .effects
+            .iter()
+            .all(|effect| !effect.active)
+    );
+    let after_dispose = runtime.backend().operations().len();
+    visible.set(false);
+    show.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+}
+
+/// Standalone ShowContext keeps its public runtime accessor for downstream code.
+/// 独立 ShowContext 保留公开 runtime 访问器，供下游代码使用。
+#[test]
+fn standalone_show_context_runtime_remains_public() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let show = Show::mount(
+        &runtime,
+        &owner,
+        &root,
+        Some(&tail),
+        "show/public-runtime",
+        || true,
+        |context: &mut ShowContext<MockBackend>| {
+            assert_eq!(context.runtime().backend().listener_count(), 0);
+            context.create_element(Tag::Button)
+        },
+    );
+    assert!(show.is_mounted());
+}

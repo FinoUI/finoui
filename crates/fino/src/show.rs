@@ -40,12 +40,30 @@ impl<B: DomBackend> Clone for RangeAnchor<B> {
 impl<B: DomBackend + 'static> RangeAnchor<B> {
     /// Creates the anchor pair and inserts it before an optional stable sibling.
     /// 创建锚点对，并把它插入到可选稳定兄弟节点之前。
+    ///
+    /// If creation or either insertion panics, already-created anchors are
+    /// released and the original panic is preserved; static siblings are never
+    /// released.
+    /// 若创建或任一插入 panic，已创建锚点会被释放并保留原始 panic；静态兄弟
+    /// 绝不释放。
     pub fn create(runtime: &Runtime<B>, parent: &B::Node, before: Option<&B::Node>) -> Self {
-        let start = runtime.backend_mut().create_anchor();
-        let end = runtime.backend_mut().create_anchor();
-        runtime.backend_mut().insert_before(parent, &start, before);
-        runtime.backend_mut().insert_before(parent, &end, before);
-        Self { start, end }
+        let mut created = Vec::new();
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let start = runtime.backend_mut().create_anchor();
+            created.push(start.clone());
+            let end = runtime.backend_mut().create_anchor();
+            created.push(end.clone());
+            runtime.backend_mut().insert_before(parent, &start, before);
+            runtime.backend_mut().insert_before(parent, &end, before);
+            (start, end)
+        }));
+        match outcome {
+            Ok((start, end)) => Self { start, end },
+            Err(payload) => {
+                release_after_detach(runtime, &created);
+                resume_unwind(payload);
+            }
+        }
     }
 
     /// Returns the first anchor that starts the dynamic range.
@@ -80,6 +98,12 @@ impl<B: DomBackend + 'static> RangeAnchor<B> {
     /// Moving every external node in order keeps the range contiguous without
     /// clearing the parent or recreating children.
     /// 按顺序移动每个外部节点，使范围保持连续，同时不清空父节点或重建子节点。
+    ///
+    /// A reference equal to the start anchor is a no-op. A reference equal to
+    /// the end anchor or any top-level range node is rejected before the first
+    /// backend operation.
+    /// 参考节点等于起始锚点时 no-op；等于结束锚点或任一范围顶层节点时，会在
+    /// 首次后端操作前被拒绝。
     pub fn move_before(
         &self,
         runtime: &Runtime<B>,
@@ -87,6 +111,15 @@ impl<B: DomBackend + 'static> RangeAnchor<B> {
         nodes: &[B::Node],
         before: Option<&B::Node>,
     ) {
+        if before == Some(&self.start) {
+            return;
+        }
+        if let Some(before) = before {
+            assert!(
+                before != &self.end && !nodes.iter().any(|node| node == before),
+                "RangeAnchor move reference must not be inside the moving range"
+            );
+        }
         runtime
             .backend_mut()
             .insert_before(parent, &self.start, before);
@@ -198,9 +231,15 @@ impl<B: DomBackend + 'static> ShowContext<B> {
         std::mem::take(&mut self.created)
     }
 
-    /// Returns the shared runtime for crate-internal range assembly.
-    /// 返回 crate 内部范围组装使用的共享 Runtime。
-    pub(crate) fn runtime(&self) -> &Runtime<B> {
+    /// Returns the shared runtime for standalone Show content construction.
+    /// 返回独立 Show 内容构建使用的共享 Runtime。
+    ///
+    /// Nodes created directly through this runtime are not tracked by the mount
+    /// transaction; prefer the context creation methods. Keyed nested Show uses
+    /// a scoped wrapper that does not expose this accessor.
+    /// 直接通过该 Runtime 创建的节点不参与挂载事务跟踪；优先使用上下文创建
+    /// 方法。keyed 嵌套 Show 使用不暴露该访问器的受限包装类型。
+    pub fn runtime(&self) -> &Runtime<B> {
         &self.runtime
     }
 
@@ -398,15 +437,25 @@ impl<B: DomBackend + 'static> Show<B> {
                 move |_context, runtime| {
                     let mut state = effect_state.borrow_mut();
                     let update = catch_unwind(AssertUnwindSafe(|| state.update(runtime)));
-                    if state.dispose_requested.get() {
-                        state.request_terminal();
-                    }
+                    let terminal = if state.dispose_requested.get() {
+                        catch_unwind(AssertUnwindSafe(|| state.request_terminal())).err()
+                    } else {
+                        None
+                    };
                     let dispose_control = state.take_control_dispose_pending();
                     drop(state);
-                    if dispose_control {
-                        effect_control.dispose();
-                    }
+                    let control_panic = if dispose_control {
+                        catch_unwind(AssertUnwindSafe(|| effect_control.dispose())).err()
+                    } else {
+                        None
+                    };
                     if let Err(payload) = update {
+                        resume_unwind(payload);
+                    }
+                    if let Some(payload) = terminal {
+                        resume_unwind(payload);
+                    }
+                    if let Some(payload) = control_panic {
                         resume_unwind(payload);
                     }
                 },
@@ -432,7 +481,9 @@ impl<B: DomBackend + 'static> Show<B> {
         }
 
         let cleanup_state = SendWrapper::new(Rc::downgrade(&state));
+        let cleanup_request = SendWrapper::new(Rc::clone(&dispose_requested));
         control.register_cleanup(move || {
+            cleanup_request.set(true);
             if let Some(state) = cleanup_state.upgrade()
                 && let Ok(mut state) = state.try_borrow_mut()
             {
