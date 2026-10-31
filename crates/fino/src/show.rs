@@ -733,29 +733,36 @@ impl<B: DomBackend + 'static> ShowState<B> {
         }
         let owner = self.control.child();
         let mut context = ShowContext::new(runtime.clone(), owner.clone());
+        let mut returned = Vec::new();
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            let nodes = with_owner(&owner, || (self.content)(&mut context));
-            for node in &nodes {
+            returned = with_owner(&owner, || (self.content)(&mut context));
+            for node in &returned {
                 self.anchors.insert(runtime, &self.parent, node);
             }
-            nodes
         }));
         match outcome {
-            Ok(nodes) => {
+            Ok(()) => {
                 let created = std::mem::take(&mut context.created);
                 self.active = Some(ActiveRange {
                     owner,
-                    nodes,
+                    nodes: std::mem::take(&mut returned),
                     created,
                 });
             }
             Err(payload) => {
-                let created = std::mem::take(&mut context.created);
+                let mut nodes = std::mem::take(&mut context.created);
+                nodes.extend(std::mem::take(&mut returned));
+                let mut unique: Vec<B::Node> = Vec::new();
+                for node in nodes {
+                    if !unique.iter().any(|current| current == &node) {
+                        unique.push(node);
+                    }
+                }
                 if let Some(observer) = &self.release_observer {
-                    observer(&created);
+                    observer(&unique);
                 }
                 if let Some(payload) =
-                    terminate_owner_and_nodes(owner, created, runtime, Some(payload))
+                    terminate_owner_and_nodes(owner, unique, runtime, Some(payload))
                 {
                     resume_unwind(payload);
                 }

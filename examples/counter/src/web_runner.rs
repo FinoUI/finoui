@@ -231,6 +231,50 @@ pub fn run_keyed_conformance_probe() -> Result<String, JsValue> {
         .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))
 }
 
+/// Web node identity probe: clones keep their record id before and after release.
+/// Web 节点标识探针：clone 在释放前后保持同一记录标识。
+#[derive(Serialize)]
+struct WebIdentityProbe {
+    schema: u32,
+    before: Option<u64>,
+    clone_identity: Option<u64>,
+    after_release: Option<u64>,
+    next: Option<u64>,
+    stable: bool,
+    next_distinct: bool,
+}
+
+/// Proves WebNode identity is stable across clones and release without lookups scanning.
+/// 验证 WebNode 标识在 clone 与释放后保持稳定，且标识查询不扫描节点记录。
+#[wasm_bindgen]
+pub fn run_web_identity_probe(release: bool) -> Result<String, JsValue> {
+    let mut backend = DomBackend::new();
+    let node = backend.create_element(Tag::Button);
+    let clone = node.clone();
+    let before = backend.node_identity(&node);
+    let clone_identity = backend.node_identity(&clone);
+    let after_release = if release {
+        backend.release(&node);
+        backend.node_identity(&clone)
+    } else {
+        None
+    };
+    let next = backend.create_element(Tag::Button);
+    let next = backend.node_identity(&next);
+    let stable =
+        before.is_some() && before == clone_identity && (!release || after_release == before);
+    serde_json::to_string(&WebIdentityProbe {
+        schema: 1,
+        before,
+        clone_identity,
+        after_release,
+        next,
+        stable,
+        next_distinct: next != before,
+    })
+    .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))
+}
+
 /// Whether an anchor is rejected as a text target while a real text node is accepted.
 /// 锚点是否被拒绝作为文本目标，而真实文本节点被接受。
 #[derive(Serialize)]

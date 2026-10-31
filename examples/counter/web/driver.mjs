@@ -257,6 +257,12 @@ try {
       window.__finoInsertBeforeCalls += 1;
       return insertBefore.call(this, child, reference);
     };
+    window.__finoIsSameNodeCalls = 0;
+    const isSameNode = Node.prototype.isSameNode;
+    Node.prototype.isSameNode = function (other) {
+      window.__finoIsSameNodeCalls += 1;
+      return isSameNode.call(this, other);
+    };
   });
 
   await page.goto(`${origin}/index.html`);
@@ -747,6 +753,25 @@ try {
     assertEqual(cleared.empty, 0, 'clearing releases every row');
     assertEqual(cleared.innerHtmlSets, 0, 'clearing never assigns innerHTML');
     assertEqual(pageErrors.length, 0, 'keyed identity page errors');
+  });
+
+  await runCheck('web_node_identity_is_stable_and_scan_free', async () => {
+    const beforeLookup = await page.evaluate(() => window.__finoIsSameNodeCalls);
+    const lookup = JSON.parse(
+      await page.evaluate(() => window.fino.run_web_identity_probe(false)),
+    );
+    const afterLookup = await page.evaluate(() => window.__finoIsSameNodeCalls);
+    assertEqual(lookup.schema, 1, 'identity lookup schema');
+    assert(lookup.stable, 'clone keeps the stable record identity');
+    assert(lookup.next_distinct, 'new nodes receive distinct identities');
+    assertEqual(afterLookup - beforeLookup, 0, 'identity lookup performs no isSameNode scan');
+
+    const released = JSON.parse(
+      await page.evaluate(() => window.fino.run_web_identity_probe(true)),
+    );
+    assert(released.stable, 'identity stays stable after release');
+    assertEqual(released.after_release, released.before, 'released clone keeps its id');
+    assert(released.next_distinct, 'released ids are never reused');
   });
 
   await runCheck('anchor_nodes_reject_text_writes', async () => {

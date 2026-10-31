@@ -115,6 +115,7 @@ let details = Show::mount(
 - A first-run condition or content panic during `Show::mount` releases the Show anchors and owner before rethrowing; a later transition panic keeps the anchors and active condition effect for retry.
 - `Show::dispose` also records a request while the condition effect or content cleanup owns the state, then releases the range and anchors at the next safe point and disposes the control owner after the borrow. Parent-owner cleanup follows the same pending-request path.
 - `Show` content-owner cleanup panics do not prevent node release or terminal anchor cleanup. The first payload is preserved, and repeated disposal remains idempotent.
+- If a multi-node Show content builder inserts some external returned nodes before a later insertion panics, rollback detaches and releases the created plus returned nodes once each (including duplicates and overlaps), preserves the first payload, and notifies the keyed release observer with the same actual released set.
 - The anchors are created once and stay stable. Static siblings and their `NodeId`s are never replaced.
 - The condition effect creates a child owner and content only on a real `false → true` transition; equal writes are no-ops.
 - On `true → false`, the child owner is disposed first, which stops event dispatch and releases effects and listeners, then the range is released from the parent.
@@ -216,7 +217,7 @@ pub trait DomBackend {
 }
 ```
 
-This is a semantic interface, not an implementation of the full DOM standard. In the first version, `Tag`, `Attribute`, and `StyleProperty` are closed enums. String extensions are reserved for explicitly permitted custom attributes. `node_identity` is an optional stable backend identity for O(1) ownership indexes; its default `None` keeps legacy backends on `Eq` fallback.
+This is a semantic interface, not an implementation of the full DOM standard. In the first version, `Tag`, `Attribute`, and `StyleProperty` are closed enums. String extensions are reserved for explicitly permitted custom attributes. `node_identity` is an optional stable backend identity for O(1) ownership indexes; its default `None` keeps legacy backends on `Eq` fallback. The Web handle carries its creation-order record id directly, so clones keep the same id after release, ids are never reused, and identity lookup performs no `isSameNode` scan.
 
 ### Node storage
 

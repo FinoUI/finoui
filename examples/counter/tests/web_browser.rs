@@ -110,6 +110,7 @@ fn web_headless_runs_the_same_scenario_with_real_dom_probes() {
         "web_remount_restores_reachability",
         "keyed_for_matches_shared_semantics",
         "keyed_rows_keep_dom_identity_and_insert_before_moves",
+        "web_node_identity_is_stable_and_scan_free",
     ] {
         assert!(
             checks

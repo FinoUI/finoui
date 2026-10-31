@@ -115,6 +115,7 @@ let details = Show::mount(
 - `Show::mount` 首次执行时条件或内容 panic 会在重新抛出前释放 Show 锚点与 Owner；后续真实切换 panic 会保留锚点与活跃条件 Effect，以便重试。
 - 条件 Effect 或内容清理持有状态时，`Show::dispose` 也会记录请求，在下一个安全点释放范围与锚点，并在借用结束后处置 control Owner。父 Owner 清理走同一 pending 请求路径。
 - `Show` 内容 Owner 清理 panic 不会阻止节点释放或终止锚点清理。首个 payload 会保留，重复释放仍幂等。
+- 多节点 Show 内容构建器若在插入部分外部返回节点后 panic，回滚会按去重后的 created + returned 集合各释放一次（含重复与重叠），保留首个 payload，并用同一实际释放集合通知 keyed 释放观察器。
 - 锚点只创建一次并保持稳定；静态兄弟及其 `NodeId` 绝不替换。
 - 条件 Effect 只在真正的 `false → true` 切换时创建子 Owner 与内容；写入相同值不执行操作。
 - `true → false` 时先释放子 Owner，停止事件分发并解绑 Effect 与监听，再从父节点释放范围。
@@ -216,7 +217,7 @@ pub trait DomBackend {
 }
 ```
 
-这是语义接口而非完整 DOM 标准。首版 `Tag`、`Attribute` 与 `StyleProperty` 应是封闭枚举；字符串扩展只用于明确允许的自定义属性。`node_identity` 是用于 O(1) 所有权索引的可选稳定后端标识；默认 `None` 让旧后端继续使用 `Eq` 回退。
+这是语义接口而非完整 DOM 标准。首版 `Tag`、`Attribute` 与 `StyleProperty` 应是封闭枚举；字符串扩展只用于明确允许的自定义属性。`node_identity` 是用于 O(1) 所有权索引的可选稳定后端标识；默认 `None` 让旧后端继续使用 `Eq` 回退。Web 句柄直接携带创建顺序记录 id，因此 clone 在释放后保持同一 id，id 永不复用，标识查询不执行 `isSameNode` 扫描。
 
 ### 两种节点存储
 

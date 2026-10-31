@@ -3401,3 +3401,62 @@ fn keyed_for_initial_builder_parent_dispose_is_terminal() {
     list.dispose();
     assert_eq!(runtime.backend().operations().len(), after_dispose);
 }
+
+/// Show multi-node insertion rollback releases created and external returned
+/// nodes exactly once for first, later, and duplicate insertion failures.
+/// Show 多节点插入回滚在首次、后续与重复插入失败时，都只释放一次创建与外部返回节点。
+#[test]
+fn show_multi_node_insert_failure_rolls_back_tracked_and_returned() {
+    for delta in [3_usize, 4, 5] {
+        let runtime = Runtime::new(StrictBackend::new());
+        let owner = runtime.create_owner();
+        let root = runtime.backend_mut().create_element(Tag::Button);
+        let tail = {
+            let node = runtime.backend_mut().create_text("Tail");
+            runtime.backend_mut().insert_before(&root, &node, None);
+            node
+        };
+        let external = runtime.backend_mut().create_text("external");
+        let created_slot: Rc<RefCell<Option<MockNode>>> = Rc::new(RefCell::new(None));
+        let created_capture = Rc::clone(&created_slot);
+        runtime.backend().panic_inserts_after(delta, 1);
+
+        let failure = catch_unwind(AssertUnwindSafe(|| {
+            Show::mount_many(
+                &runtime,
+                &owner,
+                &root,
+                Some(&tail),
+                "show/multi-insert-panic",
+                || true,
+                move |context| {
+                    let created = context.create_text("created");
+                    *created_capture.borrow_mut() = Some(created);
+                    vec![created, external, external]
+                },
+            );
+        }));
+        let payload = failure.expect_err("insert panic must propagate");
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|value| (*value).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        assert_eq!(message, "injected move panic", "delta {delta}");
+        assert_eq!(
+            runtime.backend().inner().dom_snapshot().nodes.len(),
+            2,
+            "delta {delta}: created, returned, duplicate, and anchors are released"
+        );
+        assert_eq!(
+            runtime.backend().inner().text_content(&root).as_deref(),
+            Some("Tail")
+        );
+        assert_eq!(runtime.backend().inner().listener_count(), 0);
+        assert!(!runtime.backend().contains(external));
+        if let Some(created) = *created_slot.borrow() {
+            assert!(!runtime.backend().contains(created));
+        }
+        assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+    }
+}

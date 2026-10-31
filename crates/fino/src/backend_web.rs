@@ -23,6 +23,9 @@ use crate::{
 #[derive(Clone)]
 pub struct WebNode {
     node: Node,
+    /// Stable creation-order record identifier; never reused after release.
+    /// 稳定的创建顺序记录标识；释放后绝不复用。
+    id: u64,
     tag: Option<Tag>,
     anchor: bool,
 }
@@ -165,9 +168,15 @@ impl DomBackend {
     /// 为一个真实浏览器节点分配稳定的创建顺序标识。
     fn allocate_node(&mut self, node: Node, tag: Option<Tag>, anchor: bool) -> WebNode {
         self.next_node += 1;
-        let handle = WebNode { node, tag, anchor };
+        let id = self.next_node;
+        let handle = WebNode {
+            node,
+            id,
+            tag,
+            anchor,
+        };
         self.nodes.push(NodeRecord {
-            id: self.next_node,
+            id,
             node: handle.clone(),
             removed: false,
         });
@@ -430,10 +439,10 @@ impl crate::dom_api::DomBackend for DomBackend {
         self.emit(WebBackendOp::Remove);
     }
 
-    /// Returns the stable creation-order record identifier for a real node.
-    /// 返回真实节点的稳定创建顺序记录标识。
+    /// Returns the stable record identifier carried by the handle without a scan.
+    /// 直接返回句柄携带的稳定记录标识，不执行扫描。
     fn node_identity(&self, node: &Self::Node) -> Option<u64> {
-        self.record_id(&node.node)
+        Some(node.id)
     }
 
     /// Replaces only the existing text node's `nodeValue`.
