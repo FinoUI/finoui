@@ -72,7 +72,7 @@ cargo run -p fino_counter -- native
 cargo run -p fino_counter -- native --smoke
 ```
 
-`--smoke` 通过同一条带窗口身份的输入路径点击两次后退出，并报告 `surface_presented`。显示器休眠或无头环境可能让 Surface 处于 occluded；此时运行仍验证 count、DOM、命中和帧请求，但会明确报告没有帧被呈现，不会把逻辑结果伪装成视觉通过。macOS 的 smoke 运行器会在首次 `about_to_wait` 再尝试一次前台激活。若 `surface_presented` 为 false，请先把应用切到前台再重跑，不要将其当作显示器休眠或渲染失败。
+`--smoke` 通过同一条带窗口身份的输入路径点击两次后退出，并报告 `surface_presented`。显示器休眠或无头环境可能让 Surface 处于 occluded；此时运行仍验证 count、DOM、命中和帧请求，但会明确报告没有帧被呈现，不会把逻辑结果伪装成视觉通过。macOS 的 smoke 运行器会在首次 `about_to_wait` 再尝试一次前台激活。若 `surface_presented` 为 false，先把应用切到前台再重跑。若仍未呈现，继续检查 `Occluded`／`Timeout` 和渲染日志，不能直接归因于显示器休眠或渲染故障。
 
 原生后端随仓库分发 SIL Open Font License 1.1 的 Roboto 可变字体，见 `crates/fino/assets/fonts/OFL.txt`。
 
