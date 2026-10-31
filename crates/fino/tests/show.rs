@@ -715,3 +715,131 @@ fn content_panic_on_transition_keeps_show_retryable() {
     );
     assert_eq!(runtime.backend().listener_count(), 0);
 }
+
+/// A dispose call from a Show content builder is recorded and completes terminal
+/// cleanup after the condition effect releases its state borrow.
+/// Show 内容构建器内调用 dispose 会被记录，并在条件 Effect 释放状态借用后完成
+/// 终止清理。
+#[test]
+fn show_dispose_from_content_builder_is_terminal() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let visible = owner.signal_named("show/reentrant", false);
+    let count = owner.signal_named("show/reentrant-count", 0);
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let slot: Rc<RefCell<Option<Rc<Show<MockBackend>>>>> = Rc::new(RefCell::new(None));
+    let show = {
+        let visible = visible.clone();
+        let count = count.clone();
+        let builder_slot = Rc::clone(&slot);
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/reentrant",
+            move || visible.get(),
+            move |context| {
+                if let Some(show) = builder_slot.borrow().as_ref() {
+                    show.dispose();
+                }
+                let action = context.create_element(Tag::Button);
+                context.set_attribute(&action, Attribute::AriaLabel, Some("Reentrant action"));
+                let value = context.create_text("value");
+                context.insert_before(&action, &value, None);
+                let read = count.clone();
+                context.effect("show/reentrant/text", move |effect| {
+                    effect
+                        .backend_mut()
+                        .set_text(&value, &read.get().to_string());
+                });
+                let click = count.clone();
+                context.listen(&action, EventKind::Click, move |_event, _context| {
+                    click.update(|value| *value += 1);
+                });
+                action
+            },
+        )
+    };
+    let show = Rc::new(show);
+    *slot.borrow_mut() = Some(Rc::clone(&show));
+
+    visible.set(true);
+
+    assert!(!show.is_mounted(), "the reentrant request is terminal");
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "content and anchors are released"
+    );
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("Tail")
+    );
+    let after_dispose = runtime.backend().operations().len();
+    visible.set(false);
+    visible.set(true);
+    assert_eq!(
+        runtime.backend().operations().len(),
+        after_dispose,
+        "later condition writes cannot revive the list"
+    );
+    show.dispose();
+    show.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+}
+
+/// A dispose call from content owner cleanup during hide is recorded and still
+/// releases anchors and the control owner.
+/// 隐藏期间内容 Owner 清理内调用 dispose 会被记录，并仍释放锚点与 control Owner。
+#[test]
+fn show_dispose_from_range_cleanup_is_terminal() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let visible = owner.signal_named("show/reentrant-cleanup", true);
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let slot: Rc<RefCell<Option<Rc<Show<MockBackend>>>>> = Rc::new(RefCell::new(None));
+    let show = {
+        let visible = visible.clone();
+        let builder_slot = Rc::clone(&slot);
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/reentrant-cleanup",
+            move || visible.get(),
+            move |context| {
+                let action = context.create_element(Tag::Button);
+                let cleanup_slot = Rc::clone(&builder_slot);
+                context.owner().on_dispose(move || {
+                    if let Some(show) = cleanup_slot.borrow().as_ref() {
+                        show.dispose();
+                    }
+                });
+                action
+            },
+        )
+    };
+    let show = Rc::new(show);
+    *slot.borrow_mut() = Some(Rc::clone(&show));
+
+    visible.set(false);
+
+    assert!(!show.is_mounted());
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "content and anchors are released"
+    );
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+    let after_dispose = runtime.backend().operations().len();
+    visible.set(true);
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+    show.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+}

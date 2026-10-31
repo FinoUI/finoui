@@ -354,6 +354,7 @@ type ContentBuilder<B, K> = Box<dyn FnMut(&mut ForContext<B>, &K) -> Vec<<B as D
 /// 父 Owner 可提前释放。
 pub struct For<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> {
     state: Rc<std::cell::RefCell<ForState<B, K>>>,
+    dispose_requested: Rc<std::cell::Cell<bool>>,
 }
 
 impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> fmt::Debug for For<B, K> {
@@ -413,6 +414,7 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> For<B, 
 
         let control = owner.child();
         let anchors = RangeAnchor::create(runtime, parent, before);
+        let dispose_requested = Rc::new(std::cell::Cell::new(false));
         let state = Rc::new(std::cell::RefCell::new(ForState {
             runtime: runtime.clone(),
             control: control.clone(),
@@ -424,15 +426,30 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> For<B, 
             last_keys: None,
             last_error: None,
             cleaned: false,
+            dispose_requested: Rc::clone(&dispose_requested),
+            control_dispose_pending: false,
         }));
 
         let effect_state = Rc::clone(&state);
+        let effect_control = control.clone();
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             runtime.effect_with_runtime(
                 &control,
                 &format!("{name}/reconcile"),
                 move |_context, runtime| {
-                    effect_state.borrow_mut().update(runtime);
+                    let mut state = effect_state.borrow_mut();
+                    let update = catch_unwind(AssertUnwindSafe(|| state.update(runtime)));
+                    if state.dispose_requested.get() {
+                        state.request_terminal();
+                    }
+                    let dispose_control = state.take_control_dispose_pending();
+                    drop(state);
+                    if dispose_control {
+                        effect_control.dispose();
+                    }
+                    if let Err(payload) = update {
+                        resume_unwind(payload);
+                    }
                 },
             );
         }));
@@ -444,6 +461,13 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> For<B, 
             }
             control.dispose();
             resume_unwind(payload);
+        }
+
+        if state.borrow().cleaned {
+            return Ok(Self {
+                state,
+                dispose_requested,
+            });
         }
 
         let initial_error = state.borrow().last_error.clone();
@@ -464,7 +488,10 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> For<B, 
             }
         });
 
-        Ok(Self { state })
+        Ok(Self {
+            state,
+            dispose_requested,
+        })
     }
 
     /// Returns the stable start anchor of the whole list.
@@ -517,13 +544,18 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> For<B, 
     /// Releases every item and the list anchors; repeated calls are safe.
     /// 释放所有条目与列表锚点；可安全重复调用。
     pub fn dispose(&self) {
-        let control = {
-            let Ok(mut state) = self.state.try_borrow_mut() else {
-                return;
-            };
-            state.cleanup(false);
-            state.control.clone()
+        self.dispose_requested.set(true);
+        let Ok(mut state) = self.state.try_borrow_mut() else {
+            // Reconciliation already owns the state. The pending flag makes the
+            // effect finish terminal cleanup after it releases the borrow.
+            // 协调过程已借用状态。pending 标记让 Effect 在释放借用后完成终止
+            // 清理。
+            return;
         };
+        state.request_terminal();
+        let _ = state.take_control_dispose_pending();
+        let control = state.control.clone();
+        drop(state);
         control.dispose();
     }
 }
@@ -541,6 +573,8 @@ struct ForState<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'stat
     last_keys: Option<Vec<K>>,
     last_error: Option<ForError>,
     cleaned: bool,
+    dispose_requested: Rc<std::cell::Cell<bool>>,
+    control_dispose_pending: bool,
 }
 
 impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForState<B, K> {
@@ -550,7 +584,15 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
         if self.cleaned {
             return;
         }
+        if self.dispose_requested.get() {
+            self.request_terminal();
+            return;
+        }
         let next = (self.items)();
+        if self.dispose_requested.get() {
+            self.request_terminal();
+            return;
+        }
         if let Err(error) = validate_keys(&next) {
             // Reject before any backend mutation, keeping the committed list.
             // 在任何后端变更前拒绝，保留已提交列表。
@@ -562,6 +604,9 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
             return;
         }
         self.reconcile(next, runtime);
+        if self.dispose_requested.get() {
+            self.request_terminal();
+        }
     }
 
     /// Reuses retained ranges, creates only new keys, and moves whole ranges.
@@ -598,8 +643,14 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
         let mut built: Vec<Option<ForEntry<B, K>>> = (0..new_mid.len()).map(|_| None).collect();
         let build = catch_unwind(AssertUnwindSafe(|| {
             for (index, key) in new_mid.iter().enumerate() {
+                if self.dispose_requested.get() {
+                    break;
+                }
                 if !old_mid_keys.contains(key) {
                     built[index] = Some(self.build_entry(key.clone()));
+                }
+                if self.dispose_requested.get() {
+                    break;
                 }
             }
         }));
@@ -607,7 +658,17 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
             for entry in built.into_iter().flatten() {
                 entry.dispose(runtime);
             }
+            if self.dispose_requested.get() {
+                self.request_terminal();
+            }
             resume_unwind(payload);
+        }
+        if self.dispose_requested.get() {
+            for entry in built.into_iter().flatten() {
+                entry.dispose(runtime);
+            }
+            self.request_terminal();
+            return;
         }
 
         // Commit: release removed entries in old order, then reuse the rest.
@@ -619,11 +680,12 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
         let suffix_entries: Vec<_> = old_iter.collect();
 
         let mut retained = HashMap::with_capacity(middle_entries.len());
+        let mut removed = Vec::new();
         for (old_index, entry) in middle_entries.into_iter().enumerate() {
             if new_mid_keys.contains(&entry.key) {
                 retained.insert(entry.key.clone(), (old_index, entry));
             } else {
-                entry.dispose(runtime);
+                removed.push(entry);
             }
         }
 
@@ -646,6 +708,17 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
             }
         }
         debug_assert!(retained.is_empty(), "all requested keys are resolved");
+
+        for entry in removed {
+            entry.dispose(runtime);
+        }
+        if self.dispose_requested.get() {
+            self.entries = prefix_entries;
+            self.entries.extend(middle_final);
+            self.entries.extend(suffix_entries);
+            self.request_terminal();
+            return;
+        }
 
         // Keep the longest increasing subsequence of retained old positions in
         // place and move only the remaining ranges. This is the same stable
@@ -682,6 +755,10 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
         self.entries = prefix_entries;
         self.entries.extend(middle_final);
         self.entries.extend(suffix_entries);
+        if self.dispose_requested.get() {
+            self.request_terminal();
+            return;
+        }
         self.last_keys = Some(new_keys);
         self.last_error = None;
     }
@@ -722,9 +799,16 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
         }
     }
 
-    /// Releases the committed ranges, the list anchors, and optionally the owner.
-    /// 释放已提交范围、列表锚点，并按需释放 Owner。
-    fn cleanup(&mut self, dispose_control: bool) {
+    /// Records a terminal request and releases ranges at the current safe point.
+    /// 记录终止请求，并在当前安全点释放范围。
+    fn request_terminal(&mut self) {
+        self.release_terminal_ranges();
+        self.control_dispose_pending = true;
+    }
+
+    /// Releases committed ranges and the list anchors exactly once.
+    /// 只释放一次已提交范围与列表锚点。
+    fn release_terminal_ranges(&mut self) {
         if self.cleaned {
             return;
         }
@@ -735,6 +819,18 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
             entry.dispose(&runtime);
         }
         self.anchors.remove_anchors(&runtime);
+    }
+
+    /// Takes a pending control-owner disposal for the post-borrow safe boundary.
+    /// 取走待处理的 control Owner 释放请求，供借用结束后的安全边界执行。
+    fn take_control_dispose_pending(&mut self) -> bool {
+        std::mem::take(&mut self.control_dispose_pending)
+    }
+
+    /// Releases ranges and optionally the control owner for Drop/owner cleanup.
+    /// 为 Drop 与 Owner 清理释放范围，并按需释放 control Owner。
+    fn cleanup(&mut self, dispose_control: bool) {
+        self.release_terminal_ranges();
         if dispose_control {
             self.control.dispose();
         }

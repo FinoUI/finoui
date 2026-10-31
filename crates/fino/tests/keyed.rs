@@ -39,6 +39,8 @@ fn node_id(node: MockNode) -> String {
     format!("node-{}", node.0)
 }
 
+type ForSlot = Rc<RefCell<Option<Rc<For<MockBackend, String>>>>>;
+
 struct Probe {
     runs: Rc<RefCell<BTreeMap<String, u32>>>,
     handles: Rc<RefCell<BTreeMap<String, MockNode>>>,
@@ -1636,4 +1638,231 @@ fn show_child_before_parent_dispose_is_single_release() {
         "Show disposal releases its anchors after the content"
     );
     owner.dispose();
+}
+
+/// A dispose call from a new item builder records a terminal request; the outer
+/// reconcile must not commit the new item or leave old entries active.
+/// 新条目构建器内调用 dispose 会记录终止请求；外层协调不得提交新条目或留下
+/// 活跃旧条目。
+#[test]
+fn keyed_for_dispose_from_builder_is_terminal() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let slot: ForSlot = Rc::new(RefCell::new(None));
+    let local: Rc<RefCell<Option<Signal<i32>>>> = Rc::new(RefCell::new(None));
+    let list = {
+        let read_items = items.clone();
+        let builder_slot = Rc::clone(&slot);
+        let local_slot = Rc::clone(&local);
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/reentrant-builder",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                if key == "b"
+                    && let Some(list) = builder_slot.borrow().as_ref()
+                {
+                    list.dispose();
+                }
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text("");
+                context.insert_before(&item, &value, None);
+                let count = context
+                    .owner()
+                    .signal_named(&format!("keyed/{key}/count"), 0_i32);
+                let read = count.clone();
+                context.effect("keyed/reentrant/text", move |effect| {
+                    effect.set_text(&value, &read.get().to_string());
+                });
+                let click = count.clone();
+                context.listen(&item, EventKind::Click, move |_event, _context| {
+                    click.update(|value| *value += 1);
+                });
+                *local_slot.borrow_mut() = Some(count);
+                vec![item]
+            },
+        )
+    };
+    let list = Rc::new(list);
+    *slot.borrow_mut() = Some(Rc::clone(&list));
+    let before = runtime.backend().operations().len();
+
+    items.set(keys(&["a", "b"]));
+
+    assert!(list.is_empty(), "the list is terminally disposed");
+    assert_eq!(list.keys(), Vec::<String>::new());
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "only the static root and tail remain"
+    );
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("Tail")
+    );
+    let after_dispose = runtime.backend().operations().len();
+    if let Some(signal) = local.borrow().as_ref() {
+        signal.set(9);
+    }
+    assert_eq!(
+        runtime.backend().operations().len(),
+        after_dispose,
+        "writes to disposed item signals do not reach the backend"
+    );
+    items.set(keys(&["c"]));
+    items.set(keys(&["c", "c"]));
+    assert!(list.is_empty(), "later updates cannot revive the list");
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+    list.dispose();
+    list.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+    let _ = before;
+}
+
+/// A dispose call from a removed item's on_dispose cleanup is not lost; the
+/// outer reconcile terminates the remaining and newly built ranges.
+/// 被删除条目的 on_dispose 清理内调用 dispose 不会被丢弃；外层协调会终止剩余
+/// 与新建范围。
+#[test]
+fn keyed_for_dispose_from_removed_item_cleanup_is_terminal() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let slot: ForSlot = Rc::new(RefCell::new(None));
+    let local_a: Rc<RefCell<Option<Signal<i32>>>> = Rc::new(RefCell::new(None));
+    let list = {
+        let read_items = items.clone();
+        let builder_slot = Rc::clone(&slot);
+        let local_slot = Rc::clone(&local_a);
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/reentrant-cleanup",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text("");
+                context.insert_before(&item, &value, None);
+                let count = context
+                    .owner()
+                    .signal_named(&format!("keyed/{key}/count"), 0_i32);
+                let read = count.clone();
+                context.effect("keyed/reentrant/text", move |effect| {
+                    effect.set_text(&value, &read.get().to_string());
+                });
+                let click = count.clone();
+                context.listen(&item, EventKind::Click, move |_event, _context| {
+                    click.update(|value| *value += 1);
+                });
+                if key == "a" {
+                    *local_slot.borrow_mut() = Some(count.clone());
+                    let cleanup_slot = Rc::clone(&builder_slot);
+                    context.on_dispose(move || {
+                        if let Some(list) = cleanup_slot.borrow().as_ref() {
+                            list.dispose();
+                        }
+                    });
+                }
+                vec![item]
+            },
+        )
+    };
+    let list = Rc::new(list);
+    *slot.borrow_mut() = Some(Rc::clone(&list));
+
+    items.set(keys(&["b"]));
+
+    assert!(
+        list.is_empty(),
+        "removal cleanup completes terminal disposal"
+    );
+    assert_eq!(list.keys(), Vec::<String>::new());
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "the removed item and newly built item are both released"
+    );
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("Tail")
+    );
+    let after_dispose = runtime.backend().operations().len();
+    if let Some(signal) = local_a.borrow().as_ref() {
+        signal.set(7);
+    }
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+    items.set(keys(&["b", "b"]));
+    items.set(keys(&["c"]));
+    assert!(list.is_empty(), "later updates cannot revive the list");
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+    list.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+}
+
+/// A reentrant dispose followed by a builder panic keeps the original payload
+/// and still completes terminal cleanup.
+/// 重入 dispose 后构建器 panic 仍保留原始 payload，并完成终止清理。
+#[test]
+fn keyed_for_dispose_then_builder_panic_keeps_payload_and_terminal_state() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let slot: ForSlot = Rc::new(RefCell::new(None));
+    let list = {
+        let read_items = items.clone();
+        let builder_slot = Rc::clone(&slot);
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/reentrant-panic",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                if key == "b"
+                    && let Some(list) = builder_slot.borrow().as_ref()
+                {
+                    list.dispose();
+                    panic!("reentrant builder panic");
+                }
+                let item = context.create_element(Tag::Button);
+                vec![item]
+            },
+        )
+    };
+    let list = Rc::new(list);
+    *slot.borrow_mut() = Some(Rc::clone(&list));
+
+    let failure = catch_unwind(AssertUnwindSafe(|| items.set(keys(&["a", "b"]))));
+    let payload = failure.expect_err("builder panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "reentrant builder panic");
+    assert!(list.is_empty());
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "the old and new items are both released"
+    );
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+    list.dispose();
 }

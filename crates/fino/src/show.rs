@@ -2,7 +2,7 @@
 //! 使用范围锚点的条件挂载，不触发虚拟 DOM 式的整树重跑。
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     fmt,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     rc::Rc,
@@ -300,6 +300,7 @@ impl<B: DomBackend + 'static> ShowContext<B> {
 /// 或释放父 Owner 可提前释放。
 pub struct Show<B: DomBackend + 'static> {
     state: Rc<RefCell<ShowState<B>>>,
+    dispose_requested: Rc<Cell<bool>>,
 }
 
 impl<B: DomBackend> fmt::Debug for Show<B> {
@@ -352,6 +353,7 @@ impl<B: DomBackend + 'static> Show<B> {
     {
         let control = owner.child();
         let anchors = RangeAnchor::create(runtime, parent, before);
+        let dispose_requested = Rc::new(Cell::new(false));
         let state = Rc::new(RefCell::new(ShowState {
             runtime: runtime.clone(),
             control: control.clone(),
@@ -362,15 +364,30 @@ impl<B: DomBackend + 'static> Show<B> {
             active: None,
             last: None,
             cleaned: false,
+            dispose_requested: Rc::clone(&dispose_requested),
+            control_dispose_pending: false,
         }));
 
         let effect_state = Rc::clone(&state);
+        let effect_control = control.clone();
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             runtime.effect_with_runtime(
                 &control,
                 &format!("{name}/condition"),
                 move |_context, runtime| {
-                    effect_state.borrow_mut().update(runtime);
+                    let mut state = effect_state.borrow_mut();
+                    let update = catch_unwind(AssertUnwindSafe(|| state.update(runtime)));
+                    if state.dispose_requested.get() {
+                        state.request_terminal();
+                    }
+                    let dispose_control = state.take_control_dispose_pending();
+                    drop(state);
+                    if dispose_control {
+                        effect_control.dispose();
+                    }
+                    if let Err(payload) = update {
+                        resume_unwind(payload);
+                    }
                 },
             );
         }));
@@ -386,6 +403,13 @@ impl<B: DomBackend + 'static> Show<B> {
             resume_unwind(payload);
         }
 
+        if state.borrow().cleaned {
+            return Self {
+                state,
+                dispose_requested,
+            };
+        }
+
         let cleanup_state = SendWrapper::new(Rc::downgrade(&state));
         control.register_cleanup(move || {
             if let Some(state) = cleanup_state.upgrade()
@@ -395,7 +419,10 @@ impl<B: DomBackend + 'static> Show<B> {
             }
         });
 
-        Self { state }
+        Self {
+            state,
+            dispose_requested,
+        }
     }
 
     /// Returns the stable start anchor.
@@ -425,13 +452,18 @@ impl<B: DomBackend + 'static> Show<B> {
     /// Unmounts the current range and removes the anchors; repeated calls are safe.
     /// 卸载当前范围并移除锚点；可安全重复调用。
     pub fn dispose(&self) {
-        let control = {
-            let Ok(mut state) = self.state.try_borrow_mut() else {
-                return;
-            };
-            state.cleanup(false);
-            state.control.clone()
+        self.dispose_requested.set(true);
+        let Ok(mut state) = self.state.try_borrow_mut() else {
+            // The condition effect owns the state. The pending flag completes
+            // terminal cleanup after the effect releases its borrow.
+            // 条件 Effect 正持有状态。pending 标记让 Effect 在释放借用后完成
+            // 终止清理。
+            return;
         };
+        state.request_terminal();
+        let _ = state.take_control_dispose_pending();
+        let control = state.control.clone();
+        drop(state);
         control.dispose();
     }
 }
@@ -465,6 +497,8 @@ struct ShowState<B: DomBackend + 'static> {
     active: Option<ActiveRange<B>>,
     last: Option<bool>,
     cleaned: bool,
+    dispose_requested: Rc<Cell<bool>>,
+    control_dispose_pending: bool,
 }
 
 impl<B: DomBackend + 'static> ShowState<B> {
@@ -474,15 +508,31 @@ impl<B: DomBackend + 'static> ShowState<B> {
         if self.cleaned {
             return;
         }
+        if self.dispose_requested.get() {
+            self.request_terminal();
+            return;
+        }
         let next = (self.condition)();
+        if self.dispose_requested.get() {
+            self.request_terminal();
+            return;
+        }
         if self.last == Some(next) {
             return;
         }
         if next {
             self.mount_range(runtime);
+            if self.dispose_requested.get() {
+                self.request_terminal();
+                return;
+            }
             self.last = Some(true);
         } else {
             self.unmount_range(runtime);
+            if self.dispose_requested.get() {
+                self.request_terminal();
+                return;
+            }
             self.last = Some(false);
         }
     }
@@ -535,7 +585,12 @@ impl<B: DomBackend + 'static> ShowState<B> {
 
     /// Releases the range, anchors, and driver effect exactly once.
     /// 只释放一次范围、锚点与驱动 Effect。
-    fn cleanup(&mut self, dispose_control: bool) {
+    fn request_terminal(&mut self) {
+        self.release_terminal();
+        self.control_dispose_pending = true;
+    }
+
+    fn release_terminal(&mut self) {
         if self.cleaned {
             return;
         }
@@ -543,6 +598,14 @@ impl<B: DomBackend + 'static> ShowState<B> {
         let runtime = self.runtime.clone();
         self.unmount_range(&runtime);
         self.anchors.remove_anchors(&runtime);
+    }
+
+    fn take_control_dispose_pending(&mut self) -> bool {
+        std::mem::take(&mut self.control_dispose_pending)
+    }
+
+    fn cleanup(&mut self, dispose_control: bool) {
+        self.release_terminal();
         if dispose_control {
             self.control.dispose();
         }
