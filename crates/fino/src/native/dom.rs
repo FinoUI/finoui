@@ -44,12 +44,18 @@ enum NativeBackendOp {
     CreateText {
         node: u64,
     },
+    CreateAnchor {
+        node: u64,
+    },
     Insert {
         parent: u64,
         child: u64,
         anchor: Option<u64>,
     },
     Remove {
+        node: u64,
+    },
+    Release {
         node: u64,
     },
     SetText {
@@ -72,8 +78,10 @@ impl NativeBackendOp {
         match self {
             Self::CreateElement(_) => "create_element",
             Self::CreateText { .. } => "create_text",
+            Self::CreateAnchor { .. } => "create_anchor",
             Self::Insert { .. } => "insert",
             Self::Remove { .. } => "remove",
+            Self::Release { .. } => "release",
             Self::SetText { .. } => "set_text",
             Self::SetAttribute { .. } => "set_attribute",
             Self::Listen(_) => "listen",
@@ -86,6 +94,7 @@ impl NativeBackendOp {
 enum NodeKind {
     Element(Tag),
     Text,
+    Anchor,
 }
 
 struct TextBinding {
@@ -383,6 +392,7 @@ impl NativeDom {
                         y = rect.bottom() + self.style.margin;
                     }
                 }
+                NodeKind::Anchor => {}
             }
         }
 
@@ -534,6 +544,40 @@ impl NativeDom {
         self.signals.take_frame_request()
     }
 
+    /// Releases one stored subtree from the leaves up and invalidates its handles.
+    /// 从叶子向上释放一个存储子树，并使其句柄失效。
+    fn release_subtree(&mut self, node: NodeId) {
+        let Some(data) = self.nodes.get(node) else {
+            return;
+        };
+        let children = data.children.clone();
+        for child in children {
+            self.release_subtree(child);
+        }
+        let listeners: Vec<u64> = self
+            .listeners
+            .iter()
+            .filter_map(|(id, registration)| (registration.node == node).then_some(*id))
+            .collect();
+        for listener in listeners {
+            if let Some(registration) = self.listeners.remove(&listener) {
+                self.emit(NativeBackendOp::Unlisten(registration.event));
+            }
+        }
+        if let Some(parent) = self.nodes.get(node).and_then(|data| data.parent)
+            && let Some(parent_data) = self.nodes.get_mut(parent)
+        {
+            parent_data.children.retain(|candidate| *candidate != node);
+        }
+        self.roots.retain(|root| *root != node);
+        let stable = self.nodes.get(node).map(|data| data.stable_id);
+        self.nodes.remove(node);
+        if let Some(stable) = stable {
+            self.emit(NativeBackendOp::Release { node: stable });
+            self.mark_structural_change();
+        }
+    }
+
     fn ensure_text_layout(
         &mut self,
         node: NodeId,
@@ -573,6 +617,7 @@ impl NativeDom {
         let (tag, text) = match data.kind {
             NodeKind::Element(Tag::Button) => (Some("button".to_owned()), None),
             NodeKind::Text => (None, data.text.as_ref().map(|text| text.spec.text.clone())),
+            NodeKind::Anchor => (None, None),
         };
         LayoutBoxSnapshot {
             id: format!("node-{}", data.stable_id),
@@ -631,6 +676,7 @@ impl NativeDom {
                 }
                 true
             }
+            NodeKind::Anchor => true,
         }
     }
 
@@ -695,6 +741,7 @@ impl NativeDom {
                 data.text.as_ref().map(|text| text.spec.text.clone()),
                 BTreeMap::new(),
             ),
+            NodeKind::Anchor => return None,
         };
         Some(LogicalNodeSnapshot {
             kind,
@@ -725,6 +772,16 @@ impl DomBackend for NativeDom {
         let node = self.allocate(NodeKind::Text, Some(TextBinding::new(value)));
         let stable = self.stable(node);
         self.emit(NativeBackendOp::CreateText { node: stable });
+        self.mark_structural_change();
+        node
+    }
+
+    /// Creates an invisible anchor that occupies a stable sibling position.
+    /// 创建一个占据稳定兄弟位置的不可见范围锚点。
+    fn create_anchor(&mut self) -> Self::Node {
+        let node = self.allocate(NodeKind::Anchor, None);
+        let stable = self.stable(node);
+        self.emit(NativeBackendOp::CreateAnchor { node: stable });
         self.mark_structural_change();
         node
     }
@@ -782,6 +839,12 @@ impl DomBackend for NativeDom {
             anchor: anchor_id,
         });
         self.mark_structural_change();
+    }
+
+    /// Detaches and releases the node subtree, invalidating generational handles.
+    /// 分离并释放节点子树，使 generational 句柄失效。
+    fn release(&mut self, node: &Self::Node) {
+        self.release_subtree(*node);
     }
 
     /// Detaches only the selected node while keeping descendants and handle storage alive.
@@ -910,6 +973,10 @@ impl HeadlessBackend for NativeDom {
         NativeDom::listener(self, *node, event)
     }
 
+    fn listener_count(&self) -> usize {
+        NativeDom::listener_count(self)
+    }
+
     fn dom_snapshot(&self) -> DomSnapshot {
         let mut nodes: Vec<&NativeNode> = self.nodes.values().collect();
         nodes.sort_by_key(|node| node.stable_id);
@@ -953,6 +1020,7 @@ impl HeadlessBackend for NativeDom {
                         node.text.as_ref().map(|text| text.spec.text.clone()),
                         BTreeMap::new(),
                     ),
+                    NodeKind::Anchor => (DomNodeKind::Anchor, None, None, BTreeMap::new()),
                 };
                 DomNodeSnapshot {
                     id: format!("node-{}", node.stable_id),

@@ -40,6 +40,9 @@ pub mod runtime;
 /// Versioned JSON scenarios and machine-readable artifacts.
 /// 版本化 JSON 场景与机器可读产物。
 pub mod scenario;
+/// Range-anchored conditional mounting for structural reactivity.
+/// 用于结构响应式的范围锚点条件挂载。
+pub mod show;
 /// Minimal Parley/Fontique text engine with explicit shape and layout phases.
 /// 明确区分 shape 与 layout 阶段的最小 Parley/Fontique 文本引擎。
 #[cfg(feature = "native")]
@@ -53,4 +56,5 @@ pub mod view;
 pub use fino_macros::view;
 /// Creates a Signal on the currently mounting View owner.
 /// 在正在挂载的 View Owner 上创建 Signal。
+pub use show::{RangeAnchor, Show};
 pub use view::{View, mount_component, signal, signal_named, with_owner};

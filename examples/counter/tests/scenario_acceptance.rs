@@ -271,11 +271,15 @@ fn detached_button_is_unreachable_and_keeps_its_listener() {
     );
     assert!(host.a11y_snapshot().nodes.is_empty());
     let dom = host.dom_snapshot();
-    assert_eq!(dom.roots, vec!["node-1".to_owned()]);
+    assert!(
+        dom.roots.is_empty(),
+        "an explicitly detached node is stored but is not a live root"
+    );
     assert!(
         dom.nodes
             .iter()
-            .any(|node| node.id == "node-1" && node.tag.as_deref() == Some("button"))
+            .any(|node| node.id == "node-1" && node.tag.as_deref() == Some("button")),
+        "the detached node keeps its storage and handle for reinsertion"
     );
     assert_eq!(host.runtime().backend().listener_count(), 1);
     assert!(

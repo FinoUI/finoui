@@ -14,7 +14,8 @@ use fino::{
 };
 use fino_counter::{
     conformance::{ConformanceReport, DetachReinsertResult, run_detach_reinsert},
-    runner::run_mock_conformance,
+    runner::{run_mock_conformance, run_mock_show_conformance},
+    show::ShowConformanceReport,
 };
 use serde_json::Value;
 
@@ -33,7 +34,12 @@ fn scenario_path() -> PathBuf {
 /// Runs one scenario through the web-headless backend into a chosen directory.
 /// 通过 web-headless 后端把单个场景运行到指定目录。
 fn run_web_scenario(scenario: &Path, run_dir: &Path) -> Output {
-    counter()
+    run_web_scenario_with_mount(scenario, run_dir, None)
+}
+
+fn run_web_scenario_with_mount(scenario: &Path, run_dir: &Path, mount: Option<&str>) -> Output {
+    let mut command = counter();
+    command
         .arg("scenario")
         .arg("run")
         .arg(scenario)
@@ -41,9 +47,11 @@ fn run_web_scenario(scenario: &Path, run_dir: &Path) -> Output {
         .arg("web-headless")
         .arg("--out")
         .arg(run_dir)
-        .args(["--format", "json"])
-        .output()
-        .expect("browser scenario output")
+        .args(["--format", "json"]);
+    if let Some(mount) = mount {
+        command.arg("--mount").arg(mount);
+    }
+    command.output().expect("browser scenario output")
 }
 
 /// Runs the unchanged scenario in headless Chromium and checks the browser evidence.
@@ -97,6 +105,7 @@ fn web_headless_runs_the_same_scenario_with_real_dom_probes() {
         "scenario_dom_matches_live_dom",
         "conformance_reports_shared_runtime_stats",
         "detach_reinsert_matches_shared_semantics",
+        "anchor_nodes_reject_text_writes",
         "web_remount_restores_reachability",
     ] {
         assert!(
@@ -138,6 +147,111 @@ fn web_headless_runs_the_same_scenario_with_real_dom_probes() {
     assert_eq!(remount["removed_matches"], 0);
     assert_eq!(remount["remounted_matches"], 1);
     assert_eq!(remount["remounted_tree_roots"], 1);
+
+    let mut web_show: ShowConformanceReport = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("show_conformance.json")).expect("show conformance file"),
+    )
+    .expect("show conformance JSON");
+    let mock_show = run_mock_show_conformance().expect("mock show conformance");
+    assert_eq!(web_show.backend, "web-headless");
+    web_show.backend = mock_show.backend.clone();
+    assert_eq!(web_show.initial_tree, mock_show.initial_tree);
+    assert_eq!(web_show.visible_tree, mock_show.visible_tree);
+    assert_eq!(web_show.hidden_tree, mock_show.hidden_tree);
+    assert_eq!(web_show.restored_tree, mock_show.restored_tree);
+    assert_eq!(web_show.final_tree, mock_show.final_tree);
+    assert_eq!(web_show.clicked_text, mock_show.clicked_text);
+    assert_eq!(web_show.operations, mock_show.operations);
+    assert_eq!(web_show.static_ids_stable, mock_show.static_ids_stable);
+    assert_eq!(web_show.stale_write_is_noop, mock_show.stale_write_is_noop);
+    assert_eq!(
+        web_show.final_stats.component_executions,
+        mock_show.final_stats.component_executions
+    );
+    assert_eq!(
+        web_show.final_stats.effect_executions,
+        mock_show.final_stats.effect_executions
+    );
+    assert_eq!(
+        web_show.final_stats.nodes_created,
+        mock_show.final_stats.nodes_created
+    );
+    assert_eq!(
+        web_show.final_stats.nodes_removed,
+        mock_show.final_stats.nodes_removed
+    );
+}
+
+/// Runs the Show scenario through the same browser pipeline with its explicit mount.
+/// 通过同一浏览器流水线及其显式 mount 运行 Show 场景。
+#[test]
+#[ignore = "launches headless Chromium; run with cargo test -p fino_counter --test web_browser -- --ignored"]
+fn web_headless_runs_the_show_scenario() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let run_dir = temporary.path().join("show-web");
+    let scenario = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenarios/show.json");
+    let output = run_web_scenario_with_mount(&scenario, &run_dir, Some("show"));
+    assert!(
+        output.status.success(),
+        "show scenario failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let result: Value = serde_json::from_slice(&output.stdout).expect("show scenario JSON");
+    assert_eq!(result["status"], "passed");
+    assert_eq!(result["backend"], "web-headless");
+    assert_eq!(result["counters"]["component_executions"], 1);
+    assert_eq!(result["steps"].as_array().map(Vec::len), Some(10));
+
+    let dom = inspect_artifact(&run_dir, SnapshotKind::Dom).expect("Show DOM");
+    assert_eq!(dom["roots"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        dom["nodes"]
+            .as_array()
+            .expect("Show DOM nodes")
+            .iter()
+            .filter(|node| node["kind"] == "anchor")
+            .count(),
+        2
+    );
+    let a11y = inspect_artifact(&run_dir, SnapshotKind::A11y).expect("Show a11y");
+    let host = a11y["nodes"]
+        .as_array()
+        .expect("Show a11y nodes")
+        .iter()
+        .find(|node| node["name"] == "Show host")
+        .expect("Show host");
+    assert_eq!(host["text"], "HostToggleTail");
+    assert!(
+        !a11y["nodes"]
+            .as_array()
+            .expect("Show a11y nodes")
+            .iter()
+            .any(|node| node["name"] == "Show action"),
+        "the removed Show action must be unreachable"
+    );
+
+    let browser: Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("browser.json")).expect("browser checks"),
+    )
+    .expect("browser JSON");
+    assert_eq!(browser["status"], "passed");
+    assert!(
+        browser["checks"]
+            .as_array()
+            .expect("browser checks")
+            .iter()
+            .any(|check| check["name"] == "scenario_executes_in_chromium"
+                && check["status"] == "passed")
+    );
+    assert!(
+        browser["checks"]
+            .as_array()
+            .expect("browser checks")
+            .iter()
+            .any(|check| check["name"] == "scenario_dom_matches_live_dom"
+                && check["status"] == "passed")
+    );
 }
 
 /// Proves a failed rerun removes stale captures without deleting unrelated files.

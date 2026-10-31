@@ -6,11 +6,16 @@ use std::{panic::AssertUnwindSafe, path::PathBuf, process::ExitCode};
 use clap::{Parser, Subcommand, ValueEnum};
 use fino::scenario::{self, ScenarioResult, Status, ToolError};
 #[cfg(not(target_arch = "wasm32"))]
-use fino_counter::browser::run_web_scenario;
+use fino_counter::browser::{run_web_scenario, run_web_show_scenario};
 use fino_counter::conformance::{ConformanceReport, ContractViolation};
-use fino_counter::runner::{check_counter, run_mock_conformance, run_mock_scenario};
+use fino_counter::runner::{
+    check_counter, run_mock_conformance, run_mock_scenario, run_mock_show_scenario,
+};
 #[cfg(not(target_arch = "wasm32"))]
-use fino_counter::runner::{run_native_offscreen_conformance, run_native_offscreen_scenario};
+use fino_counter::runner::{
+    run_native_offscreen_conformance, run_native_offscreen_scenario,
+    run_native_offscreen_show_scenario,
+};
 use serde::Serialize;
 
 #[derive(Parser)]
@@ -63,11 +68,21 @@ enum ScenarioCommand {
         scenario: PathBuf,
         #[arg(long, value_enum)]
         backend: Backend,
+        /// Explicit example mount; this is never resolved through a registry.
+        /// 显式示例 mount；绝不通过注册表解析。
+        #[arg(long, value_enum, default_value_t = ScenarioMount::Counter)]
+        mount: ScenarioMount,
         #[arg(long)]
         out: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ScenarioMount {
+    Counter,
+    Show,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -135,22 +150,36 @@ fn run() -> ExitCode {
                 ScenarioCommand::Run {
                     scenario: path,
                     backend,
+                    mount,
                     out,
                     format,
                 },
         } => {
             let out = out.unwrap_or_else(|| {
                 PathBuf::from(format!(
-                    "artifacts/runs/counter-{}",
+                    "artifacts/runs/{}-{}",
+                    match mount {
+                        ScenarioMount::Counter => "counter",
+                        ScenarioMount::Show => "show",
+                    },
                     backend.artifact_suffix()
                 ))
             });
             let run = scenario::load_scenario(&path).and_then(|scenario| match backend {
-                Backend::Mock => run_mock_scenario(&scenario, &out),
+                Backend::Mock => match mount {
+                    ScenarioMount::Counter => run_mock_scenario(&scenario, &out),
+                    ScenarioMount::Show => run_mock_show_scenario(&scenario, &out),
+                },
                 #[cfg(not(target_arch = "wasm32"))]
-                Backend::WebHeadless => run_web_scenario(&path, &out),
+                Backend::WebHeadless => match mount {
+                    ScenarioMount::Counter => run_web_scenario(&path, &out),
+                    ScenarioMount::Show => run_web_show_scenario(&path, &out),
+                },
                 #[cfg(not(target_arch = "wasm32"))]
-                Backend::NativeOffscreen => run_native_offscreen_scenario(&scenario, &out),
+                Backend::NativeOffscreen => match mount {
+                    ScenarioMount::Counter => run_native_offscreen_scenario(&scenario, &out),
+                    ScenarioMount::Show => run_native_offscreen_show_scenario(&scenario, &out),
+                },
             });
             match run {
                 Ok(result) => {

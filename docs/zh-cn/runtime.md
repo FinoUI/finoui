@@ -93,7 +93,36 @@ fn counter() -> View {
 
 `View::mount` 安装组件 Owner，只调用一次构建闭包，挂载静态模板，然后把事件与 Effect 绑定到已有节点。闭包内的 `signal()` 通过该 Owner 解析。被多个生成闭包捕获的 Signal 会分别克隆进各闭包，因此组件不会重新执行，点击只更新目标绑定。
 
-`view!` 直接下沉为 `View`，调用点不需要 `runtime` 或 `owner`。Host 使用 `fino::view::mount_component`（构造前工作可用 `with_owner`），使 `signal()` 能取得组件 Owner。不支持的标签、事件、属性以及非闭包动态值会在对应源码 Span 上产生编译错误；`trybuild` 固定这些诊断。完整 Tailwind-like class 子集、`Show`、`For`、完整 RSX 与热重载仍不在范围内。
+`view!` 直接下沉为 `View`，调用点不需要 `runtime` 或 `owner`。Host 使用 `fino::view::mount_component`（构造前工作可用 `with_owner`），使 `signal()` 能取得组件 Owner。不支持的标签、事件、属性以及非闭包动态值会在对应源码 Span 上产生编译错误；`trybuild` 固定这些诊断。完整 Tailwind-like class 子集、完整 RSX `Show`／`For` 语法与热重载仍不在范围内。
+
+### 手工 Show 范围
+
+M1 通过手工 API 增加结构响应式；完整 RSX `Show` 语法仍不在范围内。`fino::show::Show` 挂载一对锚点，并在两者之间持有一个条件范围：
+
+```rust
+let details = Show::mount(
+    runtime,
+    owner,
+    &button,
+    Some(&tail),
+    "show/details",
+    move || visible.get(),
+    move |context| details_button(context, count.clone()),
+);
+```
+
+- `ShowContext` 跟踪一次挂载中创建的每个节点、Effect 与监听。内容构建器 panic 时会释放子 Owner、回收已跟踪节点并重新抛出，且不推进条件，后续真实切换可以重试。
+- 锚点只创建一次并保持稳定；静态兄弟及其 `NodeId` 绝不替换。
+- 条件 Effect 只在真正的 `false → true` 切换时创建子 Owner 与内容；写入相同值不执行操作。
+- `true → false` 时先释放子 Owner，停止事件分发并解绑 Effect 与监听，再从父节点释放范围。
+- `remove` 仍只做分离，供重插探针使用。`release` 是 `Show` 使用的终止路径：释放子树、保留句柄与监听，因此反复切换不会增长后端存储。
+- 已释放的 `NodeId` 句柄失效且不会复用；Native 继续保证 generational 安全。
+- 窗口帧请求按窗口合并，而不是按范围关联。范围释放后仍可能保留一个待处理窗口请求，但绘制已释放范围不会触达其节点；之后写入被移除 Signal 也不会产生新请求。
+- 嵌套 `Show` Owner 递归释放，重复调用 `Show::dispose` 或 Owner 释放均幂等。
+- 动态范围由父 Owner 持有；丢弃返回句柄不会卸载它。调用 `Show::dispose` 可提前释放。
+- `RangeAnchor` 暴露起止锚点句柄，供后续 `For` 与 keyed 范围能力复用。
+
+早于锚点与释放能力的后端仍可编译：`create_anchor` 默认创建空文本节点，`release` 默认回退到只分离的 `remove`，`HeadlessBackend::listener_count` 从操作日志推导存活数。会保留节点存储的后端应覆盖 `release` 以真正回收。Mock 快照只暴露已挂载根；显式分离的节点保留存储句柄以便重插。
 
 ## 统一 DOM API
 

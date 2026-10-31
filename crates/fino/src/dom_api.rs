@@ -126,6 +126,17 @@ pub trait DomBackend {
     /// Creates a text node with initial static content.
     /// 创建带初始静态内容的文本节点。
     fn create_text(&mut self, value: &str) -> Self::Node;
+    /// Creates an invisible structural anchor for a dynamic range.
+    /// 为动态范围创建不可见的范围锚点。
+    ///
+    /// Backends without a dedicated anchor node fall back to an empty text
+    /// node, which keeps older implementations source-compatible and still
+    /// occupies a stable sibling position.
+    /// 没有专用锚点节点的后端回退到空文本节点；这保持旧实现的源码兼容，
+    /// 同时仍占据稳定的兄弟位置。
+    fn create_anchor(&mut self) -> Self::Node {
+        self.create_text("")
+    }
     /// Inserts a child before an optional anchor without clearing siblings.
     /// 在可选锚点前插入子节点，不清空兄弟节点。
     fn insert_before(
@@ -136,7 +147,22 @@ pub trait DomBackend {
     );
     /// Detaches a node while leaving reactive cleanup to the owner.
     /// 分离节点，响应式清理由 Owner 负责。
+    ///
+    /// Detached nodes keep their handles so callers can reinsert them.
+    /// 已分离节点保留句柄，调用方可以重新插入。
     fn remove(&mut self, node: &Self::Node);
+    /// Detaches and releases a node subtree whose handles will not be reused.
+    /// 分离并释放一个不会再复用句柄的节点子树。
+    ///
+    /// This is the terminal counterpart to [`Self::remove`]; backends should
+    /// free storage and invalidate handles. The default only detaches because a
+    /// generic backend cannot discover descendants, so backends that retain
+    /// storage must override it.
+    /// 这是 [`Self::remove`] 的终止对应操作；后端应释放存储并使句柄失效。
+    /// 通用后端无法发现后代，因此默认只做分离；会保留存储的后端必须覆盖它。
+    fn release(&mut self, node: &Self::Node) {
+        self.remove(node);
+    }
     /// Replaces only the content of an existing text node.
     /// 仅替换现有文本节点的内容。
     fn set_text(&mut self, node: &Self::Node, value: &str);

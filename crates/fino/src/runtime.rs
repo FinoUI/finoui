@@ -54,6 +54,18 @@ pub struct Runtime<B: DomBackend> {
     component_executions: ExecutionCounter,
 }
 
+impl<B: DomBackend> Clone for Runtime<B> {
+    /// Shares the same backend, registry, and execution counter with a scoped clone.
+    /// 克隆出共享同一后端、注册表与执行计数的受限句柄。
+    fn clone(&self) -> Self {
+        Self {
+            backend: Rc::clone(&self.backend),
+            reactive_registry: Rc::clone(&self.reactive_registry),
+            component_executions: self.component_executions.clone(),
+        }
+    }
+}
+
 impl<B: DomBackend + 'static> Runtime<B> {
     /// Creates a runtime around a backend.
     /// 围绕后端创建 Runtime。
@@ -97,10 +109,26 @@ impl<B: DomBackend + 'static> Runtime<B> {
         name: &str,
         mut callback: impl FnMut(&mut EffectContext<B>) + 'static,
     ) {
+        self.effect_with_runtime(owner, name, move |context, _runtime| callback(context));
+    }
+
+    /// Creates an owner-scoped effect that can also use a scoped runtime clone.
+    /// 创建 Owner 作用域内的 Effect，回调还可使用受限的 Runtime 克隆。
+    ///
+    /// The clone shares the same backend and diagnostics, so it cannot outlive
+    /// the host state and never introduces a second DOM.
+    /// 克隆共享同一后端与诊断，不会超出 Host 状态存活，也不会引入第二份 DOM。
+    pub fn effect_with_runtime(
+        &self,
+        owner: &Owner,
+        name: &str,
+        mut callback: impl FnMut(&mut EffectContext<B>, &mut Runtime<B>) + 'static,
+    ) {
         let mut context = EffectContext {
             backend: Rc::clone(&self.backend),
         };
-        owner.effect_named(name, move || callback(&mut context));
+        let mut runtime = self.clone();
+        owner.effect_named(name, move || callback(&mut context, &mut runtime));
     }
 
     /// Registers an event and releases its backend handle during owner disposal.

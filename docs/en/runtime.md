@@ -93,7 +93,36 @@ The optional root `fino:name` attribute is compile-time metadata rather than a D
 
 `View::mount` installs the component owner, calls the build closure exactly once, mounts the static template, and then binds events and effects to the existing nodes. `signal()` inside the closure resolves against that owner. A signal captured by multiple generated closures is cloned into each closure so the component is not re-executed and clicks update only the target binding.
 
-`view!` lowers directly to a `View` and does not require `runtime` or `owner` at the call site. Hosts use `fino::view::mount_component` (or `with_owner` for pre-construction work) so `signal()` sees the component owner. Unsupported tags, events, attributes, and non-closure dynamic values produce a compile error at the offending source span; `trybuild` pins those diagnostics. The complete Tailwind-like class subset, `Show`, `For`, full RSX, and hot reload remain out of scope.
+`view!` lowers directly to a `View` and does not require `runtime` or `owner` at the call site. Hosts use `fino::view::mount_component` (or `with_owner` for pre-construction work) so `signal()` sees the component owner. Unsupported tags, events, attributes, and non-closure dynamic values produce a compile error at the offending source span; `trybuild` pins those diagnostics. The complete Tailwind-like class subset, full RSX `Show`/`For` syntax, and hot reload remain out of scope.
+
+### Manual Show ranges
+
+M1 adds structural reactivity through a manual API; the full RSX `Show` syntax remains out of scope. `fino::show::Show` mounts an anchor pair and owns one conditional range between them:
+
+```rust
+let details = Show::mount(
+    runtime,
+    owner,
+    &button,
+    Some(&tail),
+    "show/details",
+    move || visible.get(),
+    move |context| details_button(context, count.clone()),
+);
+```
+
+- `ShowContext` tracks every node, effect, and listener created during one mount. A panic in the content builder disposes the child owner, releases tracked nodes, and rethrows without advancing the condition, so a later real transition can retry.
+- The anchors are created once and stay stable. Static siblings and their `NodeId`s are never replaced.
+- The condition effect creates a child owner and content only on a real `false → true` transition; equal writes are no-ops.
+- On `true → false`, the child owner is disposed first, which stops event dispatch and releases effects and listeners, then the range is released from the parent.
+- `remove` remains detach-only for reinsertion probes. `release` is the terminal path used by `Show`: it frees the subtree, retained handles, and listeners so repeated toggles do not grow backend storage.
+- Released `NodeId` handles are invalid and are never reused; Native keeps generational safety.
+- A window frame request is coalesced per window, not per range. A pending request may survive a range release, but painting the released range cannot touch its nodes. Later writes to removed signals do not issue new requests.
+- Nested `Show` owners dispose recursively, and repeated `Show::dispose` or owner disposal is idempotent.
+- The parent owner owns the range; dropping the returned handle does not unmount it. Call `Show::dispose` to release it early.
+- `RangeAnchor` exposes the start and end anchor handles for future `For` and keyed range work.
+
+Backends that predate anchors and release keep compiling: `create_anchor` defaults to an empty text node, `release` defaults to detach-only `remove`, and `HeadlessBackend::listener_count` derives the live count from the operation log. Backends that retain node storage should override `release` to reclaim it. Mock snapshots expose only attached roots, while explicitly detached nodes keep their stored handle for reinsertion.
 
 ## Unified DOM API
 

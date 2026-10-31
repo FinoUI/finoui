@@ -16,7 +16,11 @@ use fino::{
 };
 use serde::Serialize;
 
-use crate::{conformance::ConformanceReport, counter};
+use crate::{
+    conformance::ConformanceReport,
+    counter,
+    show::{ShowConformanceReport, mount_show, run_show_conformance},
+};
 
 /// Mounts the shared counter component and returns its root node.
 /// 挂载共享计数器组件并返回其根节点。
@@ -134,11 +138,53 @@ pub fn run_native_offscreen_conformance() -> Result<ConformanceReport, String> {
     crate::conformance::run_conformance(host)
 }
 
+/// Runs the shared manual Show sequence on the deterministic mock backend.
+/// 在确定性 Mock 后端运行共享手工 Show 序列。
+pub fn run_mock_show_conformance() -> Result<ShowConformanceReport, String> {
+    let host = HeadlessHost::new(MockBackend::new(), Environment::default());
+    run_show_conformance(host)
+}
+
+/// Runs the shared manual Show sequence on the native offscreen backend.
+/// 在原生离屏后端运行共享手工 Show 序列。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_native_offscreen_show_conformance() -> Result<ShowConformanceReport, String> {
+    let backend = offscreen_backend(Size::new(800.0, 600.0), 1.0);
+    let host = HeadlessHost::new(backend, Environment::default());
+    run_show_conformance(host)
+}
+
 /// Runs a scenario with the counter mount supplied explicitly to the generic library.
 /// 将计数器 mount 显式传给通用 library 并运行场景。
 pub fn run_mock_scenario(scenario: &Scenario, run_dir: &Path) -> Result<ScenarioResult, ToolError> {
     let host = HeadlessHost::new(MockBackend::new(), scenario.environment.clone());
     scenario::run_on_host(scenario, run_dir, host, mount_counter)
+}
+
+/// Runs a scenario with the manual Show mount supplied explicitly.
+/// 使用显式提供的手工 Show mount 运行场景。
+pub fn run_mock_show_scenario(
+    scenario: &Scenario,
+    run_dir: &Path,
+) -> Result<ScenarioResult, ToolError> {
+    let host = HeadlessHost::new(MockBackend::new(), scenario.environment.clone());
+    scenario::run_on_host(scenario, run_dir, host, mount_show)
+}
+
+/// Runs the same show scenario on the native offscreen backend.
+/// 在原生离屏后端运行同一 show 场景。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_native_offscreen_show_scenario(
+    scenario: &Scenario,
+    run_dir: &Path,
+) -> Result<ScenarioResult, ToolError> {
+    let [width, height] = scenario.environment.viewport;
+    let backend = offscreen_backend(
+        Size::new(width as f32, height as f32),
+        scenario.environment.dpr as f32,
+    );
+    let host = HeadlessHost::new(backend, scenario.environment.clone());
+    scenario::run_on_host(scenario, run_dir, host, mount_show)
 }
 
 /// Runs the same scenario on the real native text/layout/paint backend without a GPU surface.
