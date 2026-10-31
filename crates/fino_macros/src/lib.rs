@@ -561,17 +561,44 @@ fn string_literal(expression: &Expr) -> Option<&LitStr> {
 
 fn captured_identifiers(closure: &ExprClosure) -> BTreeSet<String> {
     let mut collector = CaptureCollector::default();
-    collector.visit_expr(&closure.body);
-    for bound in collector.bound {
-        collector.used.remove(&bound);
+    collector.push_scope();
+    for input in &closure.inputs {
+        collector.bind_pattern(input);
     }
+    collector.visit_expr(&closure.body);
+    collector.pop_scope();
     collector.used
 }
 
 #[derive(Default)]
 struct CaptureCollector {
     used: BTreeSet<String>,
-    bound: BTreeSet<String>,
+    scopes: Vec<BTreeSet<String>>,
+}
+
+impl CaptureCollector {
+    fn push_scope(&mut self) {
+        self.scopes.push(BTreeSet::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    fn is_bound(&self, identifier: &str) -> bool {
+        self.scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(identifier))
+    }
+
+    fn bind_pattern(&mut self, pattern: &syn::Pat) {
+        let mut names = BTreeSet::new();
+        collect_pattern_idents(pattern, &mut names);
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.extend(names);
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for CaptureCollector {
@@ -580,22 +607,107 @@ impl<'ast> Visit<'ast> for CaptureCollector {
             && path.path.leading_colon.is_none()
             && path.path.segments.len() == 1
         {
-            self.used.insert(path.path.segments[0].ident.to_string());
+            let identifier = path.path.segments[0].ident.to_string();
+            if !self.is_bound(&identifier) {
+                self.used.insert(identifier);
+            }
         }
         syn::visit::visit_expr_path(self, path);
     }
 
-    fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
-        self.bound.insert(pattern.ident.to_string());
-        syn::visit::visit_pat_ident(self, pattern);
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        self.push_scope();
+        for statement in &block.stmts {
+            self.visit_stmt(statement);
+        }
+        self.pop_scope();
+    }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        // The initializer is evaluated before the new binding exists.
+        // 初始化表达式先于新绑定生效，因此先访问 initializer。
+        if let Some(initializer) = &local.init {
+            self.visit_expr(&initializer.expr);
+            if let Some((_else_token, diverge)) = &initializer.diverge {
+                self.visit_expr(diverge);
+            }
+        }
+        self.bind_pattern(&local.pat);
     }
 
     fn visit_expr_closure(&mut self, closure: &'ast ExprClosure) {
+        self.push_scope();
         for input in &closure.inputs {
-            collect_pattern_idents(input, &mut self.bound);
+            self.bind_pattern(input);
         }
-        syn::visit::visit_expr_closure(self, closure);
+        self.visit_expr(&closure.body);
+        self.pop_scope();
     }
+
+    fn visit_expr_for_loop(&mut self, for_loop: &'ast syn::ExprForLoop) {
+        self.visit_expr(&for_loop.expr);
+        self.push_scope();
+        self.bind_pattern(&for_loop.pat);
+        self.visit_block(&for_loop.body);
+        self.pop_scope();
+    }
+
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        self.push_scope();
+        self.bind_pattern(&arm.pat);
+        self.visit_expr(&arm.body);
+        self.pop_scope();
+    }
+
+    fn visit_expr_macro(&mut self, mac: &'ast syn::ExprMacro) {
+        let Some(name) = mac
+            .mac
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            return;
+        };
+        if !is_expression_macro(&name) {
+            return;
+        }
+        // Every macro argument is an expression in these macros, so parse the
+        // arguments before visiting them instead of treating tokens as names.
+        // 这些宏的每个参数都是表达式；先解析参数，再按表达式访问其中的标识符。
+        let parser = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated;
+        if let Ok(arguments) = mac.mac.parse_body_with(parser) {
+            for argument in arguments {
+                self.visit_expr(&argument);
+            }
+        }
+    }
+}
+
+fn is_expression_macro(name: &str) -> bool {
+    matches!(
+        name,
+        "assert"
+            | "assert_eq"
+            | "assert_ne"
+            | "dbg"
+            | "debug_assert"
+            | "debug_assert_eq"
+            | "debug_assert_ne"
+            | "eprint"
+            | "eprintln"
+            | "format"
+            | "format_args"
+            | "panic"
+            | "print"
+            | "println"
+            | "todo"
+            | "unimplemented"
+            | "unreachable"
+            | "vec"
+            | "write"
+            | "writeln"
+    )
 }
 
 fn collect_pattern_idents(pattern: &syn::Pat, bound: &mut BTreeSet<String>) {

@@ -17,7 +17,7 @@ use winit::{
     window::{Window, WindowId as WinitWindowId},
 };
 
-use crate::mount_counter;
+use crate::runner::mount_counter;
 
 /// Runs the real native counter window.
 /// 运行真实原生计数器窗口。

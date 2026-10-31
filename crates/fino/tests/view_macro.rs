@@ -295,6 +295,72 @@ fn generated_locals_do_not_shadow_caller_bindings() {
     );
 }
 
+/// A let initializer captures the outer signal before its own binding starts.
+/// let 初始化表达式在自身绑定生效前捕获外层 Signal。
+// The deliberate shadowing exercises capture analysis; clippy would simplify it away.
+// 这里的刻意遮蔽用于验证捕获分析，clippy 的建议会移除测试目标。
+#[allow(clippy::let_and_return)]
+#[test]
+fn let_initializer_captures_outer_signal_before_shadowing() {
+    let _guard = lock();
+    let mut runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let count = owner.signal_named("test/let-shadow", 0_i32);
+    let click_count = count.clone();
+    let view = View::<MockBackend>::new(move |runtime, owner| {
+        let _owner = owner;
+        fino::view! {
+            <button on:click={move || click_count.update(|value| *value += 1)}>
+                "Value: " {move || {
+                    let count = click_count.get();
+                    count
+                }}
+            </button>
+        }
+    });
+    let button = view.mount(&mut runtime, &owner);
+
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Value: 0")
+    );
+    click(&runtime, &button);
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Value: 1")
+    );
+}
+
+/// `format!` arguments participate in capture sharing with event closures.
+/// `format!` 参数与事件闭包共享捕获集合。
+#[test]
+fn format_macro_arguments_are_captured() {
+    let _guard = lock();
+    let mut runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let count = owner.signal_named("test/format", 0_i32);
+    let click_count = count.clone();
+    let view = View::<MockBackend>::new(move |runtime, owner| {
+        let _owner = owner;
+        fino::view! {
+            <button on:click={move || click_count.update(|value| *value += 1)}>
+                "Count: " {move || format!("{}", click_count.get())}
+            </button>
+        }
+    });
+    let button = view.mount(&mut runtime, &owner);
+
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Count: 0")
+    );
+    click(&runtime, &button);
+    assert_eq!(
+        runtime.backend().text_content(&button).as_deref(),
+        Some("Count: 1")
+    );
+}
+
 /// Dynamic attributes lower to an owner-scoped AttributeBinding.
 /// 动态属性下沉为 Owner 作用域内的 AttributeBinding。
 #[test]

@@ -16,7 +16,7 @@ use fino::{
     runtime::Runtime,
 };
 
-use super::{mount_counter, mount_counter_with_state};
+use crate::runner::{mount_counter, mount_counter_with_state};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 

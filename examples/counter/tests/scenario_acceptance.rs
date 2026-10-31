@@ -8,7 +8,7 @@ use fino::{
     metrics::RuntimeStats,
     scenario::{Scenario, ScenarioResult, Status, Step, run_on_host},
 };
-use fino_counter::{mount_counter, runner::run_mock_scenario};
+use fino_counter::runner::{mount_counter, run_mock_scenario};
 use serde_json::Value;
 
 fn counter_scenario() -> Scenario {
