@@ -1,0 +1,197 @@
+{
+  "schema": 1,
+  "name": "keyed/for",
+  "mount": "keyed",
+  "environment": {
+    "viewport": [
+      800,
+      600
+    ],
+    "dpr": 1.0,
+    "locale": "zh-CN",
+    "color_scheme": "dark",
+    "seed": 42
+  },
+  "steps": [
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Keyed host",
+        "value": "HostNextTail"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Keyed next"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Keyed host",
+        "value": "HostNextA=0B=0C=0Tail"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Keyed next"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Keyed host",
+        "value": "HostNextX=0A=0B=0C=0Tail"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Keyed next"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Keyed host",
+        "value": "HostNextX=0A=0M=0B=0C=0Tail"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Keyed next"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Keyed host",
+        "value": "HostNextX=0M=0A=0B=0C=0Tail"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Keyed next"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Keyed host",
+        "value": "HostNextC=0B=0A=0M=0X=0Tail"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Keyed next"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Keyed host",
+        "value": "HostNextB=0A=0M=0X=0C=0Tail"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Keyed next"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Keyed host",
+        "value": "HostNextB=0M=0X=0C=0Tail"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Keyed next"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Keyed host",
+        "value": "HostNextB=0Q=0X=0C=0Tail"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Keyed next"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Keyed host",
+        "value": "HostNextB=0Q=0X=0C=0Tail"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Keyed next"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Keyed host",
+        "value": "HostNextTail"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Keyed next"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Keyed host",
+        "value": "HostNextD=0E=0Tail"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Row D"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Row D",
+        "value": "D=1"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Keyed host",
+        "value": "HostNextD=1E=0Tail"
+      }
+    },
+    {
+      "advance_frames": 1
+    },
+    {
+      "capture": [
+        "dom",
+        "a11y",
+        "reactive"
+      ]
+    }
+  ]
+}

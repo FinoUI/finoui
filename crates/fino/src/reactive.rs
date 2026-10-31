@@ -4,6 +4,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     rc::Rc,
 };
 
@@ -357,6 +358,7 @@ impl Owner {
             registry: Rc::clone(&self.registry),
         }));
         let cycle_registry = SendWrapper::new(Rc::clone(&self.registry));
+        let panic_registry = SendWrapper::new(Rc::clone(&self.registry));
 
         // `SendWrapper` confines non-Send UI state to the creating thread, while
         // `ImmediateEffect` retains upstream graph tracking and batch de-duplication.
@@ -364,10 +366,20 @@ impl Owner {
         // 则保留上游的依赖图追踪与批内去重。
         let effect = self.inner.with(|| {
             ImmediateEffect::new(move || {
-                if let Ok(mut runner) = runner.try_borrow_mut() {
-                    runner.run(id);
-                } else {
-                    cycle_registry.borrow_mut().report_cycle(id);
+                let outcome = catch_unwind(AssertUnwindSafe(|| {
+                    if let Ok(mut runner) = runner.try_borrow_mut() {
+                        runner.run(id);
+                    } else {
+                        cycle_registry.borrow_mut().report_cycle(id);
+                    }
+                }));
+                if let Err(payload) = outcome {
+                    // A first-run panic would otherwise leave diagnostics active
+                    // because cleanup registration happens after effect creation.
+                    // 首次执行 panic 时清理注册尚未完成，若不处理会让诊断一直显示
+                    // Effect 仍活跃。
+                    panic_registry.borrow_mut().deactivate_effect(id);
+                    resume_unwind(payload);
                 }
             })
         });

@@ -174,7 +174,8 @@ const runDirLabel = required('run-dir-label');
 const scenarioPath = path.resolve(required('scenario'));
 const mount = args.get('mount') ?? 'counter';
 const isShow = mount === 'show';
-if (mount !== 'counter' && mount !== 'show') {
+const isKeyed = mount === 'keyed';
+if (mount !== 'counter' && mount !== 'show' && mount !== 'keyed') {
   fail('UI_BROWSER_MOUNT', `unknown example mount ${mount}`);
 }
 const browserPath = args.get('browser');
@@ -250,6 +251,12 @@ try {
         },
       });
     }
+    window.__finoInsertBeforeCalls = 0;
+    const insertBefore = Node.prototype.insertBefore;
+    Node.prototype.insertBefore = function (child, reference) {
+      window.__finoInsertBeforeCalls += 1;
+      return insertBefore.call(this, child, reference);
+    };
   });
 
   await page.goto(`${origin}/index.html`);
@@ -420,11 +427,13 @@ try {
   let bundle;
   await runCheck('scenario_executes_in_chromium', async () => {
     const serialized = await page.evaluate(
-      ({ scenario, runDirLabel, isShow }) =>
+      ({ scenario, runDirLabel, isShow, isKeyed }) =>
         isShow
           ? window.fino.run_show_scenario(scenario, runDirLabel)
-          : window.fino.run_scenario(scenario, runDirLabel),
-      { scenario, runDirLabel, isShow },
+          : isKeyed
+            ? window.fino.run_keyed_scenario(scenario, runDirLabel)
+            : window.fino.run_scenario(scenario, runDirLabel),
+      { scenario, runDirLabel, isShow, isKeyed },
     );
     bundle = JSON.parse(serialized);
     assert(bundle.result, 'the scenario must return a result');
@@ -459,6 +468,29 @@ try {
       assertEqual(pageErrors.length, 0, 'Show page errors');
       return;
     }
+    if (isKeyed) {
+      const live = await page.evaluate(() => ({
+        hostText: document.querySelector('button[aria-label="Keyed host"]')?.textContent,
+        rows: Array.from(document.querySelectorAll('button[aria-label^="Row "]'))
+          .map((node) => node.getAttribute('aria-label')),
+        innerHtmlSets: window.__finoInnerHtmlSets,
+      }));
+      const dom = JSON.parse(bundle.artifacts['dom.json']);
+      assertEqual(dom.roots.length, 1, 'keyed DOM root count');
+      assertEqual(dom.nodes.filter((node) => node.kind === 'anchor').length, 6, 'keyed anchor count');
+      const a11y = JSON.parse(bundle.artifacts['a11y.json']);
+      const host = a11y.nodes.find((node) => node.name === 'Keyed host');
+      assert(host, 'keyed host must remain reachable');
+      assertEqual(host.text, 'HostNextD=1E=0Tail', 'keyed host text at capture');
+      // Returning the scenario host drops its owner, so the keyed ranges release
+      // while the static host remains in the live document.
+      // 返回场景 Host 会释放其 Owner，因此 keyed 范围被释放，而静态宿主仍留在实时文档中。
+      assertEqual(live.hostText, 'HostNextTail', 'live keyed host after host drop');
+      assertEqual(live.rows.length, 0, 'keyed rows released after host drop');
+      assertEqual(live.innerHtmlSets, 0, 'innerHTML assignments during keyed scenario');
+      assertEqual(pageErrors.length, 0, 'keyed page errors');
+      return;
+    }
     const live = await page.evaluate(() => ({
       text: document.querySelector('button')?.textContent,
       inBody: document.querySelector('button')?.parentNode === document.body,
@@ -491,6 +523,7 @@ try {
   let remount;
   let anchorMisuse;
   let showConformance;
+  let keyedConformance;
   await runCheck('conformance_reports_shared_runtime_stats', async () => {
     const serialized = await page.evaluate(() => window.fino.run_conformance());
     conformance = JSON.parse(serialized);
@@ -564,6 +597,140 @@ try {
     assertEqual(showConformance.operations.unlisten, 13, 'Show unlisten operations');
   });
 
+  await runCheck('keyed_for_matches_shared_semantics', async () => {
+    const serialized = await page.evaluate(() => window.fino.run_keyed_conformance_probe());
+    keyedConformance = JSON.parse(serialized);
+    assertEqual(keyedConformance.schema, 1, 'keyed conformance schema');
+    assertEqual(keyedConformance.backend, 'web-headless', 'keyed conformance backend');
+    assertEqual(keyedConformance.status, 'passed', 'keyed conformance status');
+    assertEqual(keyedConformance.violations.length, 0, 'keyed conformance violations');
+    assertEqual(keyedConformance.initial_text, 'HostNextTail', 'keyed initial text');
+    assertEqual(keyedConformance.phases.length, 11, 'keyed phase count');
+    assert(keyedConformance.item_identity_stable, 'keyed item identity stays stable');
+    assert(keyedConformance.static_ids_stable, 'keyed static ids stay stable');
+    assert(keyedConformance.stale_write_is_noop, 'removed key writes stay local');
+    assert(keyedConformance.duplicate_key_rejected, 'duplicate keys reject atomically');
+    assert(keyedConformance.duplicate_recovered, 'valid key update recovers');
+    assert(keyedConformance.dispose_idempotent, 'keyed disposal is idempotent');
+    assertEqual(keyedConformance.operations.create_element, 10, 'keyed create_element');
+    assertEqual(keyedConformance.operations.create_text, 11, 'keyed create_text');
+    assertEqual(keyedConformance.operations.create_anchor, 18, 'keyed create_anchor');
+    assertEqual(keyedConformance.operations.insert, 80, 'keyed insert moves');
+    assertEqual(keyedConformance.operations.release, 34, 'keyed releases');
+    assertEqual(keyedConformance.operations.remove, 1, 'keyed host remove');
+    assertEqual(keyedConformance.local_update.reconcile_delta, 0, 'item updates skip reconciliation');
+  });
+
+  await runCheck('keyed_rows_keep_dom_identity_and_insert_before_moves', async () => {
+    const state = await page.evaluate(() => {
+      const keyed = new window.fino.KeyedPage();
+      window.__finoKeyedPage = keyed;
+      keyed.set_keys(JSON.stringify(['A', 'B', 'C']));
+      const capture = () => {
+        const rows = {};
+        for (const key of ['A', 'B', 'C', 'X']) {
+          const button = document.querySelector(`button[aria-label="Row ${key}"]`);
+          rows[key] = button ? { button, text: button.firstChild } : null;
+        }
+        return rows;
+      };
+      window.__finoKeyedRows = capture();
+      window.__finoKeyedInnerHtml = window.__finoInnerHtmlSets;
+      return {
+        keys: JSON.parse(keyed.keys()),
+        runs: JSON.parse(keyed.builder_runs()),
+        innerHtmlSets: window.__finoInnerHtmlSets,
+      };
+    });
+    assertEqual(state.keys.join(','), 'A,B,C', 'keyed initial keys');
+    assertEqual(state.innerHtmlSets, 0, 'keyed initial innerHTML assignments');
+
+    const prepended = await page.evaluate(() => {
+      const keyed = window.__finoKeyedPage;
+      const before = window.__finoKeyedRows;
+      keyed.set_keys(JSON.stringify(['X', 'A', 'B', 'C']));
+      const rows = {};
+      for (const key of ['A', 'B', 'C']) {
+        const button = document.querySelector(`button[aria-label="Row ${key}"]`);
+        rows[key] = { button, text: button?.firstChild };
+      }
+      window.__finoKeyedRows = { ...before, X: { button: document.querySelector('button[aria-label="Row X"]'), text: document.querySelector('button[aria-label="Row X"]')?.firstChild } };
+      return {
+        same: ['A', 'B', 'C'].every(
+          (key) => rows[key].button === before[key].button && rows[key].text === before[key].text,
+        ),
+        order: Array.from(document.querySelectorAll('button[aria-label^="Row "]')).map((node) =>
+          node.getAttribute('aria-label'),
+        ),
+        runs: JSON.parse(keyed.builder_runs()),
+      };
+    });
+    assert(prepended.same, 'prepend keeps A/B/C DOM identities');
+    assertEqual(prepended.order.join(','), 'Row X,Row A,Row B,Row C', 'prepend order');
+    assertEqual(prepended.runs.A, 1, 'prepend never rebuilds A');
+    assertEqual(prepended.runs.B, 1, 'prepend never rebuilds B');
+    assertEqual(prepended.runs.C, 1, 'prepend never rebuilds C');
+
+    const reordered = await page.evaluate(() => {
+      const keyed = window.__finoKeyedPage;
+      const before = window.__finoKeyedRows;
+      const insertBeforeBefore = window.__finoInsertBeforeCalls;
+      keyed.set_keys(JSON.stringify(['C', 'B', 'A', 'X']));
+      const after = {};
+      for (const key of ['A', 'B', 'C', 'X']) {
+        const button = document.querySelector(`button[aria-label="Row ${key}"]`);
+        after[key] = { button, text: button?.firstChild };
+      }
+      window.__finoKeyedRows = after;
+      return {
+        same: ['A', 'B', 'C', 'X'].every(
+          (key) => after[key].button === before[key].button && after[key].text === before[key].text,
+        ),
+        order: Array.from(document.querySelectorAll('button[aria-label^="Row "]')).map((node) =>
+          node.getAttribute('aria-label'),
+        ),
+        insertBeforeDelta: window.__finoInsertBeforeCalls - insertBeforeBefore,
+        innerHtmlSets: window.__finoInnerHtmlSets,
+        keys: JSON.parse(keyed.keys()),
+      };
+    });
+    assert(reordered.same, 'reverse keeps every row and text node identity');
+    assertEqual(reordered.order.join(','), 'Row C,Row B,Row A,Row X', 'reversed DOM order');
+    assert(reordered.insertBeforeDelta > 0, 'reverse moves existing ranges with insertBefore');
+    assertEqual(reordered.innerHtmlSets, 0, 'reverse never assigns innerHTML');
+
+    const local = await page.evaluate(() => {
+      const keyed = window.__finoKeyedPage;
+      const before = window.__finoKeyedRows.B;
+      document.querySelector('button[aria-label="Row B"]').click();
+      const after = document.querySelector('button[aria-label="Row B"]');
+      return {
+        text: after.textContent,
+        sameButton: after === before.button,
+        sameText: after.firstChild === before.text,
+        runs: JSON.parse(keyed.builder_runs()),
+      };
+    });
+    assertEqual(local.text, 'B=1', 'item-local click text');
+    assert(local.sameButton && local.sameText, 'item-local click keeps DOM identity');
+    assertEqual(local.runs.B, 1, 'item-local click never rebuilds B');
+
+    const cleared = await page.evaluate(() => {
+      const keyed = window.__finoKeyedPage;
+      keyed.set_keys(JSON.stringify([]));
+      const empty = document.querySelectorAll('button[aria-label^="Row "]').length;
+      keyed.dispose();
+      return {
+        empty,
+        innerHtmlSets: window.__finoInnerHtmlSets,
+        pageErrors: 0,
+      };
+    });
+    assertEqual(cleared.empty, 0, 'clearing releases every row');
+    assertEqual(cleared.innerHtmlSets, 0, 'clearing never assigns innerHTML');
+    assertEqual(pageErrors.length, 0, 'keyed identity page errors');
+  });
+
   await runCheck('anchor_nodes_reject_text_writes', async () => {
     const serialized = await page.evaluate(() => window.fino.run_anchor_misuse_probe());
     anchorMisuse = JSON.parse(serialized);
@@ -613,6 +780,10 @@ try {
     `${JSON.stringify(showConformance, null, 2)}\n`,
   );
   fs.writeFileSync(
+    path.join(outDir, 'keyed_conformance.json'),
+    `${JSON.stringify(keyedConformance, null, 2)}\n`,
+  );
+  fs.writeFileSync(
     path.join(outDir, 'browser.json'),
     `${JSON.stringify({ schema: 1, backend: 'web-headless', status: 'passed', checks }, null, 2)}\n`,
   );
@@ -630,6 +801,7 @@ try {
         'remount.json',
         'anchor_misuse.json',
         'show_conformance.json',
+        'keyed_conformance.json',
       ],
     })}\n`,
   );

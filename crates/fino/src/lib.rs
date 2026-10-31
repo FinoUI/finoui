@@ -24,6 +24,9 @@ pub mod headless;
 /// Read-only structured artifact inspection.
 /// 只读结构化产物检查。
 pub mod inspect;
+/// Keyed list ranges with stable node identity and whole-range moves.
+/// 具有稳定节点身份与整段移动能力的 keyed 列表范围。
+pub mod keyed;
 /// Shared runtime metrics across Mock, Web, and Native backends.
 /// 跨 Mock、Web 与 Native 后端共享的运行指标。
 pub mod metrics;
@@ -54,6 +57,7 @@ pub mod view;
 /// RSX authoring macro for the counter-stage subset.
 /// 计数器阶段子集的 RSX 作者宏。
 pub use fino_macros::view;
+pub use keyed::{For, ForContext, ForError};
 /// Creates a Signal on the currently mounting View owner.
 /// 在正在挂载的 View Owner 上创建 Signal。
 pub use show::{RangeAnchor, Show};

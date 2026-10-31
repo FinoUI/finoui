@@ -120,9 +120,39 @@ let details = Show::mount(
 - A window frame request is coalesced per window, not per range. A pending request may survive a range release, but painting the released range cannot touch its nodes. Later writes to removed signals do not issue new requests.
 - Nested `Show` owners dispose recursively, and repeated `Show::dispose` or owner disposal is idempotent.
 - The parent owner owns the range; dropping the returned handle does not unmount it. Call `Show::dispose` to release it early.
-- `RangeAnchor` exposes the start and end anchor handles for future `For` and keyed range work.
+- `RangeAnchor` exposes the start and end anchor handles reused by keyed `For` and whole-range moves.
 
 Backends that predate anchors and release keep compiling: `create_anchor` defaults to an empty text node, `release` defaults to detach-only `remove`, and `HeadlessBackend::listener_count` derives the live count from the operation log. Backends that retain node storage should override `release` to reclaim it. Mock snapshots expose only attached roots, while explicitly detached nodes keep their stored handle for reinsertion.
+
+### Manual keyed For ranges
+
+M1 also provides a manual keyed `For`; the full RSX `For` syntax stays out of scope. `fino::keyed::For` owns one anchor pair plus one range and child owner per key:
+
+```rust
+let rows = For::mount(
+    runtime,
+    owner,
+    &list,
+    Some(&tail),
+    "for/rows",
+    move || keys.get(),
+    move |context, key| row(context, key),
+);
+```
+
+- The `items` reader runs in a `{name}/reconcile` effect. Keys must be unique and implement `Clone + Eq + Hash`.
+- Duplicate keys are rejected atomically before any backend mutation. `For::try_mount` returns `ForError` before creating the For anchors; `For::mount` panics instead. On update, the committed list stays mounted and `For::last_error` reports the rejection; a later valid write retries and clears it.
+- `ForContext` tracks every node, effect, and listener of one item. Each item has its own child owner and anchor pair.
+- Reconciliation follows the shape of SolidJS `mapArray` (MIT, `solidjs/solid` commit `bc50fe5649ba4fb1ef33f26643dba56c1c002b56`, `packages/solid/src/reactive/array.ts`): common prefix and suffix, a key-to-position map, and one disposer per item. Fino rejects duplicates instead of matching one occurrence. No source code is copied.
+- Only new keys create ranges and only removed keys release them. Retained keys keep their `NodeId`, DOM identity, text nodes, local signals, effects, and listeners; their content builder never reruns.
+- Reordering moves each retained range, anchors included, with `insert_before`. Prefix and suffix ranges stay in place; the parent, static siblings, and For anchors are never cleared or rebuilt, and `innerHTML` is never assigned.
+- Every new item is fully built before existing ranges change. A builder panic disposes that item owner and releases its tracked nodes, effects, and listeners before rethrowing; already-built items are released and the previous list stays committed.
+- Removing a key disposes the item owner first, then releases its range. Writing a removed item's signal no longer touches the backend or requests a frame.
+- Item-local signal updates through item effects do not run the reconciliation effect.
+- `For::dispose` releases every item and the list anchors; repeated disposal and parent-owner disposal are idempotent.
+- Mock, real Web DOM, and Native reuse the same scenario. The Web probe checks real node identity and `insertBefore` moves; Native checks arena release and display lists after disposal.
+
+`RangeAnchor::move_before` is the shared operation for a complete range: start anchor, external nodes, end anchor, all before one reference node.
 
 ## Unified DOM API
 

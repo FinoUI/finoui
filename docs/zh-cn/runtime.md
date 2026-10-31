@@ -120,9 +120,39 @@ let details = Show::mount(
 - 窗口帧请求按窗口合并，而不是按范围关联。范围释放后仍可能保留一个待处理窗口请求，但绘制已释放范围不会触达其节点；之后写入被移除 Signal 也不会产生新请求。
 - 嵌套 `Show` Owner 递归释放，重复调用 `Show::dispose` 或 Owner 释放均幂等。
 - 动态范围由父 Owner 持有；丢弃返回句柄不会卸载它。调用 `Show::dispose` 可提前释放。
-- `RangeAnchor` 暴露起止锚点句柄，供后续 `For` 与 keyed 范围能力复用。
+- `RangeAnchor` 暴露起止锚点句柄，供 keyed `For` 与整段移动复用。
 
 早于锚点与释放能力的后端仍可编译：`create_anchor` 默认创建空文本节点，`release` 默认回退到只分离的 `remove`，`HeadlessBackend::listener_count` 从操作日志推导存活数。会保留节点存储的后端应覆盖 `release` 以真正回收。Mock 快照只暴露已挂载根；显式分离的节点保留存储句柄以便重插。
+
+### 手工 keyed For 范围
+
+M1 还提供手工 keyed `For`；完整 RSX `For` 语法仍不在范围内。`fino::keyed::For` 持有整体锚点对，并为每个 key 持有一个范围与子 Owner：
+
+```rust
+let rows = For::mount(
+    runtime,
+    owner,
+    &list,
+    Some(&tail),
+    "for/rows",
+    move || keys.get(),
+    move |context, key| row(context, key),
+);
+```
+
+- `items` 读取器在 `{name}/reconcile` Effect 中执行。key 必须唯一，并实现 `Clone + Eq + Hash`。
+- 重复 key 会在任何后端变更前被原子拒绝。`For::try_mount` 在创建 For 锚点前返回 `ForError`；`For::mount` 则 panic。更新时已提交列表保持不变，`For::last_error` 报告拒绝；之后的合法写入会重试并清除错误。
+- `ForContext` 跟踪一个条目的每个节点、Effect 与监听。每个条目拥有自己的子 Owner 与锚点对。
+- 协调结构参考 SolidJS `mapArray`（MIT，`solidjs/solid` 提交 `bc50fe5649ba4fb1ef33f26643dba56c1c002b56`，`packages/solid/src/reactive/array.ts`）：公共前缀与后缀、key 到位置映射，以及每项一个 disposer。Fino 拒绝重复 key，而不是匹配其中一个出现位置。未复制其源码。
+- 只有新增 key 创建范围，只有删除 key 释放范围。保留的 key 保留 `NodeId`、DOM 身份、文本节点、局部 Signal、Effect 与监听；内容构建器绝不重跑。
+- 重排使用 `insert_before` 移动每个保留范围（含锚点）。前缀与后缀范围原地不动；父节点、静态兄弟与 For 锚点绝不清空或重建，也绝不写入 `innerHTML`。
+- 每个新条目都在改动既有范围前完整构建。构建器 panic 时先释放该条目 Owner 及其跟踪的节点、Effect 与监听，再继续展开；已构建条目会被释放，上一次列表保持已提交。
+- 删除 key 时先释放条目 Owner，再释放其范围。写入已移除条目的 Signal 不再触达后端或请求帧。
+- 条目内通过条目 Effect 完成的 Signal 更新不会运行协调 Effect。
+- `For::dispose` 释放全部条目与列表锚点；重复释放与父 Owner 释放均幂等。
+- Mock、真实 Web DOM 与 Native 复用同一场景。Web 探针检查真实节点身份与 `insertBefore` 移动；Native 检查 arena 释放与释放后的绘制列表。
+
+`RangeAnchor::move_before` 是整段移动的共享操作：起始锚点、外部节点、结束锚点，全部移动到同一个参考节点之前。
 
 ## 统一 DOM API
 

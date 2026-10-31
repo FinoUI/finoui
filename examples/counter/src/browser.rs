@@ -50,6 +50,15 @@ pub fn run_web_show_scenario(
     run_web_scenario_with_mount(scenario_path, out, Some("show"))
 }
 
+/// Runs the same browser pipeline with the example's explicit keyed For mount.
+/// 使用示例显式提供的 keyed For mount 运行同一浏览器流水线。
+pub fn run_web_keyed_scenario(
+    scenario_path: &Path,
+    out: &Path,
+) -> Result<ScenarioResult, ToolError> {
+    run_web_scenario_with_mount(scenario_path, out, Some("keyed"))
+}
+
 fn run_web_scenario_with_mount(
     scenario_path: &Path,
     out: &Path,

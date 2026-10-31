@@ -10,6 +10,9 @@ use fino::{
 /// 共享的跨后端一致性序列与稳定报告。
 pub mod conformance;
 
+/// Manual keyed For scenario shared by every backend.
+/// 所有后端共用的手工 keyed For 场景。
+pub mod keyed;
 /// Counter-owned smoke checks and scenario invocation.
 /// 计数器示例拥有的冒烟检查与场景调用。
 pub mod runner;

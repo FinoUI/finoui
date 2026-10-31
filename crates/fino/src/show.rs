@@ -60,12 +60,42 @@ impl<B: DomBackend + 'static> RangeAnchor<B> {
         &self.end
     }
 
+    /// Builds a detached anchor pair from two created anchors.
+    /// 用两个已创建锚点构造一个尚未挂载的锚点对。
+    pub(crate) fn from_parts(start: B::Node, end: B::Node) -> Self {
+        Self { start, end }
+    }
+
     /// Inserts one node inside the range, immediately before the end anchor.
     /// 把一个节点插入范围内部，紧邻结束锚点之前。
     pub fn insert(&self, runtime: &Runtime<B>, parent: &B::Node, node: &B::Node) {
         runtime
             .backend_mut()
             .insert_before(parent, node, Some(&self.end));
+    }
+
+    /// Moves the complete range, anchors included, before one reference node.
+    /// 把包含锚点的完整范围移动到单个参考节点之前。
+    ///
+    /// Moving every external node in order keeps the range contiguous without
+    /// clearing the parent or recreating children.
+    /// 按顺序移动每个外部节点，使范围保持连续，同时不清空父节点或重建子节点。
+    pub fn move_before(
+        &self,
+        runtime: &Runtime<B>,
+        parent: &B::Node,
+        nodes: &[B::Node],
+        before: Option<&B::Node>,
+    ) {
+        runtime
+            .backend_mut()
+            .insert_before(parent, &self.start, before);
+        for node in nodes {
+            runtime.backend_mut().insert_before(parent, node, before);
+        }
+        runtime
+            .backend_mut()
+            .insert_before(parent, &self.end, before);
     }
 
     /// Removes one node from the range without touching either anchor.
@@ -105,12 +135,20 @@ pub struct ShowContext<B: DomBackend + 'static> {
 }
 
 impl<B: DomBackend + 'static> ShowContext<B> {
-    fn new(runtime: Runtime<B>, owner: Owner) -> Self {
+    /// Creates the transactional context shared by Show and keyed ranges.
+    /// 创建 Show 与 keyed 范围共用的挂载事务上下文。
+    pub(crate) fn new(runtime: Runtime<B>, owner: Owner) -> Self {
         Self {
             runtime,
             owner,
             created: Vec::new(),
         }
+    }
+
+    /// Takes every node created through this context for terminal cleanup.
+    /// 取走通过该上下文创建的全部节点，供终止清理使用。
+    pub(crate) fn take_created(&mut self) -> Vec<B::Node> {
+        std::mem::take(&mut self.created)
     }
 
     /// Returns the shared runtime for explicit backend operations.

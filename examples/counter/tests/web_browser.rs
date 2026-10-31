@@ -14,7 +14,8 @@ use fino::{
 };
 use fino_counter::{
     conformance::{ConformanceReport, DetachReinsertResult, run_detach_reinsert},
-    runner::{run_mock_conformance, run_mock_show_conformance},
+    keyed::KeyedConformanceReport,
+    runner::{run_mock_conformance, run_mock_keyed_conformance, run_mock_show_conformance},
     show::ShowConformanceReport,
 };
 use serde_json::Value;
@@ -107,6 +108,8 @@ fn web_headless_runs_the_same_scenario_with_real_dom_probes() {
         "detach_reinsert_matches_shared_semantics",
         "anchor_nodes_reject_text_writes",
         "web_remount_restores_reachability",
+        "keyed_for_matches_shared_semantics",
+        "keyed_rows_keep_dom_identity_and_insert_before_moves",
     ] {
         assert!(
             checks
@@ -180,6 +183,58 @@ fn web_headless_runs_the_same_scenario_with_real_dom_probes() {
         web_show.final_stats.nodes_removed,
         mock_show.final_stats.nodes_removed
     );
+
+    let mut web_keyed: KeyedConformanceReport = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("keyed_conformance.json"))
+            .expect("keyed conformance file"),
+    )
+    .expect("keyed conformance JSON");
+    let mock_keyed = run_mock_keyed_conformance().expect("mock keyed conformance");
+    assert_eq!(web_keyed.backend, "web-headless");
+    web_keyed.backend = mock_keyed.backend.clone();
+    assert_eq!(web_keyed.initial_tree, mock_keyed.initial_tree);
+    assert_eq!(web_keyed.reordered_tree, mock_keyed.reordered_tree);
+    assert_eq!(web_keyed.disposed_tree, mock_keyed.disposed_tree);
+    assert_eq!(web_keyed.final_tree, mock_keyed.final_tree);
+    assert_eq!(web_keyed.initial_text, mock_keyed.initial_text);
+    assert_eq!(web_keyed.phases, mock_keyed.phases);
+    assert_eq!(web_keyed.local_update, mock_keyed.local_update);
+    assert_eq!(web_keyed.operations, mock_keyed.operations);
+    assert_eq!(web_keyed.builder_runs, mock_keyed.builder_runs);
+    assert_eq!(
+        web_keyed.stale_write_is_noop,
+        mock_keyed.stale_write_is_noop
+    );
+    assert_eq!(
+        web_keyed.duplicate_key_rejected,
+        mock_keyed.duplicate_key_rejected
+    );
+    assert_eq!(
+        web_keyed.duplicate_recovered,
+        mock_keyed.duplicate_recovered
+    );
+    assert_eq!(web_keyed.dispose_idempotent, mock_keyed.dispose_idempotent);
+    assert_eq!(web_keyed.static_ids_stable, mock_keyed.static_ids_stable);
+    assert_eq!(
+        web_keyed.item_identity_stable,
+        mock_keyed.item_identity_stable
+    );
+    assert_eq!(
+        web_keyed.final_stats.component_executions,
+        mock_keyed.final_stats.component_executions
+    );
+    assert_eq!(
+        web_keyed.final_stats.effect_executions,
+        mock_keyed.final_stats.effect_executions
+    );
+    assert_eq!(
+        web_keyed.final_stats.nodes_created,
+        mock_keyed.final_stats.nodes_created
+    );
+    assert_eq!(
+        web_keyed.final_stats.nodes_removed,
+        mock_keyed.final_stats.nodes_removed
+    );
 }
 
 /// Runs the Show scenario through the same browser pipeline with its explicit mount.
@@ -252,6 +307,68 @@ fn web_headless_runs_the_show_scenario() {
             .any(|check| check["name"] == "scenario_dom_matches_live_dom"
                 && check["status"] == "passed")
     );
+}
+
+/// Runs the keyed scenario through the same browser pipeline with its explicit mount.
+/// 通过同一浏览器流水线及其显式 mount 运行 keyed 场景。
+#[test]
+#[ignore = "launches headless Chromium; run with cargo test -p fino_counter --test web_browser -- --ignored"]
+fn web_headless_runs_the_keyed_scenario() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let run_dir = temporary.path().join("keyed-web");
+    let scenario = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenarios/keyed.json");
+    let output = run_web_scenario_with_mount(&scenario, &run_dir, Some("keyed"));
+    assert!(
+        output.status.success(),
+        "keyed scenario failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let result: Value = serde_json::from_slice(&output.stdout).expect("keyed scenario JSON");
+    assert_eq!(result["status"], "passed");
+    assert_eq!(result["backend"], "web-headless");
+    assert_eq!(result["counters"]["component_executions"], 1);
+    assert_eq!(result["steps"].as_array().map(Vec::len), Some(28));
+
+    let dom = inspect_artifact(&run_dir, SnapshotKind::Dom).expect("keyed DOM");
+    assert_eq!(dom["roots"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        dom["nodes"]
+            .as_array()
+            .expect("keyed DOM nodes")
+            .iter()
+            .filter(|node| node["kind"] == "anchor")
+            .count(),
+        6
+    );
+    let a11y = inspect_artifact(&run_dir, SnapshotKind::A11y).expect("keyed a11y");
+    let host = a11y["nodes"]
+        .as_array()
+        .expect("keyed a11y nodes")
+        .iter()
+        .find(|node| node["name"] == "Keyed host")
+        .expect("keyed host");
+    assert_eq!(host["text"], "HostNextD=1E=0Tail");
+
+    let browser: Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("browser.json")).expect("browser checks"),
+    )
+    .expect("browser JSON");
+    assert_eq!(browser["status"], "passed");
+    for expected in [
+        "scenario_executes_in_chromium",
+        "scenario_dom_matches_live_dom",
+        "keyed_rows_keep_dom_identity_and_insert_before_moves",
+    ] {
+        assert!(
+            browser["checks"]
+                .as_array()
+                .expect("browser checks")
+                .iter()
+                .any(|check| check["name"] == expected && check["status"] == "passed"),
+            "missing passing browser check {expected}"
+        );
+    }
 }
 
 /// Proves a failed rerun removes stale captures without deleting unrelated files.
