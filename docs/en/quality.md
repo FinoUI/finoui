@@ -82,7 +82,7 @@ cargo run -p fino_counter -- conformance --backend mock --format json
 cargo run -p fino_counter -- conformance --backend native-offscreen --format json
 ```
 
-The report contains `tree` and `final_tree` (`LogicalTreeSnapshot`), an accessibility projection, click results, `checkpoints` and `final_stats` (`RuntimeStats`), normalized `operations`, and the 100-increment `batch` result. All maps use stable key ordering and no platform handle appears in the schema. The `conformance` command validates every contract field, prints `status` and `violations` in JSON and human output, and exits non-zero when any field fails.
+The report contains `tree` and `final_tree` (`LogicalTreeSnapshot`), an accessibility projection, click results, `checkpoints` and `final_stats` (`RuntimeStats`), normalized `operations`, and the 100-increment `batch` result. All maps use stable key ordering and no platform handle appears in the schema. The `conformance` command validates the implemented contract fields, prints `status` and `violations` in JSON and human output, and exits non-zero when any of those fields fails.
 
 ### Text and layout tests
 
