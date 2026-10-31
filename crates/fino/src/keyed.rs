@@ -330,6 +330,7 @@ impl<B: DomBackend + 'static, K> ForEntry<B, K> {
                 continue;
             }
             runtime.backend_mut().release(node);
+            released.push(node.clone());
         }
     }
 

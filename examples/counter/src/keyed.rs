@@ -82,6 +82,7 @@ pub struct KeyedMount<B: DomBackend + 'static> {
     handles: Rc<RefCell<BTreeMap<String, B::Node>>>,
     values: Rc<RefCell<BTreeMap<String, B::Node>>>,
     locals: Rc<RefCell<BTreeMap<String, Signal<i32>>>>,
+    history: Option<Rc<RefCell<BTreeMap<String, u32>>>>,
 }
 
 impl<B: DomBackend + 'static> KeyedMount<B> {
@@ -133,6 +134,20 @@ impl<B: DomBackend + 'static> KeyedMount<B> {
         self.runs.borrow().clone()
     }
 
+    /// Returns cumulative builder counts when the mount opted into history.
+    /// 当挂载启用了历史记录时，返回累计构建器计数。
+    ///
+    /// Without history this falls back to live counts, so long-lived browser
+    /// pages never retain an unbounded per-key map.
+    /// 未启用历史记录时回退到存活计数，因此长期存活的浏览器页面不会保留无限
+    /// 增长的按 key 映射。
+    pub fn cumulative_builder_runs(&self) -> BTreeMap<String, u32> {
+        self.history
+            .as_ref()
+            .map(|history| history.borrow().clone())
+            .unwrap_or_else(|| self.runs.borrow().clone())
+    }
+
     /// Returns the keys still retained by probe instrumentation.
     /// 返回探针仍保留的 key。
     pub fn probe_keys(&self) -> Vec<String> {
@@ -162,6 +177,7 @@ struct KeyedParts<B: DomBackend + 'static> {
     handles: Rc<RefCell<BTreeMap<String, B::Node>>>,
     values: Rc<RefCell<BTreeMap<String, B::Node>>>,
     locals: Rc<RefCell<BTreeMap<String, Signal<i32>>>>,
+    history: Option<Rc<RefCell<BTreeMap<String, u32>>>>,
 }
 
 impl<B: DomBackend + 'static> Clone for KeyedParts<B> {
@@ -171,6 +187,7 @@ impl<B: DomBackend + 'static> Clone for KeyedParts<B> {
             handles: Rc::clone(&self.handles),
             values: Rc::clone(&self.values),
             locals: Rc::clone(&self.locals),
+            history: self.history.as_ref().map(Rc::clone),
         }
     }
 }
@@ -180,6 +197,28 @@ impl<B: DomBackend + 'static> Clone for KeyedParts<B> {
 pub fn mount_keyed<B: DomBackend + 'static>(
     runtime: &mut Runtime<B>,
     owner: &Owner,
+) -> KeyedMount<B> {
+    mount_keyed_inner(runtime, owner, false)
+}
+
+/// Mounts the keyed probe with bounded-lifetime cumulative builder history.
+/// 挂载 keyed 探针，并启用生命周期有限的累计构建器历史。
+///
+/// Use this only for a finite conformance run. Long-lived browser pages should
+/// use [`mount_keyed`] so distinct keys cannot grow retained instrumentation.
+/// 仅用于有限的一致性运行。长期存活的浏览器页面应使用 [`mount_keyed`]，避免
+/// 不同 key 持续增长保留的探针数据。
+pub fn mount_keyed_with_history<B: DomBackend + 'static>(
+    runtime: &mut Runtime<B>,
+    owner: &Owner,
+) -> KeyedMount<B> {
+    mount_keyed_inner(runtime, owner, true)
+}
+
+fn mount_keyed_inner<B: DomBackend + 'static>(
+    runtime: &mut Runtime<B>,
+    owner: &Owner,
+    record_history: bool,
 ) -> KeyedMount<B> {
     runtime.component_executions().increment();
     let keys = owner.signal_named("keyed/keys", Vec::new());
@@ -216,6 +255,7 @@ pub fn mount_keyed<B: DomBackend + 'static>(
         handles: Rc::new(RefCell::new(BTreeMap::new())),
         values: Rc::new(RefCell::new(BTreeMap::new())),
         locals: Rc::new(RefCell::new(BTreeMap::new())),
+        history: record_history.then(|| Rc::new(RefCell::new(BTreeMap::new()))),
     };
     let read_keys = keys.clone();
     let builder_parts = parts.clone();
@@ -240,6 +280,7 @@ pub fn mount_keyed<B: DomBackend + 'static>(
         handles: parts.handles,
         values: parts.values,
         locals: parts.locals,
+        history: parts.history,
     }
 }
 
@@ -260,6 +301,9 @@ fn item_row<B: DomBackend + 'static>(
     parts: &KeyedParts<B>,
 ) -> Vec<B::Node> {
     *parts.runs.borrow_mut().entry(key.to_owned()).or_insert(0) += 1;
+    if let Some(history) = &parts.history {
+        *history.borrow_mut().entry(key.to_owned()).or_insert(0) += 1;
+    }
     let button = context.create_element(Tag::Button);
     context.set_attribute(&button, Attribute::AriaLabel, Some(&format!("Row {key}")));
     let value = context.create_text("");
@@ -626,6 +670,26 @@ impl KeyedConformanceReport {
             self.probe_storage_bounded,
             true,
         );
+        let expected_builder_runs: BTreeMap<String, u32> = [
+            ("A", 1),
+            ("B", 1),
+            ("C", 1),
+            ("D", 1),
+            ("E", 1),
+            ("M", 1),
+            ("Q", 1),
+            ("X", 1),
+        ]
+        .into_iter()
+        .map(|(key, count)| (key.to_owned(), count))
+        .collect();
+        if self.builder_runs != expected_builder_runs {
+            push(
+                &mut violations,
+                "builder_runs",
+                "cumulative builder counts must survive whole-list disposal",
+            );
+        }
         check(
             &mut violations,
             "final_stats.component_executions",
@@ -790,7 +854,7 @@ pub fn run_keyed_conformance<B: HeadlessBackend + 'static>(
     let slot: Rc<RefCell<Option<KeyedMount<B>>>> = Rc::new(RefCell::new(None));
     let capture = Rc::clone(&slot);
     let root = host.mount("keyed/conformance", move |runtime, owner| {
-        let mount = mount_keyed(runtime, owner);
+        let mount = mount_keyed_with_history(runtime, owner);
         let root = mount.root.clone();
         *capture.borrow_mut() = Some(mount);
         root
@@ -996,7 +1060,7 @@ pub fn run_keyed_conformance<B: HeadlessBackend + 'static>(
     mount.dispose();
     let dispose_idempotent = dispose_idempotent && operation_counts(&host) == second_dispose_before;
 
-    let builder_runs = mount.builder_runs();
+    let builder_runs = mount.cumulative_builder_runs();
     let reconcile_executions = reconcile_executions(&host);
 
     host.dispose();

@@ -608,6 +608,7 @@ try {
     assertEqual(keyedConformance.phases.length, 11, 'keyed phase count');
     assert(keyedConformance.item_identity_stable, 'keyed item identity stays stable');
     assert(keyedConformance.probe_storage_bounded, 'keyed probe storage stays bounded');
+    assertEqual(Object.keys(keyedConformance.builder_runs).length, 8, 'cumulative builder runs survive disposal');
     assert(keyedConformance.static_ids_stable, 'keyed static ids stay stable');
     assert(keyedConformance.stale_write_is_noop, 'removed key writes stay local');
     assert(keyedConformance.duplicate_key_rejected, 'duplicate keys reject atomically');

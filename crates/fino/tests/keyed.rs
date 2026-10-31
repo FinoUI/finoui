@@ -1132,6 +1132,10 @@ impl StrictBackend {
         &self.inner
     }
 
+    fn contains(&self, node: MockNode) -> bool {
+        self.live.contains(&node)
+    }
+
     fn release_subtree(&mut self, node: MockNode) {
         assert!(
             self.live.contains(&node),
@@ -1399,4 +1403,46 @@ fn keyed_for_effect_rejects_foreign_targets() {
         runtime.backend().text_content(&root).as_deref(),
         Some("ATail")
     );
+}
+
+/// A builder may return the same external root twice; terminal disposal still
+/// releases that live node exactly once.
+/// 构建器可以重复返回同一个外部根节点；终止释放仍只释放该存活节点一次。
+#[test]
+fn keyed_for_releases_duplicate_external_roots_once() {
+    let runtime = Runtime::new(StrictBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = {
+        let node = runtime.backend_mut().create_text("Tail");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    let external = runtime.backend_mut().create_element(Tag::Button);
+    let list = {
+        let read_items = items.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/strict-duplicate-root",
+            move || read_items.get(),
+            move |_context: &mut ForContext<StrictBackend>, _key| vec![external, external],
+        )
+    };
+    assert!(!list.is_empty());
+    list.dispose();
+    list.dispose();
+    assert!(
+        !runtime.backend().contains(external),
+        "the duplicate external root is released exactly once"
+    );
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot().nodes.len(),
+        2,
+        "only the static root and tail remain stored"
+    );
+    owner.dispose();
 }

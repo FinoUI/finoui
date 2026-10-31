@@ -281,3 +281,33 @@ fn keyed_probe_storage_stays_bounded() {
     mount.dispose();
     assert!(mount.probe_keys().is_empty());
 }
+
+/// Cumulative builder counts survive whole-list disposal, while live probe
+/// storage remains bounded for long-lived mounts without history.
+/// 累计构建器计数在整体释放后仍保留，而不启用历史的长期挂载仍保持探针存储有界。
+#[test]
+fn keyed_builder_history_survives_dispose_without_unbounded_probe_state() {
+    let mock = run_mock_keyed_conformance().expect("mock keyed conformance");
+    assert_eq!(
+        mock.builder_runs,
+        [
+            ("A", 1),
+            ("B", 1),
+            ("C", 1),
+            ("D", 1),
+            ("E", 1),
+            ("M", 1),
+            ("Q", 1),
+            ("X", 1),
+        ]
+        .into_iter()
+        .map(|(key, count)| (key.to_owned(), count))
+        .collect(),
+        "the finite conformance report keeps cumulative history after disposal"
+    );
+    assert!(mock.probe_storage_bounded);
+    assert!(mock.validate().is_empty(), "{:?}", mock.validate());
+
+    let native = run_native_offscreen_keyed_conformance().expect("native keyed conformance");
+    assert_eq!(native.builder_runs, mock.builder_runs);
+}
