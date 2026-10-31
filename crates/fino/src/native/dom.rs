@@ -803,6 +803,23 @@ impl DomBackend for NativeDom {
             );
             ancestor = self.nodes.get(node).and_then(|data| data.parent);
         }
+        // Validate the insertion reference before detaching the moving child.
+        // 在分离待移动子节点前先验证插入参考。
+        let Some(parent_data) = self.nodes.get(*parent) else {
+            panic!("native insert parent must exist");
+        };
+        if !matches!(parent_data.kind, NodeKind::Element(_)) {
+            panic!("native insert parent must be an element");
+        }
+        if let Some(anchor) = anchor {
+            assert!(
+                parent_data
+                    .children
+                    .iter()
+                    .any(|candidate| candidate == anchor),
+                "native insert anchor must be a child of the parent"
+            );
+        }
         if let Some(old_parent) = self.nodes.get(*child).and_then(|data| data.parent)
             && let Some(data) = self.nodes.get_mut(old_parent)
         {
@@ -866,6 +883,12 @@ impl DomBackend for NativeDom {
             .parent = None;
         self.emit(NativeBackendOp::Remove { node: stable });
         self.mark_structural_change();
+    }
+
+    /// Returns the arena stable identifier for ownership indexes.
+    /// 返回 arena 稳定标识，供所有权索引使用。
+    fn node_identity(&self, node: &Self::Node) -> Option<u64> {
+        self.nodes.get(*node).map(|data| data.stable_id)
     }
 
     fn set_text(&mut self, node: &Self::Node, value: &str) {
@@ -1125,8 +1148,19 @@ impl HeadlessBackend for NativeDom {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
     use super::*;
     use crate::native::geom::Point;
+
+    fn panic_message(outcome: std::thread::Result<()>) -> String {
+        let payload = outcome.expect_err("expected a panic");
+        payload
+            .downcast_ref::<&str>()
+            .map(|value| (*value).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default()
+    }
 
     fn dom() -> NativeDom {
         NativeDom::new_offscreen(
@@ -1185,6 +1219,57 @@ mod tests {
             "reinserted parent becomes reachable with its children"
         );
         assert_eq!(dom.find_all(&selector()), vec![button]);
+    }
+
+    /// A reference outside the destination parent is rejected before the moving
+    /// child is detached, so the failed insert is atomic.
+    /// 目标父节点之外的参考会在分离待移动子节点前被拒绝，因此失败插入是原子的。
+    #[test]
+    fn inserting_before_a_foreign_reference_is_atomic() {
+        let mut dom = dom();
+        let root = dom.create_element(Tag::Button);
+        let first = dom.create_text("first");
+        let second = dom.create_text("second");
+        dom.insert_before(&root, &first, None);
+        dom.insert_before(&root, &second, None);
+        let other = dom.create_element(Tag::Button);
+        let moving = dom.create_text("moving");
+        dom.insert_before(&other, &moving, None);
+        let foreign = dom.create_text("foreign");
+        dom.insert_before(&other, &foreign, None);
+        let root_children = dom.nodes.get(root).expect("root").children.clone();
+        let other_children = dom.nodes.get(other).expect("other").children.clone();
+        let moving_parent = dom.nodes.get(moving).expect("moving").parent;
+        let stored = dom.nodes.len();
+
+        let message = panic_message(catch_unwind(AssertUnwindSafe(|| {
+            dom.insert_before(&root, &moving, Some(&foreign));
+        })));
+        assert!(
+            message.contains("native insert anchor must be a child of the parent"),
+            "{message}"
+        );
+        assert_eq!(
+            dom.nodes.get(root).expect("root").children,
+            root_children,
+            "the destination siblings stay unchanged"
+        );
+        assert_eq!(
+            dom.nodes.get(other).expect("other").children,
+            other_children,
+            "the old parent keeps its children"
+        );
+        assert_eq!(
+            dom.nodes.get(moving).expect("moving").parent,
+            moving_parent,
+            "the moving child is never detached"
+        );
+        assert_eq!(dom.nodes.len(), stored, "node storage is unchanged");
+        assert_eq!(dom.text_content(root).as_deref(), Some("firstsecond"));
+        assert_eq!(dom.text_content(other).as_deref(), Some("movingforeign"));
+
+        dom.insert_before(&root, &moving, Some(&second));
+        assert_eq!(dom.text_content(root).as_deref(), Some("firstmovingsecond"));
     }
 
     /// Detaching one child leaves siblings attached and allows the same child back.

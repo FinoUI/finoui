@@ -17,6 +17,12 @@ export const MANAGED_ARTIFACTS = [
   'trace.json',
   'result.json',
   'browser.json',
+  'conformance.json',
+  'detach_reinsert.json',
+  'remount.json',
+  'anchor_misuse.json',
+  'show_conformance.json',
+  'keyed_conformance.json',
 ];
 
 /**

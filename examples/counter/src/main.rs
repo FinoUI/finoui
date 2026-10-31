@@ -6,15 +6,16 @@ use std::{panic::AssertUnwindSafe, path::PathBuf, process::ExitCode};
 use clap::{Parser, Subcommand, ValueEnum};
 use fino::scenario::{self, ScenarioResult, Status, ToolError};
 #[cfg(not(target_arch = "wasm32"))]
-use fino_counter::browser::{run_web_scenario, run_web_show_scenario};
+use fino_counter::browser::{run_web_keyed_scenario, run_web_scenario, run_web_show_scenario};
 use fino_counter::conformance::{ConformanceReport, ContractViolation};
 use fino_counter::runner::{
-    check_counter, run_mock_conformance, run_mock_scenario, run_mock_show_scenario,
+    check_counter, run_mock_conformance, run_mock_keyed_scenario, run_mock_scenario,
+    run_mock_show_scenario,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fino_counter::runner::{
-    run_native_offscreen_conformance, run_native_offscreen_scenario,
-    run_native_offscreen_show_scenario,
+    run_native_offscreen_conformance, run_native_offscreen_keyed_scenario,
+    run_native_offscreen_scenario, run_native_offscreen_show_scenario,
 };
 use serde::Serialize;
 
@@ -82,6 +83,7 @@ enum ScenarioCommand {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ScenarioMount {
     Counter,
+    Keyed,
     Show,
 }
 
@@ -160,6 +162,7 @@ fn run() -> ExitCode {
                     "artifacts/runs/{}-{}",
                     match mount {
                         ScenarioMount::Counter => "counter",
+                        ScenarioMount::Keyed => "keyed",
                         ScenarioMount::Show => "show",
                     },
                     backend.artifact_suffix()
@@ -168,16 +171,19 @@ fn run() -> ExitCode {
             let run = scenario::load_scenario(&path).and_then(|scenario| match backend {
                 Backend::Mock => match mount {
                     ScenarioMount::Counter => run_mock_scenario(&scenario, &out),
+                    ScenarioMount::Keyed => run_mock_keyed_scenario(&scenario, &out),
                     ScenarioMount::Show => run_mock_show_scenario(&scenario, &out),
                 },
                 #[cfg(not(target_arch = "wasm32"))]
                 Backend::WebHeadless => match mount {
                     ScenarioMount::Counter => run_web_scenario(&path, &out),
+                    ScenarioMount::Keyed => run_web_keyed_scenario(&path, &out),
                     ScenarioMount::Show => run_web_show_scenario(&path, &out),
                 },
                 #[cfg(not(target_arch = "wasm32"))]
                 Backend::NativeOffscreen => match mount {
                     ScenarioMount::Counter => run_native_offscreen_scenario(&scenario, &out),
+                    ScenarioMount::Keyed => run_native_offscreen_keyed_scenario(&scenario, &out),
                     ScenarioMount::Show => run_native_offscreen_show_scenario(&scenario, &out),
                 },
             });

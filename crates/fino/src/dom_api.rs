@@ -139,6 +139,10 @@ pub trait DomBackend {
     }
     /// Inserts a child before an optional anchor without clearing siblings.
     /// 在可选锚点前插入子节点，不清空兄弟节点。
+    ///
+    /// Backends must validate the parent and reference before detaching or
+    /// mutating the child, so an invalid reference fails atomically.
+    /// 后端必须在分离或修改子节点前验证父节点与参考节点，使非法引用原子失败。
     fn insert_before(
         &mut self,
         parent: &Self::Node,
@@ -162,6 +166,18 @@ pub trait DomBackend {
     /// 通用后端无法发现后代，因此默认只做分离；会保留存储的后端必须覆盖它。
     fn release(&mut self, node: &Self::Node) {
         self.remove(node);
+    }
+    /// Returns a stable backend identity for O(1) ownership indexes.
+    /// 返回用于 O(1) 所有权索引的稳定后端标识。
+    ///
+    /// The default returns `None`, so legacy and custom backends keep using
+    /// `Eq`-based fallback comparisons. Built-in backends return their stable
+    /// node record identity rather than an address or formatted string.
+    /// 默认返回 `None`，旧版与自定义后端继续使用基于 `Eq` 的回退比较。内建
+    /// 后端返回稳定节点记录标识，而不是地址或格式化字符串。
+    fn node_identity(&self, node: &Self::Node) -> Option<u64> {
+        let _ = node;
+        None
     }
     /// Replaces only the content of an existing text node.
     /// 仅替换现有文本节点的内容。

@@ -23,8 +23,24 @@ use crate::{
 #[derive(Clone)]
 pub struct WebNode {
     node: Node,
+    /// Stable creation-order record identifier; never reused after release.
+    /// 稳定的创建顺序记录标识；释放后绝不复用。
+    id: u64,
     tag: Option<Tag>,
     anchor: bool,
+}
+
+impl WebNode {
+    /// Returns the underlying browser node for host-side live probes.
+    /// 返回底层浏览器节点，供 Host 侧实时探针使用。
+    ///
+    /// The host must only read the node while it is still mounted; disposal
+    /// removes the root but keeps this handle valid as a detached DOM node.
+    /// Host 只能在节点仍挂载时读取；释放会移除根节点，但此句柄作为已分离的
+    /// DOM 节点仍然有效。
+    pub fn node(&self) -> &Node {
+        &self.node
+    }
 }
 
 impl PartialEq for WebNode {
@@ -165,9 +181,15 @@ impl DomBackend {
     /// 为一个真实浏览器节点分配稳定的创建顺序标识。
     fn allocate_node(&mut self, node: Node, tag: Option<Tag>, anchor: bool) -> WebNode {
         self.next_node += 1;
-        let handle = WebNode { node, tag, anchor };
+        let id = self.next_node;
+        let handle = WebNode {
+            node,
+            id,
+            tag,
+            anchor,
+        };
         self.nodes.push(NodeRecord {
-            id: self.next_node,
+            id,
             node: handle.clone(),
             removed: false,
         });
@@ -428,6 +450,12 @@ impl crate::dom_api::DomBackend for DomBackend {
         }
         self.set_removed(&node.node, true);
         self.emit(WebBackendOp::Remove);
+    }
+
+    /// Returns the stable record identifier carried by the handle without a scan.
+    /// 直接返回句柄携带的稳定记录标识，不执行扫描。
+    fn node_identity(&self, node: &Self::Node) -> Option<u64> {
+        Some(node.id)
     }
 
     /// Replaces only the existing text node's `nodeValue`.

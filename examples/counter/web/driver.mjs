@@ -112,6 +112,53 @@ async function runCheck(name, operation) {
 }
 
 /**
+ * Carries a completed scenario whose own steps failed without a driver error.
+ *
+ * The outer catch still writes this run's artifacts and a failed browser
+ * report, while normal driver assertions keep using `emitFailure`.
+ * 携带自身步骤失败、但没有驱动错误的已完成场景。
+ *
+ * 外层 catch 仍会写出本次运行的产物与失败浏览器报告，普通驱动断言继续使用
+ * `emitFailure`。
+ */
+class ScenarioFailed extends Error {
+  /**
+   * @param {object} bundle Serialized scenario bundle from wasm.
+   */
+  constructor(bundle) {
+    super('the scenario reported a failed result');
+    this.bundle = bundle;
+  }
+}
+
+/**
+ * Writes the exact artifact bytes a completed scenario run produced.
+ * 写入已完成场景运行产生的精确产物字节。
+ *
+ * @param {object} bundle Serialized scenario bundle from wasm.
+ */
+function writeScenarioArtifacts(bundle) {
+  for (const [relative, contents] of Object.entries(bundle.artifacts)) {
+    const destination = path.join(outDir, relative);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, contents);
+  }
+}
+
+/**
+ * Writes the browser report with the exact scenario status.
+ * 使用准确的场景状态写入浏览器报告。
+ *
+ * @param {'passed'|'failed'} status Overall scenario status.
+ */
+function writeBrowserReport(status) {
+  fs.writeFileSync(
+    path.join(outDir, 'browser.json'),
+    `${JSON.stringify({ schema: 1, backend: 'web-headless', status, checks }, null, 2)}\n`,
+  );
+}
+
+/**
  * Writes a structured failure payload and sets a non-zero exit code.
  *
  * The browser and server still shut down through the surrounding `finally`
@@ -174,7 +221,8 @@ const runDirLabel = required('run-dir-label');
 const scenarioPath = path.resolve(required('scenario'));
 const mount = args.get('mount') ?? 'counter';
 const isShow = mount === 'show';
-if (mount !== 'counter' && mount !== 'show') {
+const isKeyed = mount === 'keyed';
+if (mount !== 'counter' && mount !== 'show' && mount !== 'keyed') {
   fail('UI_BROWSER_MOUNT', `unknown example mount ${mount}`);
 }
 const browserPath = args.get('browser');
@@ -250,6 +298,18 @@ try {
         },
       });
     }
+    window.__finoInsertBeforeCalls = 0;
+    const insertBefore = Node.prototype.insertBefore;
+    Node.prototype.insertBefore = function (child, reference) {
+      window.__finoInsertBeforeCalls += 1;
+      return insertBefore.call(this, child, reference);
+    };
+    window.__finoIsSameNodeCalls = 0;
+    const isSameNode = Node.prototype.isSameNode;
+    Node.prototype.isSameNode = function (other) {
+      window.__finoIsSameNodeCalls += 1;
+      return isSameNode.call(this, other);
+    };
   });
 
   await page.goto(`${origin}/index.html`);
@@ -417,34 +477,50 @@ try {
   await page.goto(`${origin}/index.html`);
   await page.waitForFunction(() => window.fino instanceof Object);
 
+  // Mounts an independent keyed page first so a scenario probe that scans the
+  // document instead of its own root would read the wrong host.
+  // 先挂载一个独立 keyed 页面，使扫描文档而非自身根节点的场景探针读到错误宿主。
+  if (isKeyed) {
+    await page.evaluate(() => {
+      const decoy = new window.fino.KeyedPage();
+      decoy.set_keys(JSON.stringify(['Decoy']));
+      window.__finoDecoyKeyed = decoy;
+    });
+  }
+
   let bundle;
   await runCheck('scenario_executes_in_chromium', async () => {
     const serialized = await page.evaluate(
-      ({ scenario, runDirLabel, isShow }) =>
+      ({ scenario, runDirLabel, isShow, isKeyed }) =>
         isShow
           ? window.fino.run_show_scenario(scenario, runDirLabel)
-          : window.fino.run_scenario(scenario, runDirLabel),
-      { scenario, runDirLabel, isShow },
+          : isKeyed
+            ? window.fino.run_keyed_scenario(scenario, runDirLabel)
+            : window.fino.run_scenario(scenario, runDirLabel),
+      { scenario, runDirLabel, isShow, isKeyed },
     );
     bundle = JSON.parse(serialized);
     assert(bundle.result, 'the scenario must return a result');
     assert(Array.isArray(bundle.result.steps), 'the scenario must return ordered steps');
     assertEqual(bundle.result.backend, 'web-headless', 'scenario backend');
     assert(
-      bundle.result.steps.length >= 1 &&
-        bundle.result.steps.length <= scenarioDocument.steps.length,
-      'the scenario must report at least one executed step and no more than its protocol steps',
+      bundle.result.steps.length <= scenarioDocument.steps.length,
+      'the scenario must not report more steps than its protocol steps',
     );
     assertEqual(bundle.result.counters.component_executions, 1, 'scenario component executions');
   });
 
+  if (bundle.result.status !== 'passed') {
+    throw new ScenarioFailed(bundle);
+  }
+
   await runCheck('scenario_dom_matches_live_dom', async () => {
     if (isShow) {
-      const live = await page.evaluate(() => ({
-        hostText: document.querySelector('button[aria-label="Show host"]')?.textContent,
-        action: document.querySelector('button[aria-label="Show action"]'),
-        innerHtmlSets: window.__finoInnerHtmlSets,
-      }));
+      const live = bundle.live_root;
+      const innerHtmlSets = await page.evaluate(() => window.__finoInnerHtmlSets);
+      assert(live, 'the scenario page must expose its live Show root probe');
+      assertEqual(live.schema, 1, 'Show live probe schema');
+      assert(live.mounted_in_body, 'the Show host is mounted directly in document.body');
       const dom = JSON.parse(bundle.artifacts['dom.json']);
       assertEqual(dom.roots.length, 1, 'Show DOM root count');
       const anchors = dom.nodes.filter((node) => node.kind === 'anchor');
@@ -453,17 +529,75 @@ try {
       const host = a11y.nodes.find((node) => node.name === 'Show host');
       assert(host, 'Show host must remain reachable');
       assertEqual(host.text, 'HostToggleTail', 'Show host text after hiding');
-      assertEqual(live.hostText, 'HostToggleTail', 'live Show host text');
-      assertEqual(live.action, null, 'removed Show action must be unreachable');
-      assertEqual(live.innerHtmlSets, 0, 'innerHTML assignments during Show scenario');
+      assertEqual(live.text, host.text, 'live Show host text matches a11y snapshot');
+      assert(!live.labels.includes('Show action'), 'removed Show action must be unreachable');
+      assertEqual(innerHtmlSets, 0, 'innerHTML assignments during Show scenario');
       assertEqual(pageErrors.length, 0, 'Show page errors');
       return;
     }
-    const live = await page.evaluate(() => ({
-      text: document.querySelector('button')?.textContent,
-      inBody: document.querySelector('button')?.parentNode === document.body,
-      innerHtmlSets: window.__finoInnerHtmlSets,
-    }));
+    if (isKeyed) {
+      const live = bundle.live_keyed;
+      const innerHtmlSets = await page.evaluate(() => window.__finoInnerHtmlSets);
+      assert(live, 'the scenario page must expose its live keyed probe');
+      assertEqual(live.schema, 1, 'keyed live probe schema');
+      assert(live.mounted_in_body, 'the keyed host is mounted directly in document.body');
+      const dom = JSON.parse(bundle.artifacts['dom.json']);
+      assertEqual(dom.roots.length, 1, 'keyed DOM root count');
+      const ids = dom.nodes.map((node) => node.id);
+      assertEqual(new Set(ids).size, ids.length, 'keyed DOM ids are unique');
+      const byId = new Map(dom.nodes.map((node) => [node.id, node]));
+      const domHost = dom.nodes.find(
+        (node) => node.attributes['aria-label'] === 'Keyed host',
+      );
+      assert(domHost, 'the keyed host must be present in the DOM snapshot');
+      const textOf = (id) => {
+        const node = byId.get(id);
+        if (!node) {
+          return '';
+        }
+        if (node.kind === 'text') {
+          return node.text ?? '';
+        }
+        return (node.children ?? []).map(textOf).join('');
+      };
+      const rowsOf = (id) => {
+        const node = byId.get(id);
+        if (!node) {
+          return [];
+        }
+        const label = node.attributes?.['aria-label'];
+        const own = label?.startsWith('Row ') ? [label] : [];
+        return own.concat(...(node.children ?? []).map(rowsOf));
+      };
+      const domHostText = textOf(domHost.id);
+      const domRows = rowsOf(domHost.id);
+      const a11y = JSON.parse(bundle.artifacts['a11y.json']);
+      const host = a11y.nodes.find((node) => node.name === 'Keyed host');
+      assert(host, 'keyed host must remain reachable');
+      const a11yRows = a11y.nodes
+        .filter((node) => typeof node.name === 'string' && node.name.startsWith('Row '))
+        .map((node) => node.name);
+      assertEqual(live.host_text, host.text, 'live host text matches a11y snapshot');
+      assertEqual(live.host_text, domHostText, 'live host text matches DOM snapshot');
+      assertEqual(
+        live.rows.join(','),
+        domRows.join(','),
+        'live row order matches DOM snapshot',
+      );
+      assertEqual(
+        a11yRows.join(','),
+        live.rows.join(','),
+        'live row order matches a11y node order',
+      );
+      assertEqual(innerHtmlSets, 0, 'innerHTML assignments during keyed scenario');
+      assertEqual(pageErrors.length, 0, 'keyed page errors');
+      return;
+    }
+    const live = bundle.live_root;
+    const innerHtmlSets = await page.evaluate(() => window.__finoInnerHtmlSets);
+    assert(live, 'the scenario page must expose its live counter root probe');
+    assertEqual(live.schema, 1, 'counter live probe schema');
+    assert(live.mounted_in_body, 'scenario counter lives on document.body');
     const dom = JSON.parse(bundle.artifacts['dom.json']);
     assertEqual(dom.roots.length, 1, 'DOM root count');
     const domText = dom.nodes
@@ -476,10 +610,67 @@ try {
     assertEqual(a11y.nodes.length, 1, 'accessibility node count');
     assertEqual(a11y.nodes[0].name, 'Increment counter', 'accessibility name');
     assertEqual(a11y.nodes[0].text, live.text, 'accessibility text against live DOM text');
-    assert(live.inBody, 'scenario counter lives on document.body');
-    assertEqual(live.innerHtmlSets, 0, 'innerHTML assignments during scenario');
+    assertEqual(innerHtmlSets, 0, 'innerHTML assignments during scenario');
     assertEqual(pageErrors.length, 0, 'page errors');
   });
+
+  if (isKeyed) {
+    await runCheck('keyed_scenario_root_is_isolated', async () => {
+      const state = await page.evaluate(() => ({
+        decoyPresent: Boolean(window.__finoDecoyKeyed),
+        keyedHosts: document.querySelectorAll('button[aria-label="Keyed host"]').length,
+      }));
+      assert(state.decoyPresent, 'the independent keyed page must stay mounted');
+      assertEqual(
+        state.keyedHosts,
+        1,
+        'the scenario host is disposed and only the independent page remains',
+      );
+    });
+
+    if (process.env.FINO_WEB_KEYED_REPEAT === '1') {
+      await runCheck('keyed_repeated_runs_do_not_accumulate_roots', async () => {
+        const repeated = JSON.parse(
+          await page.evaluate(
+            ({ scenario, runDirLabel }) =>
+              window.fino.run_keyed_scenario(scenario, `${runDirLabel}-repeat`),
+            { scenario, runDirLabel },
+          ),
+        );
+        assertEqual(repeated.result.status, 'passed', 'repeated scenario status');
+        assertEqual(repeated.result.backend, 'web-headless', 'repeated scenario backend');
+        assertEqual(
+          repeated.result.steps.length,
+          bundle.result.steps.length,
+          'repeated scenario step count',
+        );
+        assert(repeated.live_keyed, 'the repeated run must capture its own keyed probe');
+        assertEqual(
+          JSON.stringify(repeated.live_keyed),
+          JSON.stringify(bundle.live_keyed),
+          'both runs produce the same deterministic keyed probe',
+        );
+        for (const name of [
+          'result.json',
+          'dom.json',
+          'a11y.json',
+          'reactive.json',
+          'trace.json',
+        ]) {
+          assert(
+            Object.prototype.hasOwnProperty.call(repeated.artifacts, name),
+            `repeated run is missing ${name}`,
+          );
+        }
+        const state = await page.evaluate(() => ({
+          decoyPresent: Boolean(window.__finoDecoyKeyed),
+          keyedHosts: document.querySelectorAll('button[aria-label="Keyed host"]').length,
+        }));
+        assert(state.decoyPresent, 'the independent keyed page survives both runs');
+        assertEqual(state.keyedHosts, 1, 'repeated runs never accumulate scenario roots');
+      });
+    }
+  }
 
   // Reloads so the conformance sequence mounts into a clean body.
   // 重新加载，使一致性序列挂载到干净的 body。
@@ -491,6 +682,7 @@ try {
   let remount;
   let anchorMisuse;
   let showConformance;
+  let keyedConformance;
   await runCheck('conformance_reports_shared_runtime_stats', async () => {
     const serialized = await page.evaluate(() => window.fino.run_conformance());
     conformance = JSON.parse(serialized);
@@ -559,9 +751,180 @@ try {
     assertEqual(showConformance.operations.create_anchor, 2, 'Show create_anchor operations');
     assert(showConformance.storage_stable, 'Show storage does not grow across toggles');
     assertEqual(showConformance.storage_loops, 10, 'Show storage loop count');
-    assertEqual(showConformance.operations.remove, 1, 'Show remove operations');
+    assertEqual(showConformance.operations.remove, 25, 'Show remove operations');
     assertEqual(showConformance.operations.release, 26, 'Show release operations');
     assertEqual(showConformance.operations.unlisten, 13, 'Show unlisten operations');
+  });
+
+  await runCheck('keyed_for_matches_shared_semantics', async () => {
+    const serialized = await page.evaluate(() => window.fino.run_keyed_conformance_probe());
+    keyedConformance = JSON.parse(serialized);
+    assertEqual(keyedConformance.schema, 1, 'keyed conformance schema');
+    assertEqual(keyedConformance.backend, 'web-headless', 'keyed conformance backend');
+    assertEqual(keyedConformance.status, 'passed', 'keyed conformance status');
+    assertEqual(keyedConformance.violations.length, 0, 'keyed conformance violations');
+    assertEqual(keyedConformance.initial_text, 'HostNextTail', 'keyed initial text');
+    assertEqual(keyedConformance.phases.length, 11, 'keyed phase count');
+    assert(keyedConformance.item_identity_stable, 'keyed item identity stays stable');
+    assert(keyedConformance.probe_storage_bounded, 'keyed probe storage stays bounded');
+    assertEqual(Object.keys(keyedConformance.builder_runs).length, 8, 'cumulative builder runs survive disposal');
+    assert(keyedConformance.static_ids_stable, 'keyed static ids stay stable');
+    assert(keyedConformance.stale_write_is_noop, 'removed key writes stay local');
+    assert(keyedConformance.duplicate_key_rejected, 'duplicate keys reject atomically');
+    assert(keyedConformance.duplicate_recovered, 'valid key update recovers');
+    assert(keyedConformance.dispose_idempotent, 'keyed disposal is idempotent');
+    assertEqual(keyedConformance.operations.create_element, 10, 'keyed create_element');
+    assertEqual(keyedConformance.operations.create_text, 11, 'keyed create_text');
+    assertEqual(keyedConformance.operations.create_anchor, 18, 'keyed create_anchor');
+    assertEqual(keyedConformance.operations.insert, 59, 'keyed insert moves');
+    assertEqual(keyedConformance.operations.release, 34, 'keyed releases');
+    assertEqual(keyedConformance.operations.remove, 33, 'keyed detach and host remove');
+    assertEqual(keyedConformance.local_update.reconcile_delta, 0, 'item updates skip reconciliation');
+  });
+
+  await runCheck('keyed_rows_keep_dom_identity_and_insert_before_moves', async () => {
+    const state = await page.evaluate(() => {
+      const keyed = new window.fino.KeyedPage();
+      window.__finoKeyedPage = keyed;
+      keyed.set_keys(JSON.stringify(['A', 'B', 'C']));
+      const capture = () => {
+        const rows = {};
+        for (const key of ['A', 'B', 'C', 'X']) {
+          const button = document.querySelector(`button[aria-label="Row ${key}"]`);
+          rows[key] = button ? { button, text: button.firstChild } : null;
+        }
+        return rows;
+      };
+      window.__finoKeyedRows = capture();
+      window.__finoKeyedInnerHtml = window.__finoInnerHtmlSets;
+      return {
+        keys: JSON.parse(keyed.keys()),
+        runs: JSON.parse(keyed.builder_runs()),
+        innerHtmlSets: window.__finoInnerHtmlSets,
+      };
+    });
+    assertEqual(state.keys.join(','), 'A,B,C', 'keyed initial keys');
+    assertEqual(state.innerHtmlSets, 0, 'keyed initial innerHTML assignments');
+
+    const prepended = await page.evaluate(() => {
+      const keyed = window.__finoKeyedPage;
+      const before = window.__finoKeyedRows;
+      keyed.set_keys(JSON.stringify(['X', 'A', 'B', 'C']));
+      const rows = {};
+      for (const key of ['A', 'B', 'C']) {
+        const button = document.querySelector(`button[aria-label="Row ${key}"]`);
+        rows[key] = { button, text: button?.firstChild };
+      }
+      window.__finoKeyedRows = { ...before, X: { button: document.querySelector('button[aria-label="Row X"]'), text: document.querySelector('button[aria-label="Row X"]')?.firstChild } };
+      return {
+        same: ['A', 'B', 'C'].every(
+          (key) => rows[key].button === before[key].button && rows[key].text === before[key].text,
+        ),
+        order: Array.from(document.querySelectorAll('button[aria-label^="Row "]')).map((node) =>
+          node.getAttribute('aria-label'),
+        ),
+        runs: JSON.parse(keyed.builder_runs()),
+      };
+    });
+    assert(prepended.same, 'prepend keeps A/B/C DOM identities');
+    assertEqual(prepended.order.join(','), 'Row X,Row A,Row B,Row C', 'prepend order');
+    assertEqual(prepended.runs.A, 1, 'prepend never rebuilds A');
+    assertEqual(prepended.runs.B, 1, 'prepend never rebuilds B');
+    assertEqual(prepended.runs.C, 1, 'prepend never rebuilds C');
+
+    const reordered = await page.evaluate(() => {
+      const keyed = window.__finoKeyedPage;
+      const before = window.__finoKeyedRows;
+      const insertBeforeBefore = window.__finoInsertBeforeCalls;
+      keyed.set_keys(JSON.stringify(['C', 'B', 'A', 'X']));
+      const after = {};
+      for (const key of ['A', 'B', 'C', 'X']) {
+        const button = document.querySelector(`button[aria-label="Row ${key}"]`);
+        after[key] = { button, text: button?.firstChild };
+      }
+      window.__finoKeyedRows = after;
+      return {
+        same: ['A', 'B', 'C', 'X'].every(
+          (key) => after[key].button === before[key].button && after[key].text === before[key].text,
+        ),
+        order: Array.from(document.querySelectorAll('button[aria-label^="Row "]')).map((node) =>
+          node.getAttribute('aria-label'),
+        ),
+        insertBeforeDelta: window.__finoInsertBeforeCalls - insertBeforeBefore,
+        innerHtmlSets: window.__finoInnerHtmlSets,
+        keys: JSON.parse(keyed.keys()),
+      };
+    });
+    assert(reordered.same, 'reverse keeps every row and text node identity');
+    assertEqual(reordered.order.join(','), 'Row C,Row B,Row A,Row X', 'reversed DOM order');
+    assertEqual(reordered.insertBeforeDelta, 9, 'four-item reverse keeps one stable range and moves three complete ranges');
+    assertEqual(reordered.innerHtmlSets, 0, 'reverse never assigns innerHTML');
+
+    const local = await page.evaluate(() => {
+      const keyed = window.__finoKeyedPage;
+      const before = window.__finoKeyedRows.B;
+      document.querySelector('button[aria-label="Row B"]').click();
+      const after = document.querySelector('button[aria-label="Row B"]');
+      return {
+        text: after.textContent,
+        sameButton: after === before.button,
+        sameText: after.firstChild === before.text,
+        runs: JSON.parse(keyed.builder_runs()),
+      };
+    });
+    assertEqual(local.text, 'B=1', 'item-local click text');
+    assert(local.sameButton && local.sameText, 'item-local click keeps DOM identity');
+    assertEqual(local.runs.B, 1, 'item-local click never rebuilds B');
+
+    const bounded = await page.evaluate(() => {
+      const keyed = window.__finoKeyedPage;
+      for (let index = 0; index < 25; index += 1) {
+        keyed.set_keys(JSON.stringify([`K${index}`]));
+      }
+      return {
+        probes: JSON.parse(keyed.probe_keys()),
+        keys: JSON.parse(keyed.keys()),
+        runs: JSON.parse(keyed.builder_runs()),
+      };
+    });
+    assertEqual(bounded.probes.length, 1, 'probe storage keeps only live keys');
+    assertEqual(bounded.probes[0], 'K24', 'probe storage keeps the newest key');
+    assertEqual(bounded.keys[0], 'K24', 'churn commits the newest key');
+    assertEqual(Object.keys(bounded.runs).length, 1, 'builder runs stay bounded');
+
+    const cleared = await page.evaluate(() => {
+      const keyed = window.__finoKeyedPage;
+      keyed.set_keys(JSON.stringify([]));
+      const empty = document.querySelectorAll('button[aria-label^="Row "]').length;
+      keyed.dispose();
+      return {
+        empty,
+        innerHtmlSets: window.__finoInnerHtmlSets,
+        pageErrors: 0,
+      };
+    });
+    assertEqual(cleared.empty, 0, 'clearing releases every row');
+    assertEqual(cleared.innerHtmlSets, 0, 'clearing never assigns innerHTML');
+    assertEqual(pageErrors.length, 0, 'keyed identity page errors');
+  });
+
+  await runCheck('web_node_identity_is_stable_and_scan_free', async () => {
+    const beforeLookup = await page.evaluate(() => window.__finoIsSameNodeCalls);
+    const lookup = JSON.parse(
+      await page.evaluate(() => window.fino.run_web_identity_probe(false)),
+    );
+    const afterLookup = await page.evaluate(() => window.__finoIsSameNodeCalls);
+    assertEqual(lookup.schema, 1, 'identity lookup schema');
+    assert(lookup.stable, 'clone keeps the stable record identity');
+    assert(lookup.next_distinct, 'new nodes receive distinct identities');
+    assertEqual(afterLookup - beforeLookup, 0, 'identity lookup performs no isSameNode scan');
+
+    const released = JSON.parse(
+      await page.evaluate(() => window.fino.run_web_identity_probe(true)),
+    );
+    assert(released.stable, 'identity stays stable after release');
+    assertEqual(released.after_release, released.before, 'released clone keeps its id');
+    assert(released.next_distinct, 'released ids are never reused');
   });
 
   await runCheck('anchor_nodes_reject_text_writes', async () => {
@@ -587,55 +950,77 @@ try {
 
   // Writes the exact artifact bytes the wasm run produced.
   // 写入 wasm 运行产生的精确产物字节。
-  for (const [relative, contents] of Object.entries(bundle.artifacts)) {
-    const destination = path.join(outDir, relative);
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, contents);
+  writeScenarioArtifacts(bundle);
+  const scenarioPassed = bundle.result.status === 'passed';
+  if (scenarioPassed) {
+    fs.writeFileSync(
+      path.join(outDir, 'conformance.json'),
+      `${JSON.stringify(conformance, null, 2)}\n`,
+    );
+    fs.writeFileSync(
+      path.join(outDir, 'detach_reinsert.json'),
+      `${JSON.stringify(detachReinsert, null, 2)}\n`,
+    );
+    fs.writeFileSync(
+      path.join(outDir, 'remount.json'),
+      `${JSON.stringify(remount, null, 2)}\n`,
+    );
+    fs.writeFileSync(
+      path.join(outDir, 'anchor_misuse.json'),
+      `${JSON.stringify(anchorMisuse, null, 2)}\n`,
+    );
+    fs.writeFileSync(
+      path.join(outDir, 'show_conformance.json'),
+      `${JSON.stringify(showConformance, null, 2)}\n`,
+    );
+    fs.writeFileSync(
+      path.join(outDir, 'keyed_conformance.json'),
+      `${JSON.stringify(keyedConformance, null, 2)}\n`,
+    );
   }
-  fs.writeFileSync(
-    path.join(outDir, 'conformance.json'),
-    `${JSON.stringify(conformance, null, 2)}\n`,
-  );
-  fs.writeFileSync(
-    path.join(outDir, 'detach_reinsert.json'),
-    `${JSON.stringify(detachReinsert, null, 2)}\n`,
-  );
-  fs.writeFileSync(
-    path.join(outDir, 'remount.json'),
-    `${JSON.stringify(remount, null, 2)}\n`,
-  );
-  fs.writeFileSync(
-    path.join(outDir, 'anchor_misuse.json'),
-    `${JSON.stringify(anchorMisuse, null, 2)}\n`,
-  );
-  fs.writeFileSync(
-    path.join(outDir, 'show_conformance.json'),
-    `${JSON.stringify(showConformance, null, 2)}\n`,
-  );
-  fs.writeFileSync(
-    path.join(outDir, 'browser.json'),
-    `${JSON.stringify({ schema: 1, backend: 'web-headless', status: 'passed', checks }, null, 2)}\n`,
-  );
+  writeBrowserReport(scenarioPassed ? 'passed' : 'failed');
 
   process.stdout.write(
     `${JSON.stringify({
-      status: 'passed',
+      status: scenarioPassed ? 'passed' : 'failed',
       result: bundle.result,
       checks,
       conformance,
       artifacts: [
         ...Object.keys(bundle.artifacts),
-        'conformance.json',
-        'detach_reinsert.json',
-        'remount.json',
-        'anchor_misuse.json',
-        'show_conformance.json',
+        ...(scenarioPassed
+          ? [
+              'conformance.json',
+              'detach_reinsert.json',
+              'remount.json',
+              'anchor_misuse.json',
+              'show_conformance.json',
+              'keyed_conformance.json',
+            ]
+          : []),
       ],
     })}\n`,
   );
+  if (!scenarioPassed) {
+    process.exitCode = 1;
+  }
 } catch (error) {
-  const code = error.code?.startsWith?.('UI_') ? error.code : 'UI_BROWSER_ASSERTION';
-  emitFailure(code, error.message);
+  if (error instanceof ScenarioFailed) {
+    writeScenarioArtifacts(error.bundle);
+    writeBrowserReport('failed');
+    process.exitCode = 1;
+    process.stdout.write(
+      `${JSON.stringify({
+        status: 'failed',
+        result: error.bundle.result,
+        checks,
+        artifacts: Object.keys(error.bundle.artifacts),
+      })}\n`,
+    );
+  } else {
+    const code = error.code?.startsWith?.('UI_') ? error.code : 'UI_BROWSER_ASSERTION';
+    emitFailure(code, error.message);
+  }
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

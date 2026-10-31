@@ -4,6 +4,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     rc::Rc,
 };
 
@@ -357,20 +358,50 @@ impl Owner {
             registry: Rc::clone(&self.registry),
         }));
         let cycle_registry = SendWrapper::new(Rc::clone(&self.registry));
+        let panic_registry = SendWrapper::new(Rc::clone(&self.registry));
 
         // `SendWrapper` confines non-Send UI state to the creating thread, while
         // `ImmediateEffect` retains upstream graph tracking and batch de-duplication.
         // `SendWrapper` 将非 Send 的 UI 状态限制在创建线程，`ImmediateEffect`
         // 则保留上游的依赖图追踪与批内去重。
+        let first_run = SendWrapper::new(Cell::new(true));
         let effect = self.inner.with(|| {
             ImmediateEffect::new(move || {
-                if let Ok(mut runner) = runner.try_borrow_mut() {
-                    runner.run(id);
-                } else {
-                    cycle_registry.borrow_mut().report_cycle(id);
+                let was_first_run = first_run.get();
+                let outcome = catch_unwind(AssertUnwindSafe(|| {
+                    if let Ok(mut runner) = runner.try_borrow_mut() {
+                        runner.run(id);
+                    } else {
+                        cycle_registry.borrow_mut().report_cycle(id);
+                    }
+                }));
+                match outcome {
+                    Ok(()) => first_run.set(false),
+                    Err(payload) => {
+                        // Only a first-run panic precedes cleanup registration.
+                        // Later panics leave the effect owned and re-runnable, so
+                        // diagnostics must stay active and a retry can succeed.
+                        // 只有首次执行 panic 发生在清理注册之前。后续 panic 时
+                        // Effect 仍由 Owner 持有并可再次运行，因此诊断必须保持
+                        // 活跃，后续重试可以成功。
+                        if was_first_run {
+                            panic_registry.borrow_mut().deactivate_effect(id);
+                        }
+                        resume_unwind(payload);
+                    }
                 }
             })
         });
+        if self.is_disposed() {
+            // The owner may be disposed during the first effect run, before its
+            // cleanup registration exists. Drop the effect and mark diagnostics
+            // inactive instead of leaving a stuck active record.
+            // Owner 可能在首次执行期间、清理注册之前被释放。此时直接丢弃 Effect
+            // 并把诊断标记为非活跃，避免留下卡住的 active 记录。
+            self.registry.borrow_mut().deactivate_effect(id);
+            drop(effect);
+            return;
+        }
         let cleanup_registry = SendWrapper::new(Rc::clone(&self.registry));
         self.inner.with(|| {
             reactive_graph::owner::on_cleanup(move || {
@@ -431,6 +462,20 @@ impl Owner {
         let value = SendWrapper::new(RefCell::new(Some(value)));
         self.register_cleanup(move || {
             let _ = value.take();
+        });
+    }
+
+    /// Runs one callback when this owner is disposed; repeated disposal is safe.
+    /// 在该 Owner 释放时执行一个回调；重复释放是安全的。
+    ///
+    /// The callback follows the owner thread and can carry non-`Send` UI state.
+    /// 回调跟随 Owner 线程，可以携带非 `Send` 的 UI 状态。
+    pub fn on_dispose(&self, cleanup: impl FnOnce() + 'static) {
+        let cleanup = SendWrapper::new(RefCell::new(Some(Box::new(cleanup) as Box<dyn FnOnce()>)));
+        self.register_cleanup(move || {
+            if let Some(cleanup) = cleanup.borrow_mut().take() {
+                cleanup();
+            }
         });
     }
 

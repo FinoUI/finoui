@@ -2,7 +2,7 @@
 //! 使用范围锚点的条件挂载，不触发虚拟 DOM 式的整树重跑。
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     fmt,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     rc::Rc,
@@ -40,12 +40,30 @@ impl<B: DomBackend> Clone for RangeAnchor<B> {
 impl<B: DomBackend + 'static> RangeAnchor<B> {
     /// Creates the anchor pair and inserts it before an optional stable sibling.
     /// 创建锚点对，并把它插入到可选稳定兄弟节点之前。
+    ///
+    /// If creation or either insertion panics, already-created anchors are
+    /// released and the original panic is preserved; static siblings are never
+    /// released.
+    /// 若创建或任一插入 panic，已创建锚点会被释放并保留原始 panic；静态兄弟
+    /// 绝不释放。
     pub fn create(runtime: &Runtime<B>, parent: &B::Node, before: Option<&B::Node>) -> Self {
-        let start = runtime.backend_mut().create_anchor();
-        let end = runtime.backend_mut().create_anchor();
-        runtime.backend_mut().insert_before(parent, &start, before);
-        runtime.backend_mut().insert_before(parent, &end, before);
-        Self { start, end }
+        let mut created = Vec::new();
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let start = runtime.backend_mut().create_anchor();
+            created.push(start.clone());
+            let end = runtime.backend_mut().create_anchor();
+            created.push(end.clone());
+            runtime.backend_mut().insert_before(parent, &start, before);
+            runtime.backend_mut().insert_before(parent, &end, before);
+            (start, end)
+        }));
+        match outcome {
+            Ok((start, end)) => Self { start, end },
+            Err(payload) => {
+                release_after_detach(runtime, &created);
+                resume_unwind(payload);
+            }
+        }
     }
 
     /// Returns the first anchor that starts the dynamic range.
@@ -60,12 +78,57 @@ impl<B: DomBackend + 'static> RangeAnchor<B> {
         &self.end
     }
 
+    /// Builds a detached anchor pair from two created anchors.
+    /// 用两个已创建锚点构造一个尚未挂载的锚点对。
+    pub(crate) fn from_parts(start: B::Node, end: B::Node) -> Self {
+        Self { start, end }
+    }
+
     /// Inserts one node inside the range, immediately before the end anchor.
     /// 把一个节点插入范围内部，紧邻结束锚点之前。
     pub fn insert(&self, runtime: &Runtime<B>, parent: &B::Node, node: &B::Node) {
         runtime
             .backend_mut()
             .insert_before(parent, node, Some(&self.end));
+    }
+
+    /// Moves the complete range, anchors included, before one reference node.
+    /// 把包含锚点的完整范围移动到单个参考节点之前。
+    ///
+    /// Moving every external node in order keeps the range contiguous without
+    /// clearing the parent or recreating children.
+    /// 按顺序移动每个外部节点，使范围保持连续，同时不清空父节点或重建子节点。
+    ///
+    /// A reference equal to the start anchor is a no-op. A reference equal to
+    /// the end anchor or any top-level range node is rejected before the first
+    /// backend operation.
+    /// 参考节点等于起始锚点时 no-op；等于结束锚点或任一范围顶层节点时，会在
+    /// 首次后端操作前被拒绝。
+    pub fn move_before(
+        &self,
+        runtime: &Runtime<B>,
+        parent: &B::Node,
+        nodes: &[B::Node],
+        before: Option<&B::Node>,
+    ) {
+        if before == Some(&self.start) {
+            return;
+        }
+        if let Some(before) = before {
+            assert!(
+                before != &self.end && !nodes.iter().any(|node| node == before),
+                "RangeAnchor move reference must not be inside the moving range"
+            );
+        }
+        runtime
+            .backend_mut()
+            .insert_before(parent, &self.start, before);
+        for node in nodes {
+            runtime.backend_mut().insert_before(parent, node, before);
+        }
+        runtime
+            .backend_mut()
+            .insert_before(parent, &self.end, before);
     }
 
     /// Removes one node from the range without touching either anchor.
@@ -90,6 +153,78 @@ impl<B: DomBackend> fmt::Debug for RangeAnchor<B> {
     }
 }
 
+/// Acquisition and release callbacks for keyed nested Show ownership tracking.
+/// keyed 嵌套 Show 所有权跟踪使用的获取与释放回调。
+///
+/// Anchors are reported when they are created and again when they are actually
+/// released, so the same live ownership index contains the range anchors as
+/// well as the content nodes.
+/// 锚点创建时与真正释放时都会上报，因此同一实时所有权索引同时包含范围锚点
+/// 与内容节点。
+pub(crate) type NodeBatchCallback<B> = Rc<dyn Fn(&[<B as DomBackend>::Node])>;
+
+pub(crate) struct RangeObserver<B: DomBackend> {
+    pub(crate) acquire: NodeBatchCallback<B>,
+    pub(crate) release: NodeBatchCallback<B>,
+}
+
+/// Borrowed mount coordinates shared by Show mount helpers.
+/// Show 挂载辅助函数共享的借用坐标。
+pub(crate) struct ShowMount<'a, B: DomBackend + 'static> {
+    pub runtime: &'a Runtime<B>,
+    pub owner: &'a Owner,
+    pub parent: &'a B::Node,
+    pub before: Option<&'a B::Node>,
+    pub name: &'a str,
+}
+
+/// Detaches tracked nodes from each other, then releases each unique node once.
+/// 先把受跟踪节点彼此分离，再对每个唯一节点释放一次。
+///
+/// `remove` stays non-destructive; `release` stays terminal. Detaching first
+/// prevents a recursive parent release from freeing a descendant that is still
+/// in the tracked list and would otherwise be released a second time.
+/// `remove` 仍只做非破坏性分离，`release` 仍是终止释放。先分离可避免父节点
+/// 递归释放已经跟踪、随后又会被再次释放的后代。
+pub(crate) fn release_after_detach<B: DomBackend + 'static>(
+    runtime: &Runtime<B>,
+    nodes: &[B::Node],
+) {
+    let mut unique: Vec<B::Node> = Vec::new();
+    for node in nodes {
+        if !unique.iter().any(|existing| existing == node) {
+            unique.push(node.clone());
+        }
+    }
+    for node in &unique {
+        runtime.backend_mut().remove(node);
+    }
+    for node in &unique {
+        runtime.backend_mut().release(node);
+    }
+}
+
+/// Stops an owner, then detaches and releases every tracked node exactly once.
+/// 停止一个 Owner，然后分离并逐个释放全部受跟踪节点。
+///
+/// If `first_panic` already exists, it always wins. Otherwise an owner cleanup
+/// panic wins over a secondary release panic. Node release still runs for every
+/// case, so a user `on_dispose` panic cannot orphan backend ranges.
+/// 若已有 `first_panic`，始终保留它。否则 Owner 清理 panic 优先于二次 release
+/// panic。所有情况下都会继续释放节点，因此用户 `on_dispose` panic 不会留下
+/// 孤儿后端范围。
+pub(crate) fn terminate_owner_and_nodes<B: DomBackend + 'static>(
+    owner: Owner,
+    nodes: Vec<B::Node>,
+    runtime: &Runtime<B>,
+    first_panic: Option<Box<dyn std::any::Any + Send>>,
+) -> Option<Box<dyn std::any::Any + Send>> {
+    let owner_panic = catch_unwind(AssertUnwindSafe(|| owner.dispose())).err();
+    let release_panic =
+        catch_unwind(AssertUnwindSafe(|| release_after_detach(runtime, &nodes))).err();
+    first_panic.or(owner_panic).or(release_panic)
+}
+
 /// Transactional construction context for one [`Show`] content mount.
 /// 一次 [`Show`] 内容挂载使用的事务性构建上下文。
 ///
@@ -105,7 +240,9 @@ pub struct ShowContext<B: DomBackend + 'static> {
 }
 
 impl<B: DomBackend + 'static> ShowContext<B> {
-    fn new(runtime: Runtime<B>, owner: Owner) -> Self {
+    /// Creates the transactional context shared by Show and keyed ranges.
+    /// 创建 Show 与 keyed 范围共用的挂载事务上下文。
+    pub(crate) fn new(runtime: Runtime<B>, owner: Owner) -> Self {
         Self {
             runtime,
             owner,
@@ -113,12 +250,20 @@ impl<B: DomBackend + 'static> ShowContext<B> {
         }
     }
 
-    /// Returns the shared runtime for explicit backend operations.
-    /// 返回共享 Runtime，供显式后端操作使用。
+    /// Takes every node created through this context for terminal cleanup.
+    /// 取走通过该上下文创建的全部节点，供终止清理使用。
+    pub(crate) fn take_created(&mut self) -> Vec<B::Node> {
+        std::mem::take(&mut self.created)
+    }
+
+    /// Returns the shared runtime for standalone Show content construction.
+    /// 返回独立 Show 内容构建使用的共享 Runtime。
     ///
-    /// Nodes created directly through this runtime are not tracked by the
-    /// mount transaction; prefer the context creation methods.
-    /// 直接通过该 Runtime 创建的节点不参与挂载事务跟踪；优先使用上下文创建方法。
+    /// Nodes created directly through this runtime are not tracked by the mount
+    /// transaction; prefer the context creation methods. Keyed nested Show uses
+    /// a scoped wrapper that does not expose this accessor.
+    /// 直接通过该 Runtime 创建的节点不参与挂载事务跟踪；优先使用上下文创建
+    /// 方法。keyed 嵌套 Show 使用不暴露该访问器的受限包装类型。
     pub fn runtime(&self) -> &Runtime<B> {
         &self.runtime
     }
@@ -216,6 +361,35 @@ impl<B: DomBackend + 'static> ShowContext<B> {
             content,
         )
     }
+
+    /// Mounts a nested Show with acquisition and release observers for keyed ownership.
+    /// 为 keyed 所有权挂载带获取与释放观察器的嵌套 Show。
+    pub(crate) fn show_observed<C, F>(
+        &mut self,
+        parent: &B::Node,
+        before: Option<&B::Node>,
+        name: &str,
+        condition: C,
+        mut content: F,
+        observer: RangeObserver<B>,
+    ) -> Show<B>
+    where
+        C: Fn() -> bool + 'static,
+        F: FnMut(&mut ShowContext<B>) -> B::Node + 'static,
+    {
+        Show::mount_many_observed(
+            ShowMount {
+                runtime: &self.runtime,
+                owner: &self.owner,
+                parent,
+                before,
+                name,
+            },
+            condition,
+            move |context| vec![content(context)],
+            observer,
+        )
+    }
 }
 
 /// Conditional dynamic range mounted between two [`RangeAnchor`] nodes.
@@ -240,6 +414,7 @@ impl<B: DomBackend + 'static> ShowContext<B> {
 /// 或释放父 Owner 可提前释放。
 pub struct Show<B: DomBackend + 'static> {
     state: Rc<RefCell<ShowState<B>>>,
+    dispose_requested: Rc<Cell<bool>>,
 }
 
 impl<B: DomBackend> fmt::Debug for Show<B> {
@@ -290,8 +465,66 @@ impl<B: DomBackend + 'static> Show<B> {
         C: Fn() -> bool + 'static,
         F: FnMut(&mut ShowContext<B>) -> Vec<B::Node> + 'static,
     {
+        Self::mount_many_inner(
+            ShowMount {
+                runtime,
+                owner,
+                parent,
+                before,
+                name,
+            },
+            condition,
+            content,
+            None,
+        )
+    }
+
+    /// Mounts a range with acquisition and release observers for keyed ownership.
+    /// 为 keyed 所有权挂载带获取与释放观察器的范围。
+    pub(crate) fn mount_many_observed<C, F>(
+        mount: ShowMount<'_, B>,
+        condition: C,
+        content: F,
+        observer: RangeObserver<B>,
+    ) -> Self
+    where
+        C: Fn() -> bool + 'static,
+        F: FnMut(&mut ShowContext<B>) -> Vec<B::Node> + 'static,
+    {
+        Self::mount_many_inner(mount, condition, content, Some(observer))
+    }
+
+    fn mount_many_inner<C, F>(
+        mount: ShowMount<'_, B>,
+        condition: C,
+        content: F,
+        observer: Option<RangeObserver<B>>,
+    ) -> Self
+    where
+        C: Fn() -> bool + 'static,
+        F: FnMut(&mut ShowContext<B>) -> Vec<B::Node> + 'static,
+    {
+        let ShowMount {
+            runtime,
+            owner,
+            parent,
+            before,
+            name,
+        } = mount;
         let control = owner.child();
-        let anchors = RangeAnchor::create(runtime, parent, before);
+        let anchors = match catch_unwind(AssertUnwindSafe(|| {
+            RangeAnchor::create(runtime, parent, before)
+        })) {
+            Ok(anchors) => anchors,
+            Err(payload) => {
+                let _ = catch_unwind(AssertUnwindSafe(|| control.dispose()));
+                resume_unwind(payload);
+            }
+        };
+        if let Some(observer) = &observer {
+            (observer.acquire)(&[anchors.start.clone(), anchors.end.clone()]);
+        }
+        let dispose_requested = Rc::new(Cell::new(false));
         let state = Rc::new(RefCell::new(ShowState {
             runtime: runtime.clone(),
             control: control.clone(),
@@ -302,19 +535,15 @@ impl<B: DomBackend + 'static> Show<B> {
             active: None,
             last: None,
             cleaned: false,
+            dispose_requested: Rc::clone(&dispose_requested),
+            control_dispose_pending: false,
+            observer,
         }));
 
-        let effect_state = Rc::clone(&state);
-        runtime.effect_with_runtime(
-            &control,
-            &format!("{name}/condition"),
-            move |_context, runtime| {
-                effect_state.borrow_mut().update(runtime);
-            },
-        );
-
         let cleanup_state = SendWrapper::new(Rc::downgrade(&state));
+        let cleanup_request = SendWrapper::new(Rc::clone(&dispose_requested));
         control.register_cleanup(move || {
+            cleanup_request.set(true);
             if let Some(state) = cleanup_state.upgrade()
                 && let Ok(mut state) = state.try_borrow_mut()
             {
@@ -322,7 +551,62 @@ impl<B: DomBackend + 'static> Show<B> {
             }
         });
 
-        Self { state }
+        let effect_state = Rc::clone(&state);
+        let effect_control = control.clone();
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            runtime.effect_with_runtime(
+                &control,
+                &format!("{name}/condition"),
+                move |_context, runtime| {
+                    let mut state = effect_state.borrow_mut();
+                    let update = catch_unwind(AssertUnwindSafe(|| state.update(runtime)));
+                    let terminal = if state.dispose_requested.get() {
+                        catch_unwind(AssertUnwindSafe(|| state.request_terminal())).err()
+                    } else {
+                        None
+                    };
+                    let dispose_control = state.take_control_dispose_pending();
+                    drop(state);
+                    let control_panic = if dispose_control {
+                        catch_unwind(AssertUnwindSafe(|| effect_control.dispose())).err()
+                    } else {
+                        None
+                    };
+                    if let Err(payload) = update {
+                        resume_unwind(payload);
+                    }
+                    if let Some(payload) = terminal {
+                        resume_unwind(payload);
+                    }
+                    if let Some(payload) = control_panic {
+                        resume_unwind(payload);
+                    }
+                },
+            );
+        }));
+        if let Err(payload) = outcome {
+            // A first-run panic happens before cleanup registration. Release the
+            // range and anchors before rethrowing so no orphan nodes survive.
+            // 首次执行 panic 发生在清理注册之前。重新抛出前释放范围与锚点，
+            // 避免留下孤儿节点。
+            if let Ok(mut state) = state.try_borrow_mut() {
+                state.cleanup(false);
+            }
+            control.dispose();
+            resume_unwind(payload);
+        }
+
+        if state.borrow().cleaned {
+            return Self {
+                state,
+                dispose_requested,
+            };
+        }
+
+        Self {
+            state,
+            dispose_requested,
+        }
     }
 
     /// Returns the stable start anchor.
@@ -352,14 +636,25 @@ impl<B: DomBackend + 'static> Show<B> {
     /// Unmounts the current range and removes the anchors; repeated calls are safe.
     /// 卸载当前范围并移除锚点；可安全重复调用。
     pub fn dispose(&self) {
-        let control = {
-            let Ok(mut state) = self.state.try_borrow_mut() else {
-                return;
-            };
-            state.cleanup(false);
-            state.control.clone()
+        self.dispose_requested.set(true);
+        let Ok(mut state) = self.state.try_borrow_mut() else {
+            // The condition effect owns the state. The pending flag completes
+            // terminal cleanup after the effect releases its borrow.
+            // 条件 Effect 正持有状态。pending 标记让 Effect 在释放借用后完成
+            // 终止清理。
+            return;
         };
-        control.dispose();
+        let terminal = catch_unwind(AssertUnwindSafe(|| state.request_terminal())).err();
+        let _ = state.take_control_dispose_pending();
+        let control = state.control.clone();
+        drop(state);
+        let control_panic = catch_unwind(AssertUnwindSafe(|| control.dispose())).err();
+        if let Some(payload) = terminal {
+            resume_unwind(payload);
+        }
+        if let Some(payload) = control_panic {
+            resume_unwind(payload);
+        }
     }
 }
 
@@ -373,12 +668,15 @@ impl<B: DomBackend + 'static> ActiveRange<B> {
     /// Stops the child owner before releasing its nodes and retained handles.
     /// 在释放节点与保留句柄前先停止子 Owner。
     fn dispose(self, runtime: &Runtime<B>) {
-        self.owner.dispose();
-        for node in self.created.iter().rev() {
-            runtime.backend_mut().release(node);
-        }
-        for node in &self.nodes {
-            runtime.backend_mut().release(node);
+        let ActiveRange {
+            owner,
+            nodes: returned_nodes,
+            created,
+        } = self;
+        let mut nodes = created;
+        nodes.extend(returned_nodes);
+        if let Some(payload) = terminate_owner_and_nodes(owner, nodes, runtime, None) {
+            resume_unwind(payload);
         }
     }
 }
@@ -395,6 +693,9 @@ struct ShowState<B: DomBackend + 'static> {
     active: Option<ActiveRange<B>>,
     last: Option<bool>,
     cleaned: bool,
+    dispose_requested: Rc<Cell<bool>>,
+    control_dispose_pending: bool,
+    observer: Option<RangeObserver<B>>,
 }
 
 impl<B: DomBackend + 'static> ShowState<B> {
@@ -404,15 +705,31 @@ impl<B: DomBackend + 'static> ShowState<B> {
         if self.cleaned {
             return;
         }
+        if self.dispose_requested.get() {
+            self.request_terminal();
+            return;
+        }
         let next = (self.condition)();
+        if self.dispose_requested.get() {
+            self.request_terminal();
+            return;
+        }
         if self.last == Some(next) {
             return;
         }
         if next {
             self.mount_range(runtime);
+            if self.dispose_requested.get() {
+                self.request_terminal();
+                return;
+            }
             self.last = Some(true);
         } else {
             self.unmount_range(runtime);
+            if self.dispose_requested.get() {
+                self.request_terminal();
+                return;
+            }
             self.last = Some(false);
         }
     }
@@ -430,29 +747,39 @@ impl<B: DomBackend + 'static> ShowState<B> {
         }
         let owner = self.control.child();
         let mut context = ShowContext::new(runtime.clone(), owner.clone());
+        let mut returned = Vec::new();
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            let nodes = with_owner(&owner, || (self.content)(&mut context));
-            for node in &nodes {
+            returned = with_owner(&owner, || (self.content)(&mut context));
+            for node in &returned {
                 self.anchors.insert(runtime, &self.parent, node);
             }
-            nodes
         }));
         match outcome {
-            Ok(nodes) => {
+            Ok(()) => {
                 let created = std::mem::take(&mut context.created);
                 self.active = Some(ActiveRange {
                     owner,
-                    nodes,
+                    nodes: std::mem::take(&mut returned),
                     created,
                 });
             }
             Err(payload) => {
-                let created = std::mem::take(&mut context.created);
-                owner.dispose();
-                for node in created.iter().rev() {
-                    runtime.backend_mut().release(node);
+                let mut nodes = std::mem::take(&mut context.created);
+                nodes.extend(std::mem::take(&mut returned));
+                let mut unique: Vec<B::Node> = Vec::new();
+                for node in nodes {
+                    if !unique.iter().any(|current| current == &node) {
+                        unique.push(node);
+                    }
                 }
-                resume_unwind(payload);
+                if let Some(observer) = &self.observer {
+                    (observer.release)(&unique);
+                }
+                if let Some(payload) =
+                    terminate_owner_and_nodes(owner, unique, runtime, Some(payload))
+                {
+                    resume_unwind(payload);
+                }
             }
         }
     }
@@ -461,22 +788,84 @@ impl<B: DomBackend + 'static> ShowState<B> {
     /// 释放子 Owner，然后移除其节点。
     fn unmount_range(&mut self, runtime: &Runtime<B>) {
         if let Some(active) = self.active.take() {
-            active.dispose(runtime);
+            let released: Vec<B::Node> = active
+                .created
+                .iter()
+                .chain(&active.nodes)
+                .cloned()
+                .collect();
+            let dispose = catch_unwind(AssertUnwindSafe(|| active.dispose(runtime))).err();
+            if let Some(observer) = &self.observer {
+                (observer.release)(&released);
+            }
+            if let Some(payload) = dispose {
+                resume_unwind(payload);
+            }
         }
     }
 
     /// Releases the range, anchors, and driver effect exactly once.
     /// 只释放一次范围、锚点与驱动 Effect。
-    fn cleanup(&mut self, dispose_control: bool) {
+    fn request_terminal(&mut self) {
+        self.control_dispose_pending = true;
+        self.release_terminal();
+    }
+
+    fn release_terminal(&mut self) {
         if self.cleaned {
             return;
         }
         self.cleaned = true;
         let runtime = self.runtime.clone();
-        self.unmount_range(&runtime);
-        self.anchors.remove_anchors(&runtime);
-        if dispose_control {
-            self.control.dispose();
+        let unmount = catch_unwind(AssertUnwindSafe(|| self.unmount_range(&runtime))).err();
+        let anchors = catch_unwind(AssertUnwindSafe(|| self.release_anchors(&runtime))).err();
+        if let Some(payload) = unmount {
+            resume_unwind(payload);
+        }
+        if let Some(payload) = anchors {
+            resume_unwind(payload);
+        }
+    }
+
+    /// Releases both anchors and reports exactly the nodes that were freed.
+    /// 释放两个锚点，并只上报真正被释放的节点。
+    fn release_anchors(&self, runtime: &Runtime<B>) {
+        let mut released = Vec::new();
+        let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
+        for anchor in [&self.anchors.end, &self.anchors.start] {
+            match catch_unwind(AssertUnwindSafe(|| runtime.backend_mut().release(anchor))) {
+                Ok(()) => released.push(anchor.clone()),
+                Err(payload) => {
+                    if first_panic.is_none() {
+                        first_panic = Some(payload);
+                    }
+                }
+            }
+        }
+        if let Some(observer) = &self.observer {
+            (observer.release)(&released);
+        }
+        if let Some(payload) = first_panic {
+            resume_unwind(payload);
+        }
+    }
+
+    fn take_control_dispose_pending(&mut self) -> bool {
+        std::mem::take(&mut self.control_dispose_pending)
+    }
+
+    fn cleanup(&mut self, dispose_control: bool) {
+        let release = catch_unwind(AssertUnwindSafe(|| self.release_terminal())).err();
+        let control = if dispose_control {
+            catch_unwind(AssertUnwindSafe(|| self.control.dispose())).err()
+        } else {
+            None
+        };
+        if let Some(payload) = release {
+            resume_unwind(payload);
+        }
+        if let Some(payload) = control {
+            resume_unwind(payload);
         }
     }
 }

@@ -598,3 +598,541 @@ fn initial_failed_mount_releases_anchors() {
         "the static sibling survives a failed initial mount"
     );
 }
+
+/// A first-run condition panic releases the anchors created before the effect.
+/// 首次条件读取 panic 会释放 Effect 之前创建的锚点。
+#[test]
+fn initial_condition_panic_releases_anchors() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let baseline = runtime.backend().dom_snapshot().nodes.len();
+
+    let failure = catch_unwind(AssertUnwindSafe(|| {
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/condition-panic",
+            || panic!("initial condition"),
+            |context: &mut ShowContext<MockBackend>| context.create_text("never"),
+        );
+    }));
+
+    assert!(failure.is_err());
+    assert_eq!(runtime.backend().dom_snapshot().nodes.len(), baseline);
+    assert_eq!(
+        runtime
+            .backend()
+            .dom_snapshot()
+            .nodes
+            .iter()
+            .filter(|node| node.kind == fino::headless::DomNodeKind::Anchor)
+            .count(),
+        0
+    );
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+}
+
+/// A content panic on a real transition leaves the anchors and effect active so
+/// a later transition can retry, matching the PR16 contract.
+/// 真实切换中的内容 panic 会保留锚点与活跃 Effect，使后续切换可以重试，
+/// 符合 PR16 契约。
+#[test]
+fn content_panic_on_transition_keeps_show_retryable() {
+    use std::{
+        cell::Cell,
+        panic::{AssertUnwindSafe, catch_unwind},
+        rc::Rc,
+    };
+
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let visible = owner.signal_named("show/retry", false);
+    let attempts = Rc::new(Cell::new(0_u32));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let show = {
+        let visible = visible.clone();
+        let attempts = Rc::clone(&attempts);
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/retry",
+            move || visible.get(),
+            move |context| {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                let action = context.create_element(Tag::Button);
+                context.set_attribute(&action, Attribute::AriaLabel, Some("Retry action"));
+                let value = context.create_text("value");
+                context.insert_before(&action, &value, None);
+                if attempt == 1 {
+                    panic!("first transition failed");
+                }
+                action
+            },
+        )
+    };
+
+    let failure = catch_unwind(AssertUnwindSafe(|| visible.set(true)));
+    assert!(failure.is_err());
+    assert!(!show.is_mounted());
+    assert_eq!(
+        runtime
+            .backend()
+            .dom_snapshot()
+            .nodes
+            .iter()
+            .filter(|node| node.kind == fino::headless::DomNodeKind::Anchor)
+            .count(),
+        2,
+        "the anchors survive a failed transition"
+    );
+    assert!(
+        owner
+            .snapshot()
+            .effects
+            .iter()
+            .any(|effect| effect.name == "show/retry/condition" && effect.active),
+        "the condition effect stays active for retry"
+    );
+    assert_eq!(runtime.backend().listener_count(), 0);
+
+    visible.set(true);
+    assert!(show.is_mounted());
+    assert_eq!(attempts.get(), 2);
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("valueTail")
+    );
+    assert_eq!(runtime.backend().listener_count(), 0);
+}
+
+/// A dispose call from a Show content builder is recorded and completes terminal
+/// cleanup after the condition effect releases its state borrow.
+/// Show 内容构建器内调用 dispose 会被记录，并在条件 Effect 释放状态借用后完成
+/// 终止清理。
+#[test]
+fn show_dispose_from_content_builder_is_terminal() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let visible = owner.signal_named("show/reentrant", false);
+    let count = owner.signal_named("show/reentrant-count", 0);
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let slot: Rc<RefCell<Option<Rc<Show<MockBackend>>>>> = Rc::new(RefCell::new(None));
+    let show = {
+        let visible = visible.clone();
+        let count = count.clone();
+        let builder_slot = Rc::clone(&slot);
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/reentrant",
+            move || visible.get(),
+            move |context| {
+                if let Some(show) = builder_slot.borrow().as_ref() {
+                    show.dispose();
+                }
+                let action = context.create_element(Tag::Button);
+                context.set_attribute(&action, Attribute::AriaLabel, Some("Reentrant action"));
+                let value = context.create_text("value");
+                context.insert_before(&action, &value, None);
+                let read = count.clone();
+                context.effect("show/reentrant/text", move |effect| {
+                    effect
+                        .backend_mut()
+                        .set_text(&value, &read.get().to_string());
+                });
+                let click = count.clone();
+                context.listen(&action, EventKind::Click, move |_event, _context| {
+                    click.update(|value| *value += 1);
+                });
+                action
+            },
+        )
+    };
+    let show = Rc::new(show);
+    *slot.borrow_mut() = Some(Rc::clone(&show));
+
+    visible.set(true);
+
+    assert!(!show.is_mounted(), "the reentrant request is terminal");
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "content and anchors are released"
+    );
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("Tail")
+    );
+    let after_dispose = runtime.backend().operations().len();
+    visible.set(false);
+    visible.set(true);
+    assert_eq!(
+        runtime.backend().operations().len(),
+        after_dispose,
+        "later condition writes cannot revive the list"
+    );
+    show.dispose();
+    show.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+}
+
+/// A dispose call from content owner cleanup during hide is recorded and still
+/// releases anchors and the control owner.
+/// 隐藏期间内容 Owner 清理内调用 dispose 会被记录，并仍释放锚点与 control Owner。
+#[test]
+fn show_dispose_from_range_cleanup_is_terminal() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let visible = owner.signal_named("show/reentrant-cleanup", true);
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let slot: Rc<RefCell<Option<Rc<Show<MockBackend>>>>> = Rc::new(RefCell::new(None));
+    let show = {
+        let visible = visible.clone();
+        let builder_slot = Rc::clone(&slot);
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/reentrant-cleanup",
+            move || visible.get(),
+            move |context| {
+                let action = context.create_element(Tag::Button);
+                let cleanup_slot = Rc::clone(&builder_slot);
+                context.owner().on_dispose(move || {
+                    if let Some(show) = cleanup_slot.borrow().as_ref() {
+                        show.dispose();
+                    }
+                });
+                action
+            },
+        )
+    };
+    let show = Rc::new(show);
+    *slot.borrow_mut() = Some(Rc::clone(&show));
+
+    visible.set(false);
+
+    assert!(!show.is_mounted());
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "content and anchors are released"
+    );
+    assert!(owner.snapshot().effects.iter().all(|effect| !effect.active));
+    let after_dispose = runtime.backend().operations().len();
+    visible.set(true);
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+    show.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+}
+
+/// A content-owner on_dispose panic during terminal Show disposal still releases
+/// content nodes and anchors, then preserves the original payload.
+/// 终止 Show 释放期间内容 Owner 的 on_dispose panic 仍释放内容节点与锚点，并保留
+/// 原始 payload。
+#[test]
+fn show_terminal_dispose_owner_panic_still_releases_anchors() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let show = Show::mount(
+        &runtime,
+        &owner,
+        &root,
+        Some(&tail),
+        "show/terminal-panic",
+        || true,
+        |context: &mut ShowContext<MockBackend>| {
+            let action = context.create_element(Tag::Button);
+            context.owner().on_dispose(|| panic!("show cleanup"));
+            action
+        },
+    );
+
+    let failure = catch_unwind(AssertUnwindSafe(|| show.dispose()));
+    let payload = failure.expect_err("owner cleanup panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "show cleanup");
+    assert!(!show.is_mounted());
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "content nodes and Show anchors are released"
+    );
+    let after_dispose = runtime.backend().operations().len();
+    show.dispose();
+    show.dispose();
+    assert_eq!(
+        runtime.backend().operations().len(),
+        after_dispose,
+        "repeated disposal is idempotent"
+    );
+}
+
+/// A content-owner on_dispose panic during hide releases content but keeps the
+/// Show anchors, which terminal disposal can still release.
+/// 隐藏期间内容 Owner 的 on_dispose panic 释放内容但保留 Show 锚点，终止释放仍
+/// 可清除它们。
+#[test]
+fn show_hide_owner_panic_releases_content_and_keeps_anchors() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let visible = owner.signal_named("show/hide-panic", true);
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let show = {
+        let visible = visible.clone();
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/hide-panic",
+            move || visible.get(),
+            |context: &mut ShowContext<MockBackend>| {
+                let action = context.create_element(Tag::Button);
+                context.owner().on_dispose(|| panic!("hide cleanup"));
+                action
+            },
+        )
+    };
+
+    let failure = catch_unwind(AssertUnwindSafe(|| visible.set(false)));
+    let payload = failure.expect_err("owner cleanup panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "hide cleanup");
+    assert!(!show.is_mounted());
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        4,
+        "content is released while the static root, tail, and anchors remain"
+    );
+    assert_eq!(
+        runtime
+            .backend()
+            .dom_snapshot()
+            .nodes
+            .iter()
+            .filter(|node| node.kind == fino::headless::DomNodeKind::Anchor)
+            .count(),
+        2
+    );
+
+    show.dispose();
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "terminal disposal releases the remaining anchors"
+    );
+}
+
+/// Show content builder panic wins over a panicking content-owner on_dispose,
+/// while nodes, listeners, effects, and anchors are still released.
+/// Show 内容构建器 panic 优先于内容 Owner 的 on_dispose panic，同时仍释放节点、
+/// 监听、Effect 与锚点。
+#[test]
+fn show_builder_panic_wins_over_owner_cleanup_panic() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let baseline = runtime.backend().dom_snapshot().nodes.len();
+
+    let failure = catch_unwind(AssertUnwindSafe(|| {
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/builder-owner-panic",
+            || true,
+            |context: &mut ShowContext<MockBackend>| {
+                let action = context.create_element(Tag::Button);
+                let value = context.create_text("value");
+                context.insert_before(&action, &value, None);
+                let bound = value;
+                context.effect("show/failed/text", move |effect| {
+                    effect.backend_mut().set_text(&bound, "failed");
+                });
+                context.listen(&action, EventKind::Click, |_event, _context| {});
+                context
+                    .owner()
+                    .on_dispose(|| panic!("content owner cleanup"));
+                panic!("show builder boom");
+            },
+        );
+    }));
+
+    let payload = failure.expect_err("builder panic must propagate");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "show builder boom");
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        baseline,
+        "failed content and anchors leave no storage"
+    );
+    assert!(
+        owner
+            .snapshot()
+            .effects
+            .iter()
+            .any(|effect| effect.name == "show/failed/text" && !effect.active),
+        "the failed content effect is inactive"
+    );
+}
+
+/// Disposing the parent owner from a Show content builder is recorded and
+/// completes terminal range and anchor cleanup.
+/// 在 Show 内容构建器内释放父 Owner 会被记录，并完成范围与锚点终止清理。
+#[test]
+fn show_parent_owner_dispose_in_content_builder_is_terminal() {
+    let runtime = Runtime::new(MockBackend::new());
+    let signals_owner = runtime.create_owner();
+    let parent_owner = runtime.create_owner();
+    let visible = signals_owner.signal_named("show/parent-dispose", false);
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let show = {
+        let visible = visible.clone();
+        let parent = parent_owner.clone();
+        Show::mount(
+            &runtime,
+            &parent_owner,
+            &root,
+            Some(&tail),
+            "show/parent-dispose",
+            move || visible.get(),
+            move |context: &mut ShowContext<MockBackend>| {
+                parent.dispose();
+                context.create_element(Tag::Button)
+            },
+        )
+    };
+    visible.set(true);
+
+    assert!(!show.is_mounted());
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "content and anchors are released after the parent request"
+    );
+    assert!(
+        parent_owner
+            .snapshot()
+            .effects
+            .iter()
+            .any(|effect| effect.name == "show/parent-dispose/condition" && !effect.active),
+        "the parent-owned condition effect is terminated"
+    );
+    let after_dispose = runtime.backend().operations().len();
+    visible.set(false);
+    show.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+}
+
+/// Standalone ShowContext keeps its public runtime accessor for downstream code.
+/// 独立 ShowContext 保留公开 runtime 访问器，供下游代码使用。
+#[test]
+fn standalone_show_context_runtime_remains_public() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let show = Show::mount(
+        &runtime,
+        &owner,
+        &root,
+        Some(&tail),
+        "show/public-runtime",
+        || true,
+        |context: &mut ShowContext<MockBackend>| {
+            assert_eq!(context.runtime().backend().listener_count(), 0);
+            context.create_element(Tag::Button)
+        },
+    );
+    assert!(show.is_mounted());
+}
+
+/// Disposing the parent owner from the first content mount is terminal now that
+/// cleanup registration precedes the initial condition effect.
+/// 清理注册提前后，首次内容挂载内释放父 Owner 会完成终止清理。
+#[test]
+fn show_initial_content_parent_dispose_is_terminal() {
+    let runtime = Runtime::new(MockBackend::new());
+    let signals_owner = runtime.create_owner();
+    let parent_owner = runtime.create_owner();
+    let visible = signals_owner.signal_named("show/initial-parent", true);
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let show = {
+        let visible = visible.clone();
+        let parent = parent_owner.clone();
+        Show::mount(
+            &runtime,
+            &parent_owner,
+            &root,
+            Some(&tail),
+            "show/initial-parent",
+            move || visible.get(),
+            move |context: &mut ShowContext<MockBackend>| {
+                parent.dispose();
+                context.create_element(Tag::Button)
+            },
+        )
+    };
+    assert!(!show.is_mounted());
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "initial content and anchors are released"
+    );
+    assert!(
+        parent_owner
+            .snapshot()
+            .effects
+            .iter()
+            .any(|effect| effect.name == "show/initial-parent/condition" && !effect.active)
+    );
+    let after_dispose = runtime.backend().operations().len();
+    visible.set(false);
+    show.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+}

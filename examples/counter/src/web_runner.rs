@@ -16,10 +16,106 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use crate::{
+    keyed::{KeyedMount, mount_keyed, mount_keyed_root, run_keyed_conformance},
     runner::{mount_counter, mount_counter_with_state},
     show::{mount_show, run_show_conformance},
     web::new_host,
 };
+
+thread_local! {
+    /// Live keyed scenario probe captured before the scenario host is dropped.
+    /// 场景 Host 被释放前捕获的 keyed 实时探针。
+    static LIVE_KEYED: RefCell<Option<LiveKeyedProbe>> = const { RefCell::new(None) };
+    /// Live root probe captured before the counter or Show host is dropped.
+    /// 计数器或 Show Host 被释放前捕获的根节点实时探针。
+    static LIVE_ROOT: RefCell<Option<LiveRootProbe>> = const { RefCell::new(None) };
+}
+
+/// Live DOM state of the current keyed scenario page at capture time.
+/// 捕获时当前 keyed 场景页面的实时 DOM 状态。
+#[derive(Clone, Debug, Serialize)]
+struct LiveKeyedProbe {
+    schema: u32,
+    mounted_in_body: bool,
+    host_text: String,
+    rows: Vec<String>,
+}
+
+/// Live DOM state of a counter or Show scenario root at capture time.
+/// 捕获时计数器或 Show 场景根节点的实时 DOM 状态。
+#[derive(Clone, Debug, Serialize)]
+struct LiveRootProbe {
+    schema: u32,
+    mounted_in_body: bool,
+    text: String,
+    labels: Vec<String>,
+}
+
+/// Reads the mounted keyed root itself rather than the first host in the page.
+/// 直接读取已挂载的 keyed 根节点，而不是页面中的第一个宿主。
+fn read_live_keyed_probe(root: &WebNode) -> LiveKeyedProbe {
+    let document = web_sys::window().and_then(|window| window.document());
+    let body = document.as_ref().and_then(|document| document.body());
+    let mounted_in_body = body.as_ref().is_some_and(|body| {
+        root.node()
+            .parent_node()
+            .is_some_and(|parent| parent.is_same_node(Some(body)))
+    });
+    let host_text = root.node().text_content().unwrap_or_default();
+    let rows = root
+        .node()
+        .dyn_ref::<web_sys::Element>()
+        .and_then(|element| {
+            element
+                .query_selector_all("button[aria-label^=\"Row \"]")
+                .ok()
+        })
+        .map(|nodes| {
+            (0..nodes.length())
+                .filter_map(|index| nodes.item(index))
+                .filter_map(|node| node.dyn_ref::<web_sys::Element>().cloned())
+                .filter_map(|element| element.get_attribute("aria-label"))
+                .collect()
+        })
+        .unwrap_or_default();
+    LiveKeyedProbe {
+        schema: 1,
+        mounted_in_body,
+        host_text,
+        rows,
+    }
+}
+
+/// Reads only the supplied scenario root and its labeled descendants.
+/// 只读取传入的场景根节点及其带标签的后代。
+fn read_live_root_probe(root: &WebNode) -> LiveRootProbe {
+    let document = web_sys::window().and_then(|window| window.document());
+    let body = document.as_ref().and_then(|document| document.body());
+    let mounted_in_body = body.as_ref().is_some_and(|body| {
+        root.node()
+            .parent_node()
+            .is_some_and(|parent| parent.is_same_node(Some(body)))
+    });
+    let text = root.node().text_content().unwrap_or_default();
+    let labels = root
+        .node()
+        .dyn_ref::<web_sys::Element>()
+        .and_then(|element| element.query_selector_all("[aria-label]").ok())
+        .map(|nodes| {
+            (0..nodes.length())
+                .filter_map(|index| nodes.item(index))
+                .filter_map(|node| node.dyn_ref::<web_sys::Element>().cloned())
+                .filter_map(|element| element.get_attribute("aria-label"))
+                .collect()
+        })
+        .unwrap_or_default();
+    LiveRootProbe {
+        schema: 1,
+        mounted_in_body,
+        text,
+        labels,
+    }
+}
 
 /// One mounted counter page with handles only to its own runtime.
 /// 一个已挂载的计数器页面，只持有自己 Runtime 的句柄。
@@ -80,6 +176,90 @@ impl Default for CounterPage {
     }
 }
 
+/// One mounted keyed list page with handles only to its own runtime.
+/// 一个已挂载的 keyed 列表页面，只持有自己 Runtime 的句柄。
+///
+/// JavaScript keeps the row nodes by reference so a reorder cannot pass by
+/// recreating equivalent nodes.
+/// JavaScript 按引用保留行节点，因此重排不能靠重建等价节点蒙混过关。
+#[wasm_bindgen]
+pub struct KeyedPage {
+    host: HeadlessHost<DomBackend>,
+    mount: KeyedMount<DomBackend>,
+}
+
+#[wasm_bindgen]
+impl KeyedPage {
+    /// Mounts an empty keyed list on `document.body`.
+    /// 在 `document.body` 上挂载空 keyed 列表。
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        let mut host = new_host(Environment::default());
+        let slot: Rc<RefCell<Option<KeyedMount<DomBackend>>>> = Rc::new(RefCell::new(None));
+        let capture = Rc::clone(&slot);
+        host.mount("keyed", move |runtime, owner| {
+            let mount = mount_keyed(runtime, owner);
+            let root = mount.root.clone();
+            *capture.borrow_mut() = Some(mount);
+            runtime.backend_mut().mount_to_body(&root);
+            root
+        });
+        let mount = slot.borrow_mut().take().expect("keyed mount handle");
+        Self { host, mount }
+    }
+
+    /// Replaces the key list from a JSON string array.
+    /// 从 JSON 字符串数组替换 key 列表。
+    pub fn set_keys(&self, keys_json: &str) -> Result<(), JsValue> {
+        let keys: Vec<String> = serde_json::from_str(keys_json)
+            .map_err(|error| tool_error("UI_KEYED_KEYS", error.to_string()))?;
+        self.mount.set_keys(keys);
+        Ok(())
+    }
+
+    /// Returns the committed keys as JSON.
+    /// 以 JSON 返回已提交 key。
+    pub fn keys(&self) -> String {
+        serde_json::to_string(&self.mount.keys()).expect("keys JSON")
+    }
+
+    /// Returns builder run counts as JSON.
+    /// 以 JSON 返回构建器运行次数。
+    pub fn builder_runs(&self) -> String {
+        serde_json::to_string(&self.mount.builder_runs()).expect("builder runs JSON")
+    }
+
+    /// Returns the keys still retained by probe instrumentation as JSON.
+    /// 以 JSON 返回探针仍保留的 key。
+    pub fn probe_keys(&self) -> String {
+        serde_json::to_string(&self.mount.probe_keys()).expect("probe keys JSON")
+    }
+
+    /// Returns the last duplicate-key error code, if any.
+    /// 返回最近一次重复 key 错误码（若有）。
+    pub fn last_error_code(&self) -> Option<String> {
+        self.mount.last_error_code()
+    }
+
+    /// Returns reactive and backend counters as JSON.
+    /// 以 JSON 返回响应式与后端计数。
+    pub fn execution_counters(&self) -> String {
+        serde_json::to_string(&self.host.execution_counters()).expect("counters JSON")
+    }
+
+    /// Disposes the keyed list and its host root.
+    /// 释放 keyed 列表及其宿主根节点。
+    pub fn dispose(&mut self) {
+        self.host.dispose();
+    }
+}
+
+impl Default for KeyedPage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Runs the shared conformance sequence against the real browser DOM.
 /// 针对真实浏览器 DOM 运行共享一致性序列。
 #[wasm_bindgen]
@@ -122,6 +302,72 @@ pub fn run_show_conformance_probe() -> Result<String, JsValue> {
         .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))?;
     serde_json::to_string(&value)
         .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))
+}
+
+/// Runs the shared manual keyed For sequence against the real browser DOM.
+/// 针对真实浏览器 DOM 运行共享手工 keyed For 序列。
+#[wasm_bindgen]
+pub fn run_keyed_conformance_probe() -> Result<String, JsValue> {
+    let host = new_host(Environment::default());
+    let report = run_keyed_conformance(host)
+        .map_err(|message| tool_error("UI_KEYED_CONFORMANCE", message))?;
+    let violations = report.validate();
+    let status = if violations.is_empty() {
+        "passed"
+    } else {
+        "failed"
+    };
+    let mut value = serde_json::to_value(&report)
+        .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))?;
+    value["status"] = serde_json::Value::String(status.to_owned());
+    value["violations"] = serde_json::to_value(&violations)
+        .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))?;
+    serde_json::to_string(&value)
+        .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))
+}
+
+/// Web node identity probe: clones keep their record id before and after release.
+/// Web 节点标识探针：clone 在释放前后保持同一记录标识。
+#[derive(Serialize)]
+struct WebIdentityProbe {
+    schema: u32,
+    before: Option<u64>,
+    clone_identity: Option<u64>,
+    after_release: Option<u64>,
+    next: Option<u64>,
+    stable: bool,
+    next_distinct: bool,
+}
+
+/// Proves WebNode identity is stable across clones and release without lookups scanning.
+/// 验证 WebNode 标识在 clone 与释放后保持稳定，且标识查询不扫描节点记录。
+#[wasm_bindgen]
+pub fn run_web_identity_probe(release: bool) -> Result<String, JsValue> {
+    let mut backend = DomBackend::new();
+    let node = backend.create_element(Tag::Button);
+    let clone = node.clone();
+    let before = backend.node_identity(&node);
+    let clone_identity = backend.node_identity(&clone);
+    let after_release = if release {
+        backend.release(&node);
+        backend.node_identity(&clone)
+    } else {
+        None
+    };
+    let next = backend.create_element(Tag::Button);
+    let next = backend.node_identity(&next);
+    let stable =
+        before.is_some() && before == clone_identity && (!release || after_release == before);
+    serde_json::to_string(&WebIdentityProbe {
+        schema: 1,
+        before,
+        clone_identity,
+        after_release,
+        next,
+        stable,
+        next_distinct: next != before,
+    })
+    .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))
 }
 
 /// Whether an anchor is rejected as a text target while a real text node is accepted.
@@ -215,6 +461,10 @@ pub fn run_detach_reinsert_probe() -> Result<String, JsValue> {
 struct ScenarioBundle {
     result: ScenarioResult,
     artifacts: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_keyed: Option<LiveKeyedProbe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_root: Option<LiveRootProbe>,
 }
 
 /// Runs the unchanged JSON scenario against the real DOM inside the browser.
@@ -224,8 +474,15 @@ pub fn run_scenario(scenario_json: &str, run_dir: &str) -> Result<String, JsValu
     let scenario: Scenario = serde_json::from_str(scenario_json)
         .map_err(|error| tool_error("UI_SCENARIO_INVALID_JSON", error.to_string()))?;
     let host = new_host(scenario.environment.clone());
-    let run = run_on_host_collect(&scenario, Path::new(run_dir), host, mount_on_body)
-        .map_err(tool_error_value)?;
+    LIVE_ROOT.with(|slot| *slot.borrow_mut() = None);
+    let run = run_on_host_collect(
+        &scenario,
+        Path::new(run_dir),
+        host,
+        mount_on_body_with_probe,
+    )
+    .map_err(tool_error_value)?;
+    let live_root = LIVE_ROOT.with(|slot| slot.borrow_mut().take());
 
     let artifacts = run
         .artifacts
@@ -239,6 +496,8 @@ pub fn run_scenario(scenario_json: &str, run_dir: &str) -> Result<String, JsValu
     serde_json::to_string(&ScenarioBundle {
         result: run.result,
         artifacts,
+        live_keyed: None,
+        live_root,
     })
     .map_err(|error| tool_error("UI_ARTIFACT_SERIALIZATION", error.to_string()))
 }
@@ -250,8 +509,15 @@ pub fn run_show_scenario(scenario_json: &str, run_dir: &str) -> Result<String, J
     let scenario: Scenario = serde_json::from_str(scenario_json)
         .map_err(|error| tool_error("UI_SCENARIO_INVALID_JSON", error.to_string()))?;
     let host = new_host(scenario.environment.clone());
-    let run = run_on_host_collect(&scenario, Path::new(run_dir), host, mount_show_on_body)
-        .map_err(tool_error_value)?;
+    LIVE_ROOT.with(|slot| *slot.borrow_mut() = None);
+    let run = run_on_host_collect(
+        &scenario,
+        Path::new(run_dir),
+        host,
+        mount_show_on_body_with_probe,
+    )
+    .map_err(tool_error_value)?;
+    let live_root = LIVE_ROOT.with(|slot| slot.borrow_mut().take());
 
     let artifacts = run
         .artifacts
@@ -265,6 +531,43 @@ pub fn run_show_scenario(scenario_json: &str, run_dir: &str) -> Result<String, J
     serde_json::to_string(&ScenarioBundle {
         result: run.result,
         artifacts,
+        live_keyed: None,
+        live_root,
+    })
+    .map_err(|error| tool_error("UI_ARTIFACT_SERIALIZATION", error.to_string()))
+}
+
+/// Runs the unchanged keyed scenario against the real DOM inside the browser.
+/// 在浏览器内针对真实 DOM 运行未修改的 keyed 场景。
+#[wasm_bindgen]
+pub fn run_keyed_scenario(scenario_json: &str, run_dir: &str) -> Result<String, JsValue> {
+    let scenario: Scenario = serde_json::from_str(scenario_json)
+        .map_err(|error| tool_error("UI_SCENARIO_INVALID_JSON", error.to_string()))?;
+    let host = new_host(scenario.environment.clone());
+    LIVE_KEYED.with(|slot| *slot.borrow_mut() = None);
+    let run = run_on_host_collect(
+        &scenario,
+        Path::new(run_dir),
+        host,
+        mount_keyed_on_body_with_probe,
+    )
+    .map_err(tool_error_value)?;
+    let live_keyed = LIVE_KEYED.with(|slot| slot.borrow_mut().take());
+
+    let artifacts = run
+        .artifacts
+        .into_iter()
+        .map(|(path, bytes)| {
+            String::from_utf8(bytes)
+                .map(|contents| (path, contents))
+                .map_err(|error| tool_error("UI_ARTIFACT_SERIALIZATION", error.to_string()))
+        })
+        .collect::<Result<BTreeMap<_, _>, JsValue>>()?;
+    serde_json::to_string(&ScenarioBundle {
+        result: run.result,
+        artifacts,
+        live_keyed,
+        live_root: None,
     })
     .map_err(|error| tool_error("UI_ARTIFACT_SERIALIZATION", error.to_string()))
 }
@@ -277,11 +580,80 @@ fn mount_on_body(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
     root
 }
 
+/// Mounts the counter and captures its root before host disposal.
+/// 挂载计数器，并在 Host 释放前捕获其根节点。
+fn mount_on_body_with_probe(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
+    let slot = capture_live_root_before_mount(owner);
+    let root = mount_on_body(runtime, owner);
+    *slot.borrow_mut() = Some(root.clone());
+    root
+}
+
 /// Mounts the manual Show probe and attaches its root to `document.body`.
 /// 挂载手工 Show 探针并把其根节点附加到 `document.body`。
 fn mount_show_on_body(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
     let root = mount_show(runtime, owner);
     runtime.backend_mut().mount_to_body(&root);
+    root
+}
+
+/// Mounts the Show probe and captures its root before host disposal.
+/// 挂载 Show 探针，并在 Host 释放前捕获其根节点。
+fn mount_show_on_body_with_probe(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
+    let slot = capture_live_root_before_mount(owner);
+    let root = mount_show_on_body(runtime, owner);
+    *slot.borrow_mut() = Some(root.clone());
+    root
+}
+
+/// Registers a root-scoped live probe before the mount creates its owners.
+/// 在挂载创建其它 Owner 前注册限定于根节点的实时探针。
+///
+/// Child cleanup follows creation order, so registering first lets the probe
+/// observe the committed page before range owners release their nodes.
+/// 子节点清理按创建顺序执行，因此先注册可让探针在范围 Owner 释放节点前观察
+/// 已提交页面。
+fn capture_live_root_before_mount(owner: &Owner) -> Rc<RefCell<Option<WebNode>>> {
+    let slot: Rc<RefCell<Option<WebNode>>> = Rc::new(RefCell::new(None));
+    let read_slot = Rc::clone(&slot);
+    let capture_owner = owner.child();
+    capture_owner.on_dispose(move || {
+        if let Some(root) = read_slot.borrow().clone() {
+            LIVE_ROOT.with(|slot| *slot.borrow_mut() = Some(read_live_root_probe(&root)));
+        }
+    });
+    // Keep the capture owner strongly alive until the host owner cleans its
+    // children; a parent only stores weak child references.
+    // 保持捕获 Owner 强引用直到 Host Owner 清理子节点；父 Owner 只保存弱子引用。
+    owner.keep_alive(capture_owner);
+    slot
+}
+
+/// Mounts the manual keyed probe and attaches its root to `document.body`.
+/// 挂载手工 keyed 探针并把其根节点附加到 `document.body`。
+fn mount_keyed_on_body(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
+    let root = mount_keyed_root(runtime, owner);
+    runtime.backend_mut().mount_to_body(&root);
+    root
+}
+
+/// Mounts the keyed probe and captures its root before host disposal.
+/// 挂载 keyed 探针，并在 Host 释放前捕获其根节点。
+fn mount_keyed_on_body_with_probe(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
+    let slot: Rc<RefCell<Option<WebNode>>> = Rc::new(RefCell::new(None));
+    let read_slot = Rc::clone(&slot);
+    let capture_owner = owner.child();
+    capture_owner.on_dispose(move || {
+        if let Some(root) = read_slot.borrow().clone() {
+            LIVE_KEYED.with(|slot| *slot.borrow_mut() = Some(read_live_keyed_probe(&root)));
+        }
+    });
+    // Keep the capture owner strongly alive until the host owner cleans its
+    // children; a parent only stores weak child references.
+    // 保持捕获 Owner 强引用直到 Host Owner 清理子节点；父 Owner 只保存弱子引用。
+    owner.keep_alive(capture_owner);
+    let root = mount_keyed_on_body(runtime, owner);
+    *slot.borrow_mut() = Some(root.clone());
     root
 }
 

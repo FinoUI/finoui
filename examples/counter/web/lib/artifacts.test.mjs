@@ -51,6 +51,19 @@ test('cleanManagedArtifacts removes only managed files and captures', () => {
   );
 });
 
+test('managed artifacts cover every final browser report', () => {
+  for (const name of [
+    'conformance.json',
+    'detach_reinsert.json',
+    'remount.json',
+    'anchor_misuse.json',
+    'show_conformance.json',
+    'keyed_conformance.json',
+  ]) {
+    assert.ok(MANAGED_ARTIFACTS.includes(name), `${name} must be managed`);
+  }
+});
+
 test('cleanManagedArtifacts tolerates omitted artifacts and repeated cleanup', () => {
   const outDir = fixtureDirectory('omitted');
   write(path.join(outDir, 'result.json'));

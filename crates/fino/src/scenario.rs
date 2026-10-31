@@ -5,6 +5,8 @@ use std::{
     collections::BTreeMap,
     fmt::Write as _,
     fs,
+    ops::{Deref, DerefMut},
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
 };
 
@@ -300,6 +302,59 @@ pub fn run_on_host_collect<B: HeadlessBackend + 'static>(
     execute_on_host(scenario, run_dir, host, mount, &mut sink)
 }
 
+/// Disposes a mounted scenario host exactly once when execution leaves scope.
+/// 在离开作用域时只释放一次已挂载场景 Host。
+///
+/// The normal path calls [`ScenarioHost::dispose`] and disarms the guard. Any
+/// early `?` return drops the guard, which removes the root and owner without
+/// replacing the primary error with a cleanup panic.
+/// 正常路径调用 [`ScenarioHost::dispose`] 并解除守卫。任何提前 `?` 返回都会
+/// 触发 Drop，移除根节点与 Owner，且不会用清理 panic 覆盖首要错误。
+struct ScenarioHost<B: HeadlessBackend + 'static> {
+    host: Option<HeadlessHost<B>>,
+}
+
+impl<B: HeadlessBackend + 'static> ScenarioHost<B> {
+    fn new(host: HeadlessHost<B>) -> Self {
+        Self { host: Some(host) }
+    }
+
+    /// Disposes the mounted host and reports a cleanup panic to the caller.
+    /// 释放已挂载 Host，并把清理 panic 报告给调用方。
+    fn dispose(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        let host = self.host.take()?;
+        catch_unwind(AssertUnwindSafe(|| {
+            let mut host = host;
+            host.dispose();
+        }))
+        .err()
+    }
+}
+
+impl<B: HeadlessBackend + 'static> Deref for ScenarioHost<B> {
+    type Target = HeadlessHost<B>;
+
+    fn deref(&self) -> &Self::Target {
+        self.host.as_ref().expect("scenario host must be mounted")
+    }
+}
+
+impl<B: HeadlessBackend + 'static> DerefMut for ScenarioHost<B> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.host.as_mut().expect("scenario host must be mounted")
+    }
+}
+
+impl<B: HeadlessBackend + 'static> Drop for ScenarioHost<B> {
+    fn drop(&mut self) {
+        // A cleanup panic is secondary to an in-flight ToolError or original
+        // panic, so Drop never replaces it.
+        // 清理 panic 相对于进行中的 ToolError 或原始 panic 是次要的，因此 Drop
+        // 绝不覆盖它。
+        let _ = self.dispose();
+    }
+}
+
 /// Executes the protocol into an artifact sink shared by filesystem and browser hosts.
 /// 将协议执行到文件系统与浏览器 Host 共用的产物接收器。
 fn execute_on_host<B: HeadlessBackend + 'static>(
@@ -321,6 +376,11 @@ fn execute_on_host<B: HeadlessBackend + 'static>(
     sink.prepare()?;
 
     host.mount(&scenario.mount, mount);
+    // The guard is installed immediately after the root exists, so a snapshot
+    // or result write failure cannot leave the mounted root and owner behind.
+    // 根节点创建后立即安装守卫，因此快照或结果写入失败也不会留下已挂载根节点
+    // 与 Owner。
+    let mut host = ScenarioHost::new(host);
     let mut steps = Vec::new();
     let mut captures = Vec::new();
     let mut errors = Vec::new();
@@ -397,6 +457,16 @@ fn execute_on_host<B: HeadlessBackend + 'static>(
         errors,
     };
     sink.write("result.json", &json_bytes(&result, "result.json")?)?;
+    // Every invocation owns one host and one root. Dispose after the final
+    // snapshots and result exist so repeated browser runs cannot accumulate
+    // previous scenario roots; owner cleanup also runs live probes before the
+    // root is detached.
+    // 每次调用拥有一个 Host 与一个根节点。在最终快照与结果生成后释放，使重复
+    // 浏览器运行不会累积旧场景根节点；Owner 清理还会在根节点分离前运行实时
+    // 探针。
+    if let Some(payload) = host.dispose() {
+        resume_unwind(payload);
+    }
     Ok(ScenarioRun {
         result,
         artifacts: sink.artifacts().clone(),
@@ -776,4 +846,137 @@ fn json_bytes(value: &impl Serialize, label: &str) -> Result<Vec<u8>, ToolError>
     })?;
     json.push(b'\n');
     Ok(json)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    use super::*;
+    use crate::{
+        backend_mock::{BackendOp, MockBackend},
+        dom_api::{DomBackend as _, Tag},
+    };
+
+    /// Sink that fails one selected write while forwarding every other call.
+    /// 在一个指定写入上失败、其余调用转发的接收器。
+    struct FailingSink {
+        inner: MemoryArtifactSink,
+        fail_on: &'static str,
+    }
+
+    impl ArtifactSink for FailingSink {
+        fn prepare(&mut self) -> Result<(), ToolError> {
+            self.inner.prepare()
+        }
+
+        fn create_dir(&mut self, relative: &str) -> Result<(), ToolError> {
+            self.inner.create_dir(relative)
+        }
+
+        fn write(&mut self, relative: &str, bytes: &[u8]) -> Result<(), ToolError> {
+            if relative == self.fail_on {
+                return Err(ToolError::new(
+                    "UI_TEST_SINK_WRITE",
+                    format!("injected write failure for {relative}"),
+                ));
+            }
+            self.inner.write(relative, bytes)
+        }
+
+        fn remove(&mut self, relative: &str) -> Result<(), ToolError> {
+            self.inner.remove(relative)
+        }
+
+        fn artifacts(&self) -> &BTreeMap<String, Vec<u8>> {
+            self.inner.artifacts()
+        }
+    }
+
+    fn silent_scenario() -> Scenario {
+        Scenario {
+            schema: SCENARIO_SCHEMA,
+            name: "scenario/sink-failure".to_owned(),
+            mount: "tests/sink-failure".to_owned(),
+            environment: Environment::default(),
+            steps: Vec::new(),
+        }
+    }
+
+    fn run_with_failing_write(
+        fail_on: &'static str,
+    ) -> (ToolError, Rc<Cell<usize>>, Runtime<MockBackend>) {
+        let host = HeadlessHost::new(MockBackend::new(), Environment::default());
+        let disposed = Rc::new(Cell::new(0));
+        let runtime_slot: Rc<RefCell<Option<Runtime<MockBackend>>>> = Rc::new(RefCell::new(None));
+        let mount_slot = Rc::clone(&runtime_slot);
+        let mount_disposed = Rc::clone(&disposed);
+        let mut sink = FailingSink {
+            inner: MemoryArtifactSink::default(),
+            fail_on,
+        };
+        let error = execute_on_host(
+            &silent_scenario(),
+            Path::new("artifacts/sink-failure"),
+            host,
+            move |runtime, owner| {
+                *mount_slot.borrow_mut() = Some(runtime.clone());
+                let disposed = Rc::clone(&mount_disposed);
+                owner.on_dispose(move || disposed.set(disposed.get() + 1));
+                runtime.backend_mut().create_element(Tag::Button)
+            },
+            &mut sink,
+        )
+        .expect_err("injected sink write must fail");
+        let runtime = runtime_slot.borrow_mut().take().expect("runtime clone");
+        (error, disposed, runtime)
+    }
+
+    /// A required snapshot write failure still disposes the mounted root and
+    /// owner exactly once.
+    /// required 快照写入失败仍会释放已挂载根节点与 Owner，且只释放一次。
+    #[test]
+    fn snapshot_write_failure_disposes_mounted_host() {
+        let (error, disposed, runtime) = run_with_failing_write("dom.json");
+        assert_eq!(error.code.as_ref(), "UI_TEST_SINK_WRITE");
+        assert_eq!(disposed.get(), 1, "the mounted owner is disposed once");
+        assert!(
+            runtime.backend().logical_tree().roots.is_empty(),
+            "the mounted root is detached"
+        );
+        assert_eq!(
+            runtime
+                .backend()
+                .operations()
+                .iter()
+                .filter(|operation| matches!(operation, BackendOp::Remove))
+                .count(),
+            1,
+            "the guard removes the root once and never double-disposes"
+        );
+    }
+
+    /// A result write failure still disposes the mounted root and owner.
+    /// result 写入失败仍会释放已挂载根节点与 Owner。
+    #[test]
+    fn result_write_failure_disposes_mounted_host() {
+        let (error, disposed, runtime) = run_with_failing_write("result.json");
+        assert_eq!(error.code.as_ref(), "UI_TEST_SINK_WRITE");
+        assert_eq!(disposed.get(), 1, "the mounted owner is disposed once");
+        assert!(
+            runtime.backend().logical_tree().roots.is_empty(),
+            "the mounted root is detached"
+        );
+        assert_eq!(
+            runtime
+                .backend()
+                .operations()
+                .iter()
+                .filter(|operation| matches!(operation, BackendOp::Remove))
+                .count(),
+            1,
+            "the guard removes the root once and never double-disposes"
+        );
+    }
 }
