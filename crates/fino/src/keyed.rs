@@ -35,7 +35,7 @@ use crate::{
     dom_api::{Attribute, DomBackend, Event, EventContext, EventKind, Tag},
     reactive::Owner,
     runtime::Runtime,
-    show::{RangeAnchor, Show, ShowContext, terminate_owner_and_nodes},
+    show::{RangeAnchor, ReleaseObserver, Show, ShowContext, terminate_owner_and_nodes},
     view::with_owner,
 };
 
@@ -107,6 +107,7 @@ impl std::error::Error for ForError {}
 pub struct ForContext<B: DomBackend + 'static> {
     inner: ShowContext<B>,
     owned: Rc<std::cell::RefCell<Vec<B::Node>>>,
+    nested_nodes: Rc<std::cell::RefCell<Vec<B::Node>>>,
     pending_dispose: Vec<Box<dyn FnOnce()>>,
 }
 
@@ -177,15 +178,20 @@ pub struct ForShowContext<'a, B: DomBackend + 'static> {
     inner: &'a mut ShowContext<B>,
     runtime: Runtime<B>,
     owned: Rc<std::cell::RefCell<Vec<B::Node>>>,
+    nested_nodes: Rc<std::cell::RefCell<Vec<B::Node>>>,
 }
 
 impl<'a, B: DomBackend + 'static> ForShowContext<'a, B> {
-    fn new(inner: &'a mut ShowContext<B>) -> Self {
+    fn new(
+        inner: &'a mut ShowContext<B>,
+        nested_nodes: Rc<std::cell::RefCell<Vec<B::Node>>>,
+    ) -> Self {
         let runtime = inner.runtime().clone();
         Self {
             inner,
             runtime,
             owned: Rc::new(std::cell::RefCell::new(Vec::new())),
+            nested_nodes,
         }
     }
 
@@ -201,6 +207,7 @@ impl<'a, B: DomBackend + 'static> ForShowContext<'a, B> {
     pub fn create_element(&mut self, tag: Tag) -> B::Node {
         let node = self.inner.create_element(tag);
         self.owned.borrow_mut().push(node.clone());
+        self.nested_nodes.borrow_mut().push(node.clone());
         node
     }
 
@@ -209,6 +216,7 @@ impl<'a, B: DomBackend + 'static> ForShowContext<'a, B> {
     pub fn create_text(&mut self, value: &str) -> B::Node {
         let node = self.inner.create_text(value);
         self.owned.borrow_mut().push(node.clone());
+        self.nested_nodes.borrow_mut().push(node.clone());
         node
     }
 
@@ -217,6 +225,7 @@ impl<'a, B: DomBackend + 'static> ForShowContext<'a, B> {
     pub fn create_anchor(&mut self) -> B::Node {
         let node = self.inner.create_anchor();
         self.owned.borrow_mut().push(node.clone());
+        self.nested_nodes.borrow_mut().push(node.clone());
         node
     }
 
@@ -275,11 +284,24 @@ impl<'a, B: DomBackend + 'static> ForShowContext<'a, B> {
         if let Some(before) = before {
             self.assert_owned(before);
         }
-        self.inner
-            .show(parent, before, name, condition, move |inner| {
-                let mut context = ForShowContext::new(inner);
+        let nested_nodes = Rc::clone(&self.nested_nodes);
+        let observer_nodes = Rc::clone(&self.nested_nodes);
+        let observer: ReleaseObserver<B> = Rc::new(move |released| {
+            observer_nodes
+                .borrow_mut()
+                .retain(|node| !released.iter().any(|released| released == node));
+        });
+        self.inner.show_observed(
+            parent,
+            before,
+            name,
+            condition,
+            move |inner| {
+                let mut context = ForShowContext::new(inner, Rc::clone(&nested_nodes));
                 content(&mut context)
-            })
+            },
+            observer,
+        )
     }
 
     /// Registers a nested-range effect with only nested-range-owned mutations.
@@ -314,6 +336,7 @@ impl<B: DomBackend + 'static> ForContext<B> {
         Self {
             inner: ShowContext::new(runtime, owner),
             owned: Rc::new(std::cell::RefCell::new(Vec::new())),
+            nested_nodes: Rc::new(std::cell::RefCell::new(Vec::new())),
             pending_dispose: Vec::new(),
         }
     }
@@ -459,11 +482,24 @@ impl<B: DomBackend + 'static> ForContext<B> {
         if let Some(before) = before {
             self.assert_owned(before);
         }
-        self.inner
-            .show(parent, before, name, condition, move |inner| {
-                let mut context = ForShowContext::new(inner);
+        let nested_nodes = Rc::clone(&self.nested_nodes);
+        let observer_nodes = Rc::clone(&self.nested_nodes);
+        let observer: ReleaseObserver<B> = Rc::new(move |released| {
+            observer_nodes
+                .borrow_mut()
+                .retain(|node| !released.iter().any(|released| released == node));
+        });
+        self.inner.show_observed(
+            parent,
+            before,
+            name,
+            condition,
+            move |inner| {
+                let mut context = ForShowContext::new(inner, Rc::clone(&nested_nodes));
                 content(&mut context)
-            })
+            },
+            observer,
+        )
     }
 }
 
@@ -481,6 +517,7 @@ struct ForEntry<B: DomBackend + 'static, K> {
     anchors: RangeAnchor<B>,
     nodes: Vec<B::Node>,
     created: Vec<B::Node>,
+    nested_nodes: Rc<std::cell::RefCell<Vec<B::Node>>>,
 }
 
 impl<B: DomBackend + 'static, K> ForEntry<B, K> {
@@ -513,8 +550,15 @@ impl<B: DomBackend + 'static, K> ForEntry<B, K> {
             owner,
             nodes: returned_nodes,
             created,
+            nested_nodes,
             ..
         } = self;
+        let nested = nested_nodes.borrow().clone();
+        for node in created.iter().chain(&nested) {
+            if !claimed.iter().any(|claimed| claimed == node) {
+                claimed.push(node.clone());
+            }
+        }
         let mut nodes = created;
         for node in returned_nodes {
             if existing_nodes.iter().any(|existing| existing == &node)
@@ -646,6 +690,17 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> For<B, 
             control_dispose_pending: false,
         }));
 
+        let cleanup_state = SendWrapper::new(Rc::downgrade(&state));
+        let cleanup_request = SendWrapper::new(Rc::clone(&dispose_requested));
+        control.register_cleanup(move || {
+            cleanup_request.set(true);
+            if let Some(state) = cleanup_state.upgrade()
+                && let Ok(mut state) = state.try_borrow_mut()
+            {
+                state.cleanup(false);
+            }
+        });
+
         let effect_state = Rc::clone(&state);
         let effect_control = control.clone();
         let outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -704,17 +759,6 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> For<B, 
             control.dispose();
             return Err(error);
         }
-
-        let cleanup_state = SendWrapper::new(Rc::downgrade(&state));
-        let cleanup_request = SendWrapper::new(Rc::clone(&dispose_requested));
-        control.register_cleanup(move || {
-            cleanup_request.set(true);
-            if let Some(state) = cleanup_state.upgrade()
-                && let Ok(mut state) = state.try_borrow_mut()
-            {
-                state.cleanup(false);
-            }
-        });
 
         Ok(Self {
             state,
@@ -848,11 +892,9 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
     fn committed_nodes(&self) -> Vec<B::Node> {
         let mut nodes = Vec::new();
         for entry in &self.entries {
-            for node in entry.created.iter().chain(&entry.nodes) {
-                if !nodes.iter().any(|current| current == node) {
-                    nodes.push(node.clone());
-                }
-            }
+            nodes.extend(entry.created.iter().cloned());
+            nodes.extend(entry.nodes.iter().cloned());
+            nodes.extend(entry.nested_nodes.borrow().iter().cloned());
         }
         nodes
     }
@@ -939,57 +981,108 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
             return;
         }
 
-        let existing_nodes = self.committed_nodes();
-        let mut staging_nodes: Vec<(B::Node, usize)> = Vec::new();
-        let mut shared_node = false;
-        let mut conflict_index = prefix;
-        for (index, entry) in built.iter().enumerate() {
-            let Some(entry) = entry else {
-                continue;
-            };
-            let mut owned = entry.created.clone();
-            owned.extend(entry.nodes.iter().cloned());
-            let mut in_entry: Vec<B::Node> = Vec::new();
-            for node in owned {
-                if in_entry.iter().any(|current| current == &node) {
-                    continue;
+        if built.iter().any(Option::is_some) {
+            let existing_nodes = self.committed_nodes();
+            let existing_ids = identity_set(runtime, &existing_nodes);
+            let staged_owned: Vec<Vec<B::Node>> = built
+                .iter()
+                .map(|entry| {
+                    let mut owned = Vec::new();
+                    if let Some(entry) = entry {
+                        owned.extend(entry.created.iter().cloned());
+                        owned.extend(entry.nodes.iter().cloned());
+                        owned.extend(entry.nested_nodes.borrow().iter().cloned());
+                    }
+                    owned
+                })
+                .collect();
+            let mut identity_available = existing_ids.is_some();
+            let mut entry_ids: Vec<HashSet<u64>> = Vec::new();
+            if identity_available {
+                let backend = runtime.backend();
+                for owned in &staged_owned {
+                    let mut ids = HashSet::new();
+                    for node in owned {
+                        let Some(identity) = backend.node_identity(node) else {
+                            identity_available = false;
+                            break;
+                        };
+                        ids.insert(identity);
+                    }
+                    entry_ids.push(ids);
+                    if !identity_available {
+                        break;
+                    }
                 }
-                if existing_nodes.iter().any(|existing| existing == &node)
-                    || staging_nodes
-                        .iter()
-                        .any(|(staged, owner)| staged == &node && *owner != index)
-                {
-                    shared_node = true;
-                    conflict_index = prefix + index;
-                    break;
+            }
+            let mut shared_node = false;
+            let mut conflict_index = prefix;
+            if identity_available {
+                let existing_ids = existing_ids.expect("identity index must exist");
+                let mut staged_ids: HashMap<u64, usize> = HashMap::new();
+                for (index, ids) in entry_ids.iter().enumerate() {
+                    for identity in ids {
+                        if existing_ids.contains(identity)
+                            || staged_ids
+                                .get(identity)
+                                .is_some_and(|owner| *owner != index)
+                        {
+                            shared_node = true;
+                            conflict_index = prefix + index;
+                            break;
+                        }
+                        staged_ids.entry(*identity).or_insert(index);
+                    }
+                    if shared_node {
+                        break;
+                    }
                 }
-                in_entry.push(node.clone());
-                if !staging_nodes.iter().any(|(staged, _)| staged == &node) {
-                    staging_nodes.push((node, index));
+            } else {
+                let mut staging_nodes: Vec<(B::Node, usize)> = Vec::new();
+                for (index, owned) in staged_owned.iter().enumerate() {
+                    let mut in_entry: Vec<B::Node> = Vec::new();
+                    for node in owned {
+                        if in_entry.iter().any(|current| current == node) {
+                            continue;
+                        }
+                        if existing_nodes.iter().any(|existing| existing == node)
+                            || staging_nodes
+                                .iter()
+                                .any(|(staged, owner)| staged == node && *owner != index)
+                        {
+                            shared_node = true;
+                            conflict_index = prefix + index;
+                            break;
+                        }
+                        in_entry.push(node.clone());
+                        if !staging_nodes.iter().any(|(staged, _)| staged == node) {
+                            staging_nodes.push((node.clone(), index));
+                        }
+                    }
+                    if shared_node {
+                        break;
+                    }
                 }
             }
             if shared_node {
-                break;
-            }
-        }
-        if shared_node {
-            let mut first_panic = None;
-            let mut claimed = Vec::new();
-            for entry in built.into_iter().flatten() {
-                first_panic =
-                    entry.dispose_rejected(runtime, &existing_nodes, &mut claimed, first_panic);
-            }
-            self.last_error = Some(ForError::shared_node(conflict_index));
-            if self.dispose_requested.get() {
-                let terminal = catch_unwind(AssertUnwindSafe(|| self.request_terminal())).err();
-                if first_panic.is_none() {
-                    first_panic = terminal;
+                let mut first_panic = None;
+                let mut claimed = Vec::new();
+                for entry in built.into_iter().flatten() {
+                    first_panic =
+                        entry.dispose_rejected(runtime, &existing_nodes, &mut claimed, first_panic);
                 }
+                self.last_error = Some(ForError::shared_node(conflict_index));
+                if self.dispose_requested.get() {
+                    let terminal = catch_unwind(AssertUnwindSafe(|| self.request_terminal())).err();
+                    if first_panic.is_none() {
+                        first_panic = terminal;
+                    }
+                }
+                if let Some(payload) = first_panic {
+                    resume_unwind(payload);
+                }
+                return;
             }
-            if let Some(payload) = first_panic {
-                resume_unwind(payload);
-            }
-            return;
         }
 
         // Keep the committed entries in place until placement succeeds. A
@@ -1159,6 +1252,7 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
                     anchors: RangeAnchor::from_parts(start, end),
                     nodes,
                     created,
+                    nested_nodes: Rc::clone(&context.nested_nodes),
                 }
             }
             Ok((_, _, Err(payload))) | Err(payload) => {
@@ -1236,6 +1330,20 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> Drop fo
     }
 }
 
+/// Builds a stable identity set when every node exposes a backend identity.
+/// 当每个节点都提供后端标识时构建稳定标识集合。
+fn identity_set<B: DomBackend + 'static>(
+    runtime: &Runtime<B>,
+    nodes: &[B::Node],
+) -> Option<HashSet<u64>> {
+    let backend = runtime.backend();
+    let mut identities = HashSet::new();
+    for node in nodes {
+        identities.insert(backend.node_identity(node)?);
+    }
+    Some(identities)
+}
+
 /// Marks one longest increasing subsequence; zero entries are new nodes.
 /// 标记一个最长递增子序列；零表示新节点。
 ///
@@ -1294,4 +1402,66 @@ fn validate_keys<K: Clone + Eq + std::hash::Hash>(keys: &[K]) -> Result<(), ForE
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend_mock::MockBackend;
+
+    /// Nested-range ownership records are removed when the nested Show hides.
+    /// 嵌套 Show 隐藏时，其所有权记录会从条目跟踪器中移除。
+    #[test]
+    fn nested_node_tracker_drops_released_nodes() {
+        let runtime = Runtime::new(MockBackend::new());
+        let owner = runtime.create_owner();
+        let items = owner.signal_named("items", vec!["a".to_owned()]);
+        let visible = owner.signal_named("visible", true);
+        let root = runtime
+            .backend_mut()
+            .create_element(crate::dom_api::Tag::Button);
+        let show_visible = visible.clone();
+        let list = For::mount(
+            &runtime,
+            &owner,
+            &root,
+            None,
+            "keyed/nested-tracker",
+            move || items.get(),
+            move |context, key| {
+                let item = context.create_element(crate::dom_api::Tag::Button);
+                let condition = {
+                    let visible = show_visible.clone();
+                    move || visible.get()
+                };
+                let label = key.clone();
+                context.show(
+                    &item,
+                    None,
+                    "keyed/nested-tracker/show",
+                    condition,
+                    move |nested| {
+                        let element = nested.create_element(crate::dom_api::Tag::Button);
+                        let text = nested.create_text(&label);
+                        nested.insert_before(&element, &text, None);
+                        element
+                    },
+                );
+                vec![item]
+            },
+        );
+        assert!(
+            !list.state.borrow().entries[0]
+                .nested_nodes
+                .borrow()
+                .is_empty()
+        );
+        visible.set(false);
+        assert!(
+            list.state.borrow().entries[0]
+                .nested_nodes
+                .borrow()
+                .is_empty()
+        );
+    }
 }

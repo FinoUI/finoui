@@ -392,6 +392,16 @@ impl Owner {
                 }
             })
         });
+        if self.is_disposed() {
+            // The owner may be disposed during the first effect run, before its
+            // cleanup registration exists. Drop the effect and mark diagnostics
+            // inactive instead of leaving a stuck active record.
+            // Owner 可能在首次执行期间、清理注册之前被释放。此时直接丢弃 Effect
+            // 并把诊断标记为非活跃，避免留下卡住的 active 记录。
+            self.registry.borrow_mut().deactivate_effect(id);
+            drop(effect);
+            return;
+        }
         let cleanup_registry = SendWrapper::new(Rc::clone(&self.registry));
         self.inner.with(|| {
             reactive_graph::owner::on_cleanup(move || {

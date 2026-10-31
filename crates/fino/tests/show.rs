@@ -1090,3 +1090,49 @@ fn standalone_show_context_runtime_remains_public() {
     );
     assert!(show.is_mounted());
 }
+
+/// Disposing the parent owner from the first content mount is terminal now that
+/// cleanup registration precedes the initial condition effect.
+/// 清理注册提前后，首次内容挂载内释放父 Owner 会完成终止清理。
+#[test]
+fn show_initial_content_parent_dispose_is_terminal() {
+    let runtime = Runtime::new(MockBackend::new());
+    let signals_owner = runtime.create_owner();
+    let parent_owner = runtime.create_owner();
+    let visible = signals_owner.signal_named("show/initial-parent", true);
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let show = {
+        let visible = visible.clone();
+        let parent = parent_owner.clone();
+        Show::mount(
+            &runtime,
+            &parent_owner,
+            &root,
+            Some(&tail),
+            "show/initial-parent",
+            move || visible.get(),
+            move |context: &mut ShowContext<MockBackend>| {
+                parent.dispose();
+                context.create_element(Tag::Button)
+            },
+        )
+    };
+    assert!(!show.is_mounted());
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "initial content and anchors are released"
+    );
+    assert!(
+        parent_owner
+            .snapshot()
+            .effects
+            .iter()
+            .any(|effect| effect.name == "show/initial-parent/condition" && !effect.active)
+    );
+    let after_dispose = runtime.backend().operations().len();
+    visible.set(false);
+    show.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
+}

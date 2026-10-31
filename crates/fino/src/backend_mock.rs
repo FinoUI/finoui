@@ -435,6 +435,12 @@ impl DomBackend for MockBackend {
         self.operations.push(BackendOp::Remove);
     }
 
+    /// Returns the stable mock handle value as the ownership identity.
+    /// 返回稳定 Mock 句柄值作为所有权标识。
+    fn node_identity(&self, node: &Self::Node) -> Option<u64> {
+        Some(node.0)
+    }
+
     /// Mutates existing text storage and records the exact target for update assertions.
     /// 修改现有文本存储，并记录精确目标供更新次数断言使用。
     fn set_text(&mut self, node: &Self::Node, value: &str) {

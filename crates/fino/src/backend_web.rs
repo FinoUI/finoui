@@ -430,6 +430,12 @@ impl crate::dom_api::DomBackend for DomBackend {
         self.emit(WebBackendOp::Remove);
     }
 
+    /// Returns the stable creation-order record identifier for a real node.
+    /// 返回真实节点的稳定创建顺序记录标识。
+    fn node_identity(&self, node: &Self::Node) -> Option<u64> {
+        self.record_id(&node.node)
+    }
+
     /// Replaces only the existing text node's `nodeValue`.
     /// 仅替换现有文本节点的 `nodeValue`。
     fn set_text(&mut self, node: &Self::Node, value: &str) {

@@ -163,6 +163,18 @@ pub trait DomBackend {
     fn release(&mut self, node: &Self::Node) {
         self.remove(node);
     }
+    /// Returns a stable backend identity for O(1) ownership indexes.
+    /// 返回用于 O(1) 所有权索引的稳定后端标识。
+    ///
+    /// The default returns `None`, so legacy and custom backends keep using
+    /// `Eq`-based fallback comparisons. Built-in backends return their stable
+    /// node record identity rather than an address or formatted string.
+    /// 默认返回 `None`，旧版与自定义后端继续使用基于 `Eq` 的回退比较。内建
+    /// 后端返回稳定节点记录标识，而不是地址或格式化字符串。
+    fn node_identity(&self, node: &Self::Node) -> Option<u64> {
+        let _ = node;
+        None
+    }
     /// Replaces only the content of an existing text node.
     /// 仅替换现有文本节点的内容。
     fn set_text(&mut self, node: &Self::Node, value: &str);

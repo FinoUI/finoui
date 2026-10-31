@@ -154,10 +154,13 @@ let rows = For::mount(
 - Nested `Show` mounts are transactional too. A first-run content or condition panic releases the Show anchors and owner before rethrowing; a later content panic leaves the anchors and active effect in place so a retry can succeed.
 - Panic rollback and terminal release first detach every tracked node with `remove`, then release each unique node once. `remove` stays detach-only and `release` stays terminal, so parent-before-child and child-before-parent creation orders cannot double-release tracked descendants.
 - `For::dispose` records a terminal request even when reconciliation or item cleanup already borrows the state. The effect completes range and anchor release at the next safe point, then disposes the control owner after releasing the borrow; the outer reconcile never commits active items afterward, and later key updates cannot revive the list. Parent-owner cleanup shares the same pending request instead of silently skipping a busy state.
+- Cleanup registration precedes the initial reconcile for For and Show, so disposing the parent owner from the first builder or content mount still terminates anchors, ranges, effects, and listeners.
 - Removal cleanup catches each item owner/on_dispose panic, keeps the first payload, continues releasing every removed range, restores surviving and new entries into the committed state, and only then rethrows. Terminal disposal likewise completes all node, anchor, and control cleanup before rethrowing.
 - For item dispose, builder rollback, removed entries, and terminal cleanup share one owner-and-node termination path: owner cleanup panics are captured, nodes are detached and released exactly once, and an earlier builder/user payload always wins over cleanup or release panics. Show mount rollback and active-range disposal use the same rule.
 - `ForContext::on_dispose` is deferred until item construction ends, so listener and effect cleanup runs before user on_dispose callbacks even when the callback was registered earlier.
 - Different keys must not return the same external node. Conflicts are rejected atomically with `UI_FOR_SHARED_NODE`, leaving retained owners, NodeIds, and DOM unchanged; rejected staged entries release only their unique resources. `ForError::index` is the rejected key's position in the requested new list for both duplicate-key and shared-node errors.
+- Item ownership includes live nodes created by nested keyed Shows. Nested-range release removes those records, so a released node cannot remain a permanent ownership entry. Shared-node rejection still skips nodes owned by retained entries.
+- Ownership checks use a stable backend node identity when available; pure reorder skips ownership collection entirely, and a staged update uses indexed lookup bounded by committed plus staged nodes. Backends without identity fall back to `Eq` comparisons.
 - Item owners and item/list anchors are acquired inside guarded transactions. A failed anchor create or insert disposes the owner and releases partial anchors while preserving the backend panic; initial list/Show anchor failures do the same for the control owner. Placement uses a retained key-to-old-position map rather than scanning by key.
 - Placement moves are rollback-safe. A backend panic restores the old middle order, entries, and committed keys before rethrowing; if rollback also panics, the list enters terminal cleanup and keeps the first backend payload.
 - `ForContext::show` passes a scoped `ForShowContext` that only mutates nodes created by that nested range and exposes no raw runtime. Standalone `ShowContext::runtime()` remains public for downstream Show content.
@@ -213,7 +216,7 @@ pub trait DomBackend {
 }
 ```
 
-This is a semantic interface, not an implementation of the full DOM standard. In the first version, `Tag`, `Attribute`, and `StyleProperty` are closed enums. String extensions are reserved for explicitly permitted custom attributes.
+This is a semantic interface, not an implementation of the full DOM standard. In the first version, `Tag`, `Attribute`, and `StyleProperty` are closed enums. String extensions are reserved for explicitly permitted custom attributes. `node_identity` is an optional stable backend identity for O(1) ownership indexes; its default `None` keeps legacy backends on `Eq` fallback.
 
 ### Node storage
 

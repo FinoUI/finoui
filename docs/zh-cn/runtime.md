@@ -154,10 +154,13 @@ let rows = For::mount(
 - 嵌套 `Show` 挂载同样具有事务性。首次内容或条件 panic 会在重新抛出前释放 Show 锚点与 Owner；后续内容 panic 会保留锚点与活跃 Effect，使重试可以成功。
 - panic 回滚与终止释放会先用 `remove` 分离每个受跟踪节点，再对每个唯一节点释放一次。`remove` 仍只做分离，`release` 仍是终止操作，因此“父先创建”与“子先创建”的顺序都不会重复释放跟踪后代。
 - 即使协调或条目清理正借用状态，`For::dispose` 也会记录终止请求。Effect 在下一个安全点释放范围与锚点，并在释放借用后处置 control Owner；外层协调此后不再提交活跃条目，后续 key 更新也不能复活列表。父 Owner 清理共用同一 pending 请求，不会因状态忙碌而静默跳过。
+- For 与 Show 的清理注册都早于首次协调，因此在首次构建器或内容挂载内释放父 Owner 仍会终止锚点、范围、Effect 与监听。
 - 删除清理会捕获每个条目 Owner/on_dispose panic，保留首个 payload，继续释放全部被删除范围，把存活与新建条目恢复到已提交状态，最后才重新抛出。终止释放同样会先完成全部节点、锚点与 control 清理，再重新抛出。
 - For 条目释放、构建器回滚、已删除条目与终止清理共用同一条 Owner+节点终止路径：捕获 Owner 清理 panic，节点仍被分离并只释放一次，已有构建器/用户 payload 始终优先于清理或 release panic。Show 挂载回滚与活动范围释放使用同一规则。
 - `ForContext::on_dispose` 会延迟到条目构建结束，因此即使用户回调更早注册，监听与 Effect 清理也会先于用户 on_dispose 运行。
 - 不同 key 不得返回同一个外部节点。冲突会以 `UI_FOR_SHARED_NODE` 原子拒绝，保留既有所有者、NodeId 与 DOM；被拒绝的暂存条目只释放自身独有资源。重复 key 与共享节点错误的 `ForError::index` 都是被拒绝 key 在新请求列表中的位置。
+- 条目所有权包含 keyed 嵌套 Show 创建的 live 节点。嵌套范围释放时会移除对应记录，已释放节点不会永久留在所有权索引中。共享节点拒绝仍会跳过 retained 条目拥有的节点。
+- 所有权检查在后端提供稳定节点标识时使用索引；纯重排完全跳过所有权收集，有暂存条目时查找成本受已提交与暂存节点数约束。无标识后端回退到 `Eq` 比较。
 - 条目 Owner 与条目/列表锚点都在受保护事务内获取。锚点创建或插入失败会处置 Owner、释放部分锚点并保留后端 panic；初始列表/Show 锚点失败对 control Owner 做同样处理。放置阶段使用 retained key→旧位置映射，不再按 key 线性搜索。
 - 放置移动可回滚。后端 panic 会先恢复旧中段顺序、entries 与已提交 keys，再重新抛出；若回滚自身也 panic，列表进入终止清理并保留首个后端 payload。
 - `ForContext::show` 传入受限 `ForShowContext`，只能修改该嵌套范围创建的节点，且不暴露原始 Runtime。独立 `ShowContext::runtime()` 继续 public，供下游 Show 内容使用。
@@ -213,7 +216,7 @@ pub trait DomBackend {
 }
 ```
 
-这是语义接口而非完整 DOM 标准。首版 `Tag`、`Attribute` 与 `StyleProperty` 应是封闭枚举；字符串扩展只用于明确允许的自定义属性。
+这是语义接口而非完整 DOM 标准。首版 `Tag`、`Attribute` 与 `StyleProperty` 应是封闭枚举；字符串扩展只用于明确允许的自定义属性。`node_identity` 是用于 O(1) 所有权索引的可选稳定后端标识；默认 `None` 让旧后端继续使用 `Eq` 回退。
 
 ### 两种节点存储
 

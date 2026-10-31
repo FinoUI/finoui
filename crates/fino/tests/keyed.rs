@@ -1135,6 +1135,7 @@ struct StrictBackend {
     panic_insert_budget: std::cell::Cell<usize>,
     anchor_count: std::cell::Cell<usize>,
     panic_anchor_at: std::cell::Cell<Option<usize>>,
+    identity_calls: std::cell::Cell<usize>,
 }
 
 impl StrictBackend {
@@ -1159,6 +1160,10 @@ impl StrictBackend {
     fn panic_anchor_after(&self, delta: usize) {
         self.panic_anchor_at
             .set(Some(self.anchor_count.get() + delta));
+    }
+
+    fn identity_calls(&self) -> usize {
+        self.identity_calls.get()
     }
 
     fn release_subtree(&mut self, node: MockNode) {
@@ -1251,6 +1256,11 @@ impl DomBackend for StrictBackend {
 
     fn release(&mut self, node: &Self::Node) {
         self.release_subtree(*node);
+    }
+
+    fn node_identity(&self, node: &Self::Node) -> Option<u64> {
+        self.identity_calls.set(self.identity_calls.get() + 1);
+        Some(node.0)
     }
 
     fn set_text(&mut self, node: &Self::Node, value: &str) {
@@ -3074,4 +3084,320 @@ fn show_initial_list_anchor_failure_disposes_control() {
     );
     show.dispose();
     assert_eq!(runtime.backend().inner().dom_snapshot().nodes.len(), 2);
+}
+
+/// Pure reorder skips ownership collection; a staged update uses identity
+/// lookups bounded by committed plus staged node counts.
+/// 纯重排跳过所有权收集；暂存更新使用受已提交与暂存节点数约束的标识查找。
+#[test]
+fn keyed_for_ownership_index_skips_pure_reorder() {
+    let runtime = Runtime::new(StrictBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a", "b", "c"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = {
+        let node = runtime.backend_mut().create_text("Tail");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    let list = {
+        let read_items = items.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/index",
+            move || read_items.get(),
+            |context: &mut ForContext<StrictBackend>, key| {
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                vec![item]
+            },
+        )
+    };
+    let after_mount = runtime.backend().identity_calls();
+    items.set(keys(&["c", "b", "a"]));
+    assert_eq!(
+        runtime.backend().identity_calls(),
+        after_mount,
+        "pure reorder performs no ownership identity scan"
+    );
+
+    items.set(keys(&["c", "b", "a", "d"]));
+    let appended = runtime.backend().identity_calls() - after_mount;
+    assert!(
+        (1..=64).contains(&appended),
+        "staged update identity calls stay linear, got {appended}"
+    );
+    list.dispose();
+}
+
+/// A backend without node identity falls back to Eq ownership comparisons.
+/// 不提供节点标识的后端回退到 Eq 所有权比较。
+#[derive(Default)]
+struct LegacyNodeBackend(MockBackend);
+
+impl DomBackend for LegacyNodeBackend {
+    type Node = MockNode;
+    type Listener = MockListener;
+
+    fn create_element(&mut self, tag: Tag) -> Self::Node {
+        self.0.create_element(tag)
+    }
+    fn create_text(&mut self, value: &str) -> Self::Node {
+        self.0.create_text(value)
+    }
+    fn create_anchor(&mut self) -> Self::Node {
+        self.0.create_anchor()
+    }
+    fn insert_before(
+        &mut self,
+        parent: &Self::Node,
+        child: &Self::Node,
+        anchor: Option<&Self::Node>,
+    ) {
+        self.0.insert_before(parent, child, anchor);
+    }
+    fn remove(&mut self, node: &Self::Node) {
+        self.0.remove(node);
+    }
+    fn release(&mut self, node: &Self::Node) {
+        self.0.release(node);
+    }
+    fn set_text(&mut self, node: &Self::Node, value: &str) {
+        self.0.set_text(node, value);
+    }
+    fn set_attribute(&mut self, node: &Self::Node, name: Attribute, value: Option<&str>) {
+        self.0.set_attribute(node, name, value);
+    }
+    fn listen(
+        &mut self,
+        node: &Self::Node,
+        event: EventKind,
+        listener: fino::dom_api::EventListener,
+    ) -> Self::Listener {
+        self.0.listen(node, event, listener)
+    }
+    fn unlisten(&mut self, listener: Self::Listener) {
+        self.0.unlisten(listener);
+    }
+}
+
+#[test]
+fn keyed_for_legacy_backend_uses_ownership_fallback() {
+    let runtime = Runtime::new(LegacyNodeBackend::default());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = {
+        let node = runtime.backend_mut().create_text("Tail");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    let external = runtime.backend_mut().create_element(Tag::Button);
+    let items = keys(&["a", "b"]);
+    let error = match For::try_mount(
+        &runtime,
+        &owner,
+        &root,
+        Some(&tail),
+        "keyed/legacy",
+        move || items.clone(),
+        move |_context: &mut ForContext<LegacyNodeBackend>, _key| vec![external],
+    ) {
+        Ok(_) => panic!("legacy fallback must detect shared nodes"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, "UI_FOR_SHARED_NODE");
+    assert_eq!(error.index, 1);
+    assert_eq!(runtime.backend().0.dom_snapshot().nodes.len(), 2);
+}
+
+/// Initial mount rejects a node created by one key's nested Show being returned
+/// by another key, without double-releasing the nested range.
+/// 初始挂载会拒绝一个 key 的嵌套 Show 创建节点被另一个 key 返回，且不会重复
+/// 释放嵌套范围。
+#[test]
+fn keyed_for_initial_nested_node_conflict_is_rejected() {
+    let runtime = Runtime::new(StrictBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = {
+        let node = runtime.backend_mut().create_text("Tail");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    let nested: Rc<RefCell<Option<MockNode>>> = Rc::new(RefCell::new(None));
+    let items = keys(&["a", "b"]);
+    let builder_nested = Rc::clone(&nested);
+    let error = match For::try_mount(
+        &runtime,
+        &owner,
+        &root,
+        Some(&tail),
+        "keyed/nested-conflict-initial",
+        move || items.clone(),
+        move |context: &mut ForContext<StrictBackend>, key| {
+            let item = context.create_element(Tag::Button);
+            if key == "a" {
+                let slot = Rc::clone(&builder_nested);
+                context.show(
+                    &item,
+                    None,
+                    "keyed/nested-conflict/show",
+                    || true,
+                    move |nested_context| {
+                        let node = nested_context.create_element(Tag::Button);
+                        *slot.borrow_mut() = Some(node);
+                        node
+                    },
+                );
+            } else if let Some(node) = *builder_nested.borrow() {
+                return vec![node];
+            }
+            vec![item]
+        },
+    ) {
+        Ok(_) => panic!("nested-created node conflict must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, "UI_FOR_SHARED_NODE");
+    assert_eq!(error.index, 1);
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot().nodes.len(),
+        2,
+        "staged nested ranges are released exactly once"
+    );
+    assert_eq!(runtime.backend().inner().listener_count(), 0);
+}
+
+/// An update rejects another key returning a retained item's nested-Show node;
+/// hiding and disposing the nested range later does not double release it.
+/// 更新会拒绝另一个 key 返回保留条目的嵌套 Show 节点；之后隐藏与释放嵌套范围
+/// 不会重复释放。
+#[test]
+fn keyed_for_update_nested_node_conflict_preserves_retained_range() {
+    let runtime = Runtime::new(StrictBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let visible = owner.signal_named("keyed/nested-visible", true);
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = {
+        let node = runtime.backend_mut().create_text("Tail");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    let nested: Rc<RefCell<Option<MockNode>>> = Rc::new(RefCell::new(None));
+    let list = {
+        let read_items = items.clone();
+        let nested_slot = Rc::clone(&nested);
+        let show_visible = visible.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/nested-conflict-update",
+            move || read_items.get(),
+            move |context: &mut ForContext<StrictBackend>, key| {
+                let item = context.create_element(Tag::Button);
+                if key == "a" {
+                    let slot = Rc::clone(&nested_slot);
+                    let condition = {
+                        let visible = show_visible.clone();
+                        move || visible.get()
+                    };
+                    context.show(
+                        &item,
+                        None,
+                        "keyed/nested-conflict/update-show",
+                        condition,
+                        move |nested_context| {
+                            let node = nested_context.create_element(Tag::Button);
+                            *slot.borrow_mut() = Some(node);
+                            node
+                        },
+                    );
+                } else if let Some(node) = *nested_slot.borrow() {
+                    return vec![node];
+                }
+                vec![item]
+            },
+        )
+    };
+    let nested_node = nested.borrow().expect("nested node");
+    assert!(runtime.backend().contains(nested_node));
+
+    let error = {
+        items.set(keys(&["a", "b"]));
+        list.last_error().expect("nested node conflict")
+    };
+    assert_eq!(error.code, "UI_FOR_SHARED_NODE");
+    assert_eq!(error.index, 1);
+    assert_eq!(list.keys(), keys(&["a"]));
+    assert!(
+        runtime.backend().contains(nested_node),
+        "the retained nested range still owns its node"
+    );
+
+    visible.set(false);
+    assert!(
+        !runtime.backend().contains(nested_node),
+        "hiding the nested Show releases its node once"
+    );
+    list.dispose();
+    assert_eq!(runtime.backend().inner().dom_snapshot().nodes.len(), 2);
+}
+
+/// Disposing the parent owner from the first item builder is terminal even
+/// though cleanup registration now precedes the initial reconcile.
+/// 首次条目构建器内释放父 Owner 时，即使清理注册已提前，列表仍完全终止。
+#[test]
+fn keyed_for_initial_builder_parent_dispose_is_terminal() {
+    let runtime = Runtime::new(MockBackend::new());
+    let signals_owner = runtime.create_owner();
+    let parent_owner = runtime.create_owner();
+    let items = signals_owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = text(&mut runtime.backend_mut(), &root, "Tail");
+    let list = {
+        let read_items = items.clone();
+        let parent = parent_owner.clone();
+        For::mount(
+            &runtime,
+            &parent_owner,
+            &root,
+            Some(&tail),
+            "keyed/initial-parent-dispose",
+            move || read_items.get(),
+            move |context: &mut ForContext<MockBackend>, key| {
+                parent.dispose();
+                let item = context.create_element(Tag::Button);
+                let value = context.create_text(key);
+                context.insert_before(&item, &value, None);
+                vec![item]
+            },
+        )
+    };
+    assert!(list.is_empty());
+    assert_eq!(runtime.backend().listener_count(), 0);
+    assert_eq!(
+        runtime.backend().dom_snapshot().nodes.len(),
+        2,
+        "initial item and list anchors are released"
+    );
+    assert!(
+        parent_owner
+            .snapshot()
+            .effects
+            .iter()
+            .any(
+                |effect| effect.name == "keyed/initial-parent-dispose/reconcile" && !effect.active
+            )
+    );
+    let after_dispose = runtime.backend().operations().len();
+    items.set(keys(&["b"]));
+    list.dispose();
+    assert_eq!(runtime.backend().operations().len(), after_dispose);
 }

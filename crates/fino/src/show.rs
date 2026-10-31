@@ -153,6 +153,20 @@ impl<B: DomBackend> fmt::Debug for RangeAnchor<B> {
     }
 }
 
+/// Release observer used by keyed nested Show ownership tracking.
+/// keyed 嵌套 Show 所有权跟踪使用的释放观察器。
+pub(crate) type ReleaseObserver<B> = Rc<dyn Fn(&[<B as DomBackend>::Node])>;
+
+/// Borrowed mount coordinates shared by Show mount helpers.
+/// Show 挂载辅助函数共享的借用坐标。
+pub(crate) struct ShowMount<'a, B: DomBackend + 'static> {
+    pub runtime: &'a Runtime<B>,
+    pub owner: &'a Owner,
+    pub parent: &'a B::Node,
+    pub before: Option<&'a B::Node>,
+    pub name: &'a str,
+}
+
 /// Detaches tracked nodes from each other, then releases each unique node once.
 /// 先把受跟踪节点彼此分离，再对每个唯一节点释放一次。
 ///
@@ -336,6 +350,35 @@ impl<B: DomBackend + 'static> ShowContext<B> {
             content,
         )
     }
+
+    /// Mounts a nested Show with a release observer for keyed ownership.
+    /// 为 keyed 所有权挂载带释放观察器的嵌套 Show。
+    pub(crate) fn show_observed<C, F>(
+        &mut self,
+        parent: &B::Node,
+        before: Option<&B::Node>,
+        name: &str,
+        condition: C,
+        mut content: F,
+        observer: ReleaseObserver<B>,
+    ) -> Show<B>
+    where
+        C: Fn() -> bool + 'static,
+        F: FnMut(&mut ShowContext<B>) -> B::Node + 'static,
+    {
+        Show::mount_many_observed(
+            ShowMount {
+                runtime: &self.runtime,
+                owner: &self.owner,
+                parent,
+                before,
+                name,
+            },
+            condition,
+            move |context| vec![content(context)],
+            observer,
+        )
+    }
 }
 
 /// Conditional dynamic range mounted between two [`RangeAnchor`] nodes.
@@ -411,6 +454,52 @@ impl<B: DomBackend + 'static> Show<B> {
         C: Fn() -> bool + 'static,
         F: FnMut(&mut ShowContext<B>) -> Vec<B::Node> + 'static,
     {
+        Self::mount_many_inner(
+            ShowMount {
+                runtime,
+                owner,
+                parent,
+                before,
+                name,
+            },
+            condition,
+            content,
+            None,
+        )
+    }
+
+    /// Mounts a range with an optional release observer for keyed ownership.
+    /// 为 keyed 所有权挂载一个可带释放观察器的范围。
+    pub(crate) fn mount_many_observed<C, F>(
+        mount: ShowMount<'_, B>,
+        condition: C,
+        content: F,
+        observer: ReleaseObserver<B>,
+    ) -> Self
+    where
+        C: Fn() -> bool + 'static,
+        F: FnMut(&mut ShowContext<B>) -> Vec<B::Node> + 'static,
+    {
+        Self::mount_many_inner(mount, condition, content, Some(observer))
+    }
+
+    fn mount_many_inner<C, F>(
+        mount: ShowMount<'_, B>,
+        condition: C,
+        content: F,
+        release_observer: Option<ReleaseObserver<B>>,
+    ) -> Self
+    where
+        C: Fn() -> bool + 'static,
+        F: FnMut(&mut ShowContext<B>) -> Vec<B::Node> + 'static,
+    {
+        let ShowMount {
+            runtime,
+            owner,
+            parent,
+            before,
+            name,
+        } = mount;
         let control = owner.child();
         let anchors = match catch_unwind(AssertUnwindSafe(|| {
             RangeAnchor::create(runtime, parent, before)
@@ -434,7 +523,19 @@ impl<B: DomBackend + 'static> Show<B> {
             cleaned: false,
             dispose_requested: Rc::clone(&dispose_requested),
             control_dispose_pending: false,
+            release_observer,
         }));
+
+        let cleanup_state = SendWrapper::new(Rc::downgrade(&state));
+        let cleanup_request = SendWrapper::new(Rc::clone(&dispose_requested));
+        control.register_cleanup(move || {
+            cleanup_request.set(true);
+            if let Some(state) = cleanup_state.upgrade()
+                && let Ok(mut state) = state.try_borrow_mut()
+            {
+                state.cleanup(false);
+            }
+        });
 
         let effect_state = Rc::clone(&state);
         let effect_control = control.clone();
@@ -487,17 +588,6 @@ impl<B: DomBackend + 'static> Show<B> {
                 dispose_requested,
             };
         }
-
-        let cleanup_state = SendWrapper::new(Rc::downgrade(&state));
-        let cleanup_request = SendWrapper::new(Rc::clone(&dispose_requested));
-        control.register_cleanup(move || {
-            cleanup_request.set(true);
-            if let Some(state) = cleanup_state.upgrade()
-                && let Ok(mut state) = state.try_borrow_mut()
-            {
-                state.cleanup(false);
-            }
-        });
 
         Self {
             state,
@@ -591,6 +681,7 @@ struct ShowState<B: DomBackend + 'static> {
     cleaned: bool,
     dispose_requested: Rc<Cell<bool>>,
     control_dispose_pending: bool,
+    release_observer: Option<ReleaseObserver<B>>,
 }
 
 impl<B: DomBackend + 'static> ShowState<B> {
@@ -660,6 +751,9 @@ impl<B: DomBackend + 'static> ShowState<B> {
             }
             Err(payload) => {
                 let created = std::mem::take(&mut context.created);
+                if let Some(observer) = &self.release_observer {
+                    observer(&created);
+                }
                 if let Some(payload) =
                     terminate_owner_and_nodes(owner, created, runtime, Some(payload))
                 {
@@ -673,7 +767,19 @@ impl<B: DomBackend + 'static> ShowState<B> {
     /// 释放子 Owner，然后移除其节点。
     fn unmount_range(&mut self, runtime: &Runtime<B>) {
         if let Some(active) = self.active.take() {
-            active.dispose(runtime);
+            let released: Vec<B::Node> = active
+                .created
+                .iter()
+                .chain(&active.nodes)
+                .cloned()
+                .collect();
+            let dispose = catch_unwind(AssertUnwindSafe(|| active.dispose(runtime))).err();
+            if let Some(observer) = &self.release_observer {
+                observer(&released);
+            }
+            if let Some(payload) = dispose {
+                resume_unwind(payload);
+            }
         }
     }
 

@@ -868,6 +868,12 @@ impl DomBackend for NativeDom {
         self.mark_structural_change();
     }
 
+    /// Returns the arena stable identifier for ownership indexes.
+    /// 返回 arena 稳定标识，供所有权索引使用。
+    fn node_identity(&self, node: &Self::Node) -> Option<u64> {
+        self.nodes.get(*node).map(|data| data.stable_id)
+    }
+
     fn set_text(&mut self, node: &Self::Node, value: &str) {
         let stable = self.stable(*node);
         let Some(binding) = self
