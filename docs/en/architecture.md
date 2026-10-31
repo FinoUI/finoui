@@ -177,7 +177,7 @@ Implementation starts with these constraints:
 ```text
 Language: Rust
 Reactivity: prefer reactive_graph behind a thin adapter for Owner, Signal, Effect, and batch semantics
-First component: manually constructed counter
+First component: counter shared by `view!`, Mock, Web DOM, and Native wgpu
 First backend: MockBackend
 Second backend: Web DOM
 Third backend: Native wgpu
@@ -190,7 +190,7 @@ Styles: controlled Tailwind-like class syntax → strongly typed Style IR; Web C
 Text API: TextSpec → ShapedText → TextLayout
 Layout reads: no implicit synchronous flush
 Shaders: WGSL later; none during the counter stage
-Macros: implement view! only after the low-level vertical slice works
+Macros: counter-stage view! subset after the low-level vertical slice works
 ```
 
 ## References

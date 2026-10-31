@@ -1,0 +1,5 @@
+error: duplicate event `on:click` on one element
+ --> tests/view_macro_ui/ui/duplicate_event.rs:5:13
+  |
+5 |             on:click={move || {}}
+  |             ^^^^^^^^

@@ -7,7 +7,8 @@ use fino::{
     dom_api::{Attribute, Role, Selector},
     headless::{HeadlessBackend, HeadlessHost, LogicalTreeSnapshot},
     metrics::RuntimeStats,
-    reactive::batch,
+    reactive::{Owner, Signal, batch},
+    runtime::Runtime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -423,6 +424,22 @@ pub fn expected_operations() -> BTreeMap<String, u64> {
     .collect()
 }
 
+/// Mounts the counter and exposes the dynamic text node for conformance probes.
+/// 挂载计数器并暴露一致性探针使用的动态文本节点。
+fn mount_counter_with_nodes<B: HeadlessBackend + 'static>(
+    runtime: &mut Runtime<B>,
+    owner: &Owner,
+) -> (B::Node, B::Node, Signal<i32>) {
+    let count = owner.signal_named("counter/count", 0_i32);
+    let mounted = crate::counter_with_count(count.clone()).mount_with_slots(runtime, owner);
+    let value = mounted
+        .text_slots()
+        .first()
+        .cloned()
+        .expect("counter has one dynamic text slot");
+    (mounted.into_parts().0, value, count)
+}
+
 /// Runs the same create, text, attribute, insert/move, event, batch, and unmount sequence.
 /// 运行相同的创建、文本、属性、插入／移动、事件、批量与卸载序列。
 pub fn run_conformance<B: HeadlessBackend + 'static>(
@@ -436,7 +453,7 @@ pub fn run_conformance<B: HeadlessBackend + 'static>(
     let count_capture = Rc::clone(&count_slot);
 
     let button = host.mount("counter/conformance", move |runtime, owner| {
-        let (button, value, count) = crate::mount_counter_with_nodes(runtime, owner);
+        let (button, value, count) = mount_counter_with_nodes(runtime, owner);
         *value_capture.borrow_mut() = Some(value);
         *count_capture.borrow_mut() = Some(count);
         button
@@ -584,7 +601,7 @@ pub fn run_detach_reinsert<B: HeadlessBackend + 'static>(
     let value_slot: Rc<RefCell<Option<B::Node>>> = Rc::new(RefCell::new(None));
     let value_capture = Rc::clone(&value_slot);
     let button = host.mount("counter/detach-reinsert", move |runtime, owner| {
-        let (button, value, _count) = crate::mount_counter_with_nodes(runtime, owner);
+        let (button, value, _count) = mount_counter_with_nodes(runtime, owner);
         *value_capture.borrow_mut() = Some(value);
         button
     });

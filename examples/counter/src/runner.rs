@@ -7,14 +7,45 @@ use std::path::Path;
 use fino::native::{Size, offscreen_backend};
 use fino::{
     backend_mock::MockBackend,
-    dom_api::{Role, Selector},
+    dom_api::{DomBackend, Role, Selector},
     headless::{Environment, ExecutionCounters, HeadlessError, HeadlessHost},
     metrics::RuntimeStats,
+    reactive::{Owner, Signal},
+    runtime::Runtime,
     scenario::{self, Scenario, ScenarioResult, Status, ToolError},
 };
 use serde::Serialize;
 
-use crate::{conformance::ConformanceReport, mount_counter};
+use crate::{conformance::ConformanceReport, counter};
+
+/// Mounts the shared counter component and returns its root node.
+/// 挂载共享计数器组件并返回其根节点。
+pub fn mount_counter<B: DomBackend + 'static>(runtime: &mut Runtime<B>, owner: &Owner) -> B::Node {
+    fino::view::mount_component(runtime, owner, counter)
+}
+
+/// Mounts the counter against an application-owned shared count signal.
+/// 使用应用持有的共享计数 Signal 挂载计数器。
+pub fn mount_counter_with_count<B: DomBackend + 'static>(
+    runtime: &mut Runtime<B>,
+    owner: &Owner,
+    count: Signal<i32>,
+) -> B::Node {
+    crate::counter_with_count(count).mount(runtime, owner)
+}
+
+/// Mounts the counter and returns its root and count signal for stateful runners.
+/// 为有状态的运行器挂载计数器并返回根节点与计数 Signal。
+#[allow(dead_code)] // Used by the wasm page and by crate tests.
+// wasm 页面与 crate 测试会使用。
+pub(crate) fn mount_counter_with_state<B: DomBackend + 'static>(
+    runtime: &mut Runtime<B>,
+    owner: &Owner,
+) -> (B::Node, Signal<i32>) {
+    let count = owner.signal_named("counter/count", 0_i32);
+    let root = crate::counter_with_count(count.clone()).mount(runtime, owner);
+    (root, count)
+}
 
 /// One counter smoke-check result.
 /// 单项计数器冒烟检查结果。

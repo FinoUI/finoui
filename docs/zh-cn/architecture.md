@@ -177,7 +177,7 @@ examples/
 ```text
 语言：Rust
 响应式：优先以 reactive_graph 实现 Owner + Signal + Effect + batch 语义，经薄适配层接入
-首个组件：手工构建的 counter
+首个组件：由 `view!`、Mock、Web DOM 与 Native wgpu 共享的计数器
 首个后端：MockBackend
 第二后端：Web DOM
 第三后端：Native wgpu
@@ -190,7 +190,7 @@ Native 结构：arena + generational NodeId
 文本接口：TextSpec → ShapedText → TextLayout
 布局读取：禁止隐式同步 flush
 Shader：后续使用 WGSL，不在计数器阶段实现
-宏：底层垂直切片通过后再实现 view!
+宏：底层垂直切片通过后实现计数器阶段的 view! 子集
 ```
 
 ## 参考资料

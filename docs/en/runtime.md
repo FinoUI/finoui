@@ -62,7 +62,38 @@ Component execution: once at mount
 Click update: does not call counter() again
 ```
 
-The `view!` macro is a later authoring interface, not a prerequisite for validating the reactive model. The counter core starts with low-level construction APIs so that macro, runtime, and backend problems are not debugged at the same time.
+### Counter-stage `view!` macro
+
+The counter now uses a deliberately small Rust RSX subset. `rstml` parses the tokens with recovery and source spans, `syn` validates the supported nodes, and `quote` emits readable template and binding construction.
+
+```rust
+fn counter() -> View {
+    let count = signal_named("counter/count", 0);
+    view! {
+        <button
+            fino:name="counter"
+            aria-label="Increment counter"
+            on:click={move || count.update(|value| *value += 1)}
+        >
+            "Count: " {move || count.get()}
+        </button>
+    }
+}
+```
+
+| Authoring form | Lowering |
+|---|---|
+| One static `<button>` with quoted text | `Template` |
+| `{move \|\| value}` child | `TextBinding` |
+| `on:click={move \|\| action()}` | `EventBinding` |
+| Dynamic `aria-label={move \|\| value}` | `AttributeBinding` |
+| Static `aria-label="..."` | Template attribute |
+
+The optional root `fino:name` attribute is compile-time metadata rather than a DOM attribute. It names the counter's text effect `counter/text`; ordinary views keep the default `view/text/{node}` diagnostic name.
+
+`View::mount` installs the component owner, calls the build closure exactly once, mounts the static template, and then binds events and effects to the existing nodes. `signal()` inside the closure resolves against that owner. A signal captured by multiple generated closures is cloned into each closure so the component is not re-executed and clicks update only the target binding.
+
+`view!` lowers directly to a `View` and does not require `runtime` or `owner` at the call site. Hosts use `fino::view::mount_component` (or `with_owner` for pre-construction work) so `signal()` sees the component owner. Unsupported tags, events, attributes, and non-closure dynamic values produce a compile error at the offending source span; `trybuild` pins those diagnostics. The complete Tailwind-like class subset, `Show`, `For`, full RSX, and hot reload remain out of scope.
 
 ## Unified DOM API
 

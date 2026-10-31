@@ -1,0 +1,5 @@
+error: dynamic text must be a zero-argument closure, for example {move || value}
+ --> tests/view_macro_ui/ui/invalid_dynamic_text.rs:3:28
+  |
+3 |         <button>"Count: " {42}</button>
+  |                            ^^

@@ -1,0 +1,17 @@
+[package]
+name = "fino_macros"
+description = "RSX authoring macros for the Fino UI framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+proc-macro2-diagnostics.workspace = true
+quote.workspace = true
+rstml.workspace = true
+syn.workspace = true

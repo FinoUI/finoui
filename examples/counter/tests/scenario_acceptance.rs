@@ -8,7 +8,7 @@ use fino::{
     metrics::RuntimeStats,
     scenario::{Scenario, ScenarioResult, Status, Step, run_on_host},
 };
-use fino_counter::{mount_counter, runner::run_mock_scenario};
+use fino_counter::runner::{mount_counter, run_mock_scenario};
 use serde_json::Value;
 
 fn counter_scenario() -> Scenario {
@@ -80,6 +80,8 @@ fn mock_scenario_writes_deterministic_snapshots_and_trace() {
     let reactive =
         inspect_artifact(&first_dir, SnapshotKind::Reactive).expect("reactive inspection");
     assert_eq!(reactive["component_executions"], 1);
+    assert_eq!(reactive["signals"][0]["name"], "counter/count");
+    assert_eq!(reactive["effects"][0]["name"], "counter/text");
     assert_eq!(reactive["effects"][0]["executions"], 2);
     assert_eq!(reactive["effects"][0]["dependencies"][0], "signal-1");
 

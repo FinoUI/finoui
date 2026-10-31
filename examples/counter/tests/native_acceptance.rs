@@ -9,7 +9,7 @@ use fino::{
     scenario::{Scenario, Status, Step},
     text::TextEngine,
 };
-use fino_counter::{mount_counter, runner::run_native_offscreen_scenario};
+use fino_counter::runner::{mount_counter, run_native_offscreen_scenario};
 use serde_json::Value;
 
 fn counter_scenario() -> Scenario {

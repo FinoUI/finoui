@@ -1,0 +1,5 @@
+error: aria-label requires a value
+ --> tests/view_macro_ui/ui/missing_attribute_value.rs:3:17
+  |
+3 |         <button aria-label></button>
+  |                 ^^^^^^^^^^

@@ -13,8 +13,7 @@ use fino_counter::{
     conformance::{
         ConformanceReport, expected_operations, expected_tree, run_conformance, run_detach_reinsert,
     },
-    mount_counter_with_count,
-    runner::{run_mock_conformance, run_native_offscreen_conformance},
+    runner::{mount_counter_with_count, run_mock_conformance, run_native_offscreen_conformance},
 };
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
