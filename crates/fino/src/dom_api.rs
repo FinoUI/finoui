@@ -139,6 +139,10 @@ pub trait DomBackend {
     }
     /// Inserts a child before an optional anchor without clearing siblings.
     /// 在可选锚点前插入子节点，不清空兄弟节点。
+    ///
+    /// Backends must validate the parent and reference before detaching or
+    /// mutating the child, so an invalid reference fails atomically.
+    /// 后端必须在分离或修改子节点前验证父节点与参考节点，使非法引用原子失败。
     fn insert_before(
         &mut self,
         parent: &Self::Node,

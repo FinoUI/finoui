@@ -30,6 +30,19 @@ pub struct WebNode {
     anchor: bool,
 }
 
+impl WebNode {
+    /// Returns the underlying browser node for host-side live probes.
+    /// 返回底层浏览器节点，供 Host 侧实时探针使用。
+    ///
+    /// The host must only read the node while it is still mounted; disposal
+    /// removes the root but keeps this handle valid as a detached DOM node.
+    /// Host 只能在节点仍挂载时读取；释放会移除根节点，但此句柄作为已分离的
+    /// DOM 节点仍然有效。
+    pub fn node(&self) -> &Node {
+        &self.node
+    }
+}
+
 impl PartialEq for WebNode {
     fn eq(&self, other: &Self) -> bool {
         self.node.is_same_node(Some(&other.node))

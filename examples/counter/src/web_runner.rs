@@ -26,6 +26,9 @@ thread_local! {
     /// Live keyed scenario probe captured before the scenario host is dropped.
     /// 场景 Host 被释放前捕获的 keyed 实时探针。
     static LIVE_KEYED: RefCell<Option<LiveKeyedProbe>> = const { RefCell::new(None) };
+    /// Live root probe captured before the counter or Show host is dropped.
+    /// 计数器或 Show Host 被释放前捕获的根节点实时探针。
+    static LIVE_ROOT: RefCell<Option<LiveRootProbe>> = const { RefCell::new(None) };
 }
 
 /// Live DOM state of the current keyed scenario page at capture time.
@@ -38,25 +41,35 @@ struct LiveKeyedProbe {
     rows: Vec<String>,
 }
 
-fn read_live_keyed_probe() -> LiveKeyedProbe {
+/// Live DOM state of a counter or Show scenario root at capture time.
+/// 捕获时计数器或 Show 场景根节点的实时 DOM 状态。
+#[derive(Clone, Debug, Serialize)]
+struct LiveRootProbe {
+    schema: u32,
+    mounted_in_body: bool,
+    text: String,
+    labels: Vec<String>,
+}
+
+/// Reads the mounted keyed root itself rather than the first host in the page.
+/// 直接读取已挂载的 keyed 根节点，而不是页面中的第一个宿主。
+fn read_live_keyed_probe(root: &WebNode) -> LiveKeyedProbe {
     let document = web_sys::window().and_then(|window| window.document());
     let body = document.as_ref().and_then(|document| document.body());
-    let host = document.as_ref().and_then(|document| {
-        document
-            .query_selector("body > button[aria-label=\"Keyed host\"]")
-            .ok()
-            .flatten()
+    let mounted_in_body = body.as_ref().is_some_and(|body| {
+        root.node()
+            .parent_node()
+            .is_some_and(|parent| parent.is_same_node(Some(body)))
     });
-    let mounted_in_body = host
-        .as_ref()
-        .is_some_and(|host| body.as_ref().is_some_and(|body| body.contains(Some(host))));
-    let host_text = host
-        .as_ref()
-        .and_then(|host| host.text_content())
-        .unwrap_or_default();
-    let rows = host
-        .as_ref()
-        .and_then(|host| host.query_selector_all("button[aria-label^=\"Row \"]").ok())
+    let host_text = root.node().text_content().unwrap_or_default();
+    let rows = root
+        .node()
+        .dyn_ref::<web_sys::Element>()
+        .and_then(|element| {
+            element
+                .query_selector_all("button[aria-label^=\"Row \"]")
+                .ok()
+        })
         .map(|nodes| {
             (0..nodes.length())
                 .filter_map(|index| nodes.item(index))
@@ -70,6 +83,37 @@ fn read_live_keyed_probe() -> LiveKeyedProbe {
         mounted_in_body,
         host_text,
         rows,
+    }
+}
+
+/// Reads only the supplied scenario root and its labeled descendants.
+/// 只读取传入的场景根节点及其带标签的后代。
+fn read_live_root_probe(root: &WebNode) -> LiveRootProbe {
+    let document = web_sys::window().and_then(|window| window.document());
+    let body = document.as_ref().and_then(|document| document.body());
+    let mounted_in_body = body.as_ref().is_some_and(|body| {
+        root.node()
+            .parent_node()
+            .is_some_and(|parent| parent.is_same_node(Some(body)))
+    });
+    let text = root.node().text_content().unwrap_or_default();
+    let labels = root
+        .node()
+        .dyn_ref::<web_sys::Element>()
+        .and_then(|element| element.query_selector_all("[aria-label]").ok())
+        .map(|nodes| {
+            (0..nodes.length())
+                .filter_map(|index| nodes.item(index))
+                .filter_map(|node| node.dyn_ref::<web_sys::Element>().cloned())
+                .filter_map(|element| element.get_attribute("aria-label"))
+                .collect()
+        })
+        .unwrap_or_default();
+    LiveRootProbe {
+        schema: 1,
+        mounted_in_body,
+        text,
+        labels,
     }
 }
 
@@ -419,6 +463,8 @@ struct ScenarioBundle {
     artifacts: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     live_keyed: Option<LiveKeyedProbe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_root: Option<LiveRootProbe>,
 }
 
 /// Runs the unchanged JSON scenario against the real DOM inside the browser.
@@ -428,8 +474,15 @@ pub fn run_scenario(scenario_json: &str, run_dir: &str) -> Result<String, JsValu
     let scenario: Scenario = serde_json::from_str(scenario_json)
         .map_err(|error| tool_error("UI_SCENARIO_INVALID_JSON", error.to_string()))?;
     let host = new_host(scenario.environment.clone());
-    let run = run_on_host_collect(&scenario, Path::new(run_dir), host, mount_on_body)
-        .map_err(tool_error_value)?;
+    LIVE_ROOT.with(|slot| *slot.borrow_mut() = None);
+    let run = run_on_host_collect(
+        &scenario,
+        Path::new(run_dir),
+        host,
+        mount_on_body_with_probe,
+    )
+    .map_err(tool_error_value)?;
+    let live_root = LIVE_ROOT.with(|slot| slot.borrow_mut().take());
 
     let artifacts = run
         .artifacts
@@ -444,6 +497,7 @@ pub fn run_scenario(scenario_json: &str, run_dir: &str) -> Result<String, JsValu
         result: run.result,
         artifacts,
         live_keyed: None,
+        live_root,
     })
     .map_err(|error| tool_error("UI_ARTIFACT_SERIALIZATION", error.to_string()))
 }
@@ -455,8 +509,15 @@ pub fn run_show_scenario(scenario_json: &str, run_dir: &str) -> Result<String, J
     let scenario: Scenario = serde_json::from_str(scenario_json)
         .map_err(|error| tool_error("UI_SCENARIO_INVALID_JSON", error.to_string()))?;
     let host = new_host(scenario.environment.clone());
-    let run = run_on_host_collect(&scenario, Path::new(run_dir), host, mount_show_on_body)
-        .map_err(tool_error_value)?;
+    LIVE_ROOT.with(|slot| *slot.borrow_mut() = None);
+    let run = run_on_host_collect(
+        &scenario,
+        Path::new(run_dir),
+        host,
+        mount_show_on_body_with_probe,
+    )
+    .map_err(tool_error_value)?;
+    let live_root = LIVE_ROOT.with(|slot| slot.borrow_mut().take());
 
     let artifacts = run
         .artifacts
@@ -471,6 +532,7 @@ pub fn run_show_scenario(scenario_json: &str, run_dir: &str) -> Result<String, J
         result: run.result,
         artifacts,
         live_keyed: None,
+        live_root,
     })
     .map_err(|error| tool_error("UI_ARTIFACT_SERIALIZATION", error.to_string()))
 }
@@ -505,6 +567,7 @@ pub fn run_keyed_scenario(scenario_json: &str, run_dir: &str) -> Result<String, 
         result: run.result,
         artifacts,
         live_keyed,
+        live_root: None,
     })
     .map_err(|error| tool_error("UI_ARTIFACT_SERIALIZATION", error.to_string()))
 }
@@ -517,12 +580,53 @@ fn mount_on_body(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
     root
 }
 
+/// Mounts the counter and captures its root before host disposal.
+/// 挂载计数器，并在 Host 释放前捕获其根节点。
+fn mount_on_body_with_probe(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
+    let slot = capture_live_root_before_mount(owner);
+    let root = mount_on_body(runtime, owner);
+    *slot.borrow_mut() = Some(root.clone());
+    root
+}
+
 /// Mounts the manual Show probe and attaches its root to `document.body`.
 /// 挂载手工 Show 探针并把其根节点附加到 `document.body`。
 fn mount_show_on_body(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
     let root = mount_show(runtime, owner);
     runtime.backend_mut().mount_to_body(&root);
     root
+}
+
+/// Mounts the Show probe and captures its root before host disposal.
+/// 挂载 Show 探针，并在 Host 释放前捕获其根节点。
+fn mount_show_on_body_with_probe(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
+    let slot = capture_live_root_before_mount(owner);
+    let root = mount_show_on_body(runtime, owner);
+    *slot.borrow_mut() = Some(root.clone());
+    root
+}
+
+/// Registers a root-scoped live probe before the mount creates its owners.
+/// 在挂载创建其它 Owner 前注册限定于根节点的实时探针。
+///
+/// Child cleanup follows creation order, so registering first lets the probe
+/// observe the committed page before range owners release their nodes.
+/// 子节点清理按创建顺序执行，因此先注册可让探针在范围 Owner 释放节点前观察
+/// 已提交页面。
+fn capture_live_root_before_mount(owner: &Owner) -> Rc<RefCell<Option<WebNode>>> {
+    let slot: Rc<RefCell<Option<WebNode>>> = Rc::new(RefCell::new(None));
+    let read_slot = Rc::clone(&slot);
+    let capture_owner = owner.child();
+    capture_owner.on_dispose(move || {
+        if let Some(root) = read_slot.borrow().clone() {
+            LIVE_ROOT.with(|slot| *slot.borrow_mut() = Some(read_live_root_probe(&root)));
+        }
+    });
+    // Keep the capture owner strongly alive until the host owner cleans its
+    // children; a parent only stores weak child references.
+    // 保持捕获 Owner 强引用直到 Host Owner 清理子节点；父 Owner 只保存弱子引用。
+    owner.keep_alive(capture_owner);
+    slot
 }
 
 /// Mounts the manual keyed probe and attaches its root to `document.body`.
@@ -533,19 +637,24 @@ fn mount_keyed_on_body(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebN
     root
 }
 
-/// Mounts the keyed probe and captures its live DOM before host disposal.
-/// 挂载 keyed 探针，并在 Host 释放前捕获其实时 DOM。
+/// Mounts the keyed probe and captures its root before host disposal.
+/// 挂载 keyed 探针，并在 Host 释放前捕获其根节点。
 fn mount_keyed_on_body_with_probe(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
+    let slot: Rc<RefCell<Option<WebNode>>> = Rc::new(RefCell::new(None));
+    let read_slot = Rc::clone(&slot);
     let capture_owner = owner.child();
-    capture_owner.on_dispose(|| {
-        let probe = read_live_keyed_probe();
-        LIVE_KEYED.with(|slot| *slot.borrow_mut() = Some(probe));
+    capture_owner.on_dispose(move || {
+        if let Some(root) = read_slot.borrow().clone() {
+            LIVE_KEYED.with(|slot| *slot.borrow_mut() = Some(read_live_keyed_probe(&root)));
+        }
     });
     // Keep the capture owner strongly alive until the host owner cleans its
     // children; a parent only stores weak child references.
     // 保持捕获 Owner 强引用直到 Host Owner 清理子节点；父 Owner 只保存弱子引用。
     owner.keep_alive(capture_owner);
-    mount_keyed_on_body(runtime, owner)
+    let root = mount_keyed_on_body(runtime, owner);
+    *slot.borrow_mut() = Some(root.clone());
+    root
 }
 
 /// Builds a serialized `ToolError` JavaScript exception for browser callers.

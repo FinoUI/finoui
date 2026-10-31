@@ -2789,8 +2789,6 @@ fn range_anchor_move_before_reference_contract() {
         runtime.backend().inner().text_content(&root).as_deref(),
         Some("PXMT")
     );
-    let baseline = runtime.backend().inner().dom_snapshot().nodes.len();
-
     let before_start = runtime.backend().inner().operations().len();
     anchor.move_before(&runtime, &root, &[external], Some(anchor.start()));
     assert_eq!(
@@ -2825,6 +2823,47 @@ fn range_anchor_move_before_reference_contract() {
         );
     }
 
+    // A reference that is not a child of the destination parent is rejected
+    // before the start anchor is detached, so the whole range stays intact.
+    // 目标父节点之外的参考会在分离起始锚点前被拒绝，整个范围保持不变。
+    let foreign_parent = runtime.backend_mut().create_element(Tag::Button);
+    let foreign_reference = {
+        let mut backend = runtime.backend_mut();
+        let node = backend.create_text("F");
+        backend.insert_before(&foreign_parent, &node, None);
+        node
+    };
+    let snapshot_before = runtime.backend().inner().dom_snapshot();
+    let baseline = snapshot_before.nodes.len();
+    let operations_before = runtime.backend().inner().operations().len();
+    let failure = catch_unwind(AssertUnwindSafe(|| {
+        anchor.move_before(&runtime, &root, &[external], Some(&foreign_reference));
+    }));
+    let payload = failure.expect_err("foreign reference must be rejected");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert!(
+        message.contains("insert anchor must be a child of the parent"),
+        "unexpected payload {message}"
+    );
+    assert_eq!(
+        runtime.backend().inner().operations().len(),
+        operations_before,
+        "an invalid reference performs no backend operation"
+    );
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot(),
+        snapshot_before,
+        "start, content, end, and static siblings stay attached and stored"
+    );
+    assert_eq!(
+        runtime.backend().inner().text_content(&root).as_deref(),
+        Some("PXMT")
+    );
+
     let before_move = runtime.backend().inner().operations().len();
     anchor.move_before(&runtime, &root, &[external], Some(&tail));
     assert!(
@@ -2847,6 +2886,125 @@ fn range_anchor_move_before_reference_contract() {
     for id in ids {
         assert!(snapshot.nodes.iter().any(|node| node.id == id));
     }
+}
+
+/// An invalid move reference leaves a committed keyed list, its storage, and
+/// its anchors untouched instead of detaching the first range member.
+/// 非法移动参考不会分离首个范围成员，已提交 keyed 列表、存储与锚点保持不变。
+#[test]
+fn keyed_for_invalid_move_reference_preserves_committed_list() {
+    let runtime = Runtime::new(MockBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a", "b"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let _prefix = text(&mut runtime.backend_mut(), &root, "P");
+    let probe = Probe::new();
+    let list = {
+        let read_items = items.clone();
+        let builder_probe = probe.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            None,
+            "keyed/invalid-move",
+            move || read_items.get(),
+            move |context, key| row(context, key, &builder_probe, None),
+        )
+    };
+    let tail = text(&mut runtime.backend_mut(), &root, "T");
+    let start = list.start();
+    let end = list.end();
+    let snapshot_before = runtime.backend().dom_snapshot();
+    let operations_before = runtime.backend().operations().len();
+
+    let foreign_parent = runtime.backend_mut().create_element(Tag::Button);
+    let foreign_reference = {
+        let mut backend = runtime.backend_mut();
+        let node = backend.create_text("F");
+        backend.insert_before(&foreign_parent, &node, None);
+        node
+    };
+    let failure = catch_unwind(AssertUnwindSafe(|| {
+        list.anchors()
+            .move_before(&runtime, &root, &[], Some(&foreign_reference));
+    }));
+    let payload = failure.expect_err("foreign reference must be rejected");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert!(
+        message.contains("insert anchor must be a child of the parent"),
+        "unexpected payload {message}"
+    );
+
+    let snapshot_after = runtime.backend().dom_snapshot();
+    let created_after = snapshot_after
+        .nodes
+        .iter()
+        .filter(|node| {
+            snapshot_before
+                .nodes
+                .iter()
+                .all(|before| before.id != node.id)
+        })
+        .count();
+    assert_eq!(
+        created_after, 2,
+        "only the foreign parent and reference were created"
+    );
+    let old_nodes: Vec<_> = snapshot_after
+        .nodes
+        .iter()
+        .filter(|node| {
+            snapshot_before
+                .nodes
+                .iter()
+                .any(|before| before.id == node.id)
+        })
+        .collect();
+    assert_eq!(
+        old_nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.children.clone()))
+            .collect::<Vec<_>>(),
+        snapshot_before
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.children.clone()))
+            .collect::<Vec<_>>(),
+        "existing tree, storage, and sibling order stay unchanged"
+    );
+    assert_eq!(
+        runtime.backend().operations().len(),
+        operations_before + 3,
+        "the failed move emits no insert, detach, or release operation"
+    );
+    assert_eq!(list.keys(), keys(&["a", "b"]));
+    for anchor in [start, end] {
+        assert!(
+            snapshot_after
+                .nodes
+                .iter()
+                .any(|node| node.id == node_id(anchor)),
+            "anchors remain stored"
+        );
+    }
+    assert_eq!(
+        runtime.backend().text_content(&root).as_deref(),
+        Some("Pa=0b=0T")
+    );
+
+    let before_move = runtime.backend().operations().len();
+    list.anchors()
+        .move_before(&runtime, &root, &[], Some(&tail));
+    assert!(
+        runtime.backend().operations().len() > before_move,
+        "normal moves still work after the rejected reference"
+    );
+    assert_eq!(list.keys(), keys(&["a", "b"]));
 }
 
 /// Nested Show inside a keyed item uses a scoped context and cannot mutate the
@@ -3348,6 +3506,168 @@ fn keyed_for_update_nested_node_conflict_preserves_retained_range() {
     );
     list.dispose();
     assert_eq!(runtime.backend().inner().dom_snapshot().nodes.len(), 2);
+}
+
+/// A keyed item may not return another key's nested Show start anchor; anchors
+/// enter the live ownership index when the Show is created.
+/// 一个 keyed 条目不得返回另一个 key 嵌套 Show 的起始锚点；锚点在 Show 创建时
+/// 就进入实时所有权索引。
+#[test]
+fn keyed_for_initial_nested_start_anchor_conflict_is_rejected() {
+    assert_initial_nested_anchor_conflict(false);
+}
+
+/// The nested Show end anchor is protected by the same ownership index.
+/// 嵌套 Show 的结束锚点受同一所有权索引保护。
+#[test]
+fn keyed_for_initial_nested_end_anchor_conflict_is_rejected() {
+    assert_initial_nested_anchor_conflict(true);
+}
+
+fn assert_initial_nested_anchor_conflict(use_end: bool) {
+    let runtime = Runtime::new(StrictBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = {
+        let node = runtime.backend_mut().create_text("Tail");
+        runtime.backend_mut().insert_before(&root, &node, None);
+        node
+    };
+    let anchor_slot: Rc<RefCell<Option<MockNode>>> = Rc::new(RefCell::new(None));
+    let items = keys(&["a", "b"]);
+    let builder_anchor = Rc::clone(&anchor_slot);
+    let error = match For::try_mount(
+        &runtime,
+        &owner,
+        &root,
+        Some(&tail),
+        "keyed/nested-anchor-conflict-initial",
+        move || items.clone(),
+        move |context: &mut ForContext<StrictBackend>, key| {
+            let item = context.create_element(Tag::Button);
+            if key == "a" {
+                let slot = Rc::clone(&builder_anchor);
+                let show = context.show(
+                    &item,
+                    None,
+                    "keyed/nested-anchor-conflict/show",
+                    || true,
+                    |nested| {
+                        let node = nested.create_element(Tag::Button);
+                        let value = nested.create_text("value");
+                        nested.insert_before(&node, &value, None);
+                        node
+                    },
+                );
+                *slot.borrow_mut() = Some(if use_end { show.end() } else { show.start() });
+            } else if let Some(anchor) = *builder_anchor.borrow() {
+                return vec![anchor];
+            }
+            vec![item]
+        },
+    ) {
+        Ok(_) => panic!("nested anchor conflict must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, "UI_FOR_SHARED_NODE");
+    assert_eq!(error.index, 1);
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot().nodes.len(),
+        2,
+        "staged nested ranges and anchors are released exactly once"
+    );
+    assert_eq!(runtime.backend().inner().listener_count(), 0);
+}
+
+/// An update rejects a new key returning a retained nested Show anchor while
+/// keeping that Show's content and anchors alive until they are actually released.
+/// 更新会拒绝新 key 返回保留嵌套 Show 的锚点，同时让该 Show 的内容与锚点
+/// 保持存活直到真正释放。
+#[test]
+fn keyed_for_update_nested_anchor_conflict_preserves_retained_show() {
+    for use_end in [false, true] {
+        let runtime = Runtime::new(StrictBackend::new());
+        let owner = runtime.create_owner();
+        let items = owner.signal_named("keyed/items", keys(&["a"]));
+        let visible = owner.signal_named("keyed/nested-anchor-visible", true);
+        let root = runtime.backend_mut().create_element(Tag::Button);
+        let tail = {
+            let node = runtime.backend_mut().create_text("Tail");
+            runtime.backend_mut().insert_before(&root, &node, None);
+            node
+        };
+        let anchor_slot: Rc<RefCell<Option<MockNode>>> = Rc::new(RefCell::new(None));
+        let content_slot: Rc<RefCell<Option<MockNode>>> = Rc::new(RefCell::new(None));
+        let list = {
+            let read_items = items.clone();
+            let builder_anchor = Rc::clone(&anchor_slot);
+            let builder_content = Rc::clone(&content_slot);
+            let show_visible = visible.clone();
+            For::mount(
+                &runtime,
+                &owner,
+                &root,
+                Some(&tail),
+                "keyed/nested-anchor-conflict-update",
+                move || read_items.get(),
+                move |context: &mut ForContext<StrictBackend>, key| {
+                    let item = context.create_element(Tag::Button);
+                    if key == "a" {
+                        let anchor_slot = Rc::clone(&builder_anchor);
+                        let content_slot = Rc::clone(&builder_content);
+                        let condition = {
+                            let visible = show_visible.clone();
+                            move || visible.get()
+                        };
+                        let show = context.show(
+                            &item,
+                            None,
+                            "keyed/nested-anchor-conflict/update-show",
+                            condition,
+                            move |nested| {
+                                let node = nested.create_element(Tag::Button);
+                                *content_slot.borrow_mut() = Some(node);
+                                node
+                            },
+                        );
+                        *anchor_slot.borrow_mut() =
+                            Some(if use_end { show.end() } else { show.start() });
+                    } else if let Some(anchor) = *builder_anchor.borrow() {
+                        return vec![anchor];
+                    }
+                    vec![item]
+                },
+            )
+        };
+        let anchor = anchor_slot.borrow().expect("nested anchor");
+        let content = content_slot.borrow().expect("nested content");
+        assert!(runtime.backend().contains(anchor));
+        assert!(runtime.backend().contains(content));
+
+        items.set(keys(&["a", "b"]));
+        let error = list.last_error().expect("nested anchor conflict");
+        assert_eq!(error.code, "UI_FOR_SHARED_NODE");
+        assert_eq!(error.index, 1);
+        assert_eq!(list.keys(), keys(&["a"]));
+        assert!(runtime.backend().contains(anchor));
+        assert!(runtime.backend().contains(content));
+
+        visible.set(false);
+        assert!(
+            !runtime.backend().contains(content),
+            "hiding releases nested content once"
+        );
+        assert!(
+            runtime.backend().contains(anchor),
+            "hiding keeps the anchor owned by the retained Show"
+        );
+        list.dispose();
+        assert!(
+            !runtime.backend().contains(anchor),
+            "terminal disposal releases the retained anchor once"
+        );
+        assert_eq!(runtime.backend().inner().dom_snapshot().nodes.len(), 2);
+    }
 }
 
 /// Disposing the parent owner from the first item builder is terminal even

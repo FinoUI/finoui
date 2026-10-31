@@ -397,6 +397,14 @@ fn execute_on_host<B: HeadlessBackend + 'static>(
         errors,
     };
     sink.write("result.json", &json_bytes(&result, "result.json")?)?;
+    // Every invocation owns one host and one root. Dispose after the final
+    // snapshots and result exist so repeated browser runs cannot accumulate
+    // previous scenario roots; owner cleanup also runs live probes before the
+    // root is detached.
+    // 每次调用拥有一个 Host 与一个根节点。在最终快照与结果生成后释放，使重复
+    // 浏览器运行不会累积旧场景根节点；Owner 清理还会在根节点分离前运行实时
+    // 探针。
+    host.dispose();
     Ok(ScenarioRun {
         result,
         artifacts: sink.artifacts().clone(),

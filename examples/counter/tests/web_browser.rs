@@ -39,6 +39,15 @@ fn run_web_scenario(scenario: &Path, run_dir: &Path) -> Output {
 }
 
 fn run_web_scenario_with_mount(scenario: &Path, run_dir: &Path, mount: Option<&str>) -> Output {
+    run_web_scenario_with_mount_env(scenario, run_dir, mount, &[])
+}
+
+fn run_web_scenario_with_mount_env(
+    scenario: &Path,
+    run_dir: &Path,
+    mount: Option<&str>,
+    env: &[(&str, &str)],
+) -> Output {
     let mut command = counter();
     command
         .arg("scenario")
@@ -51,6 +60,9 @@ fn run_web_scenario_with_mount(scenario: &Path, run_dir: &Path, mount: Option<&s
         .args(["--format", "json"]);
     if let Some(mount) = mount {
         command.arg("--mount").arg(mount);
+    }
+    for (key, value) in env {
+        command.env(key, value);
     }
     command.output().expect("browser scenario output")
 }
@@ -549,6 +561,7 @@ fn web_headless_accepts_keyed_scenario_with_clear_final_state() {
     for expected in [
         "scenario_executes_in_chromium",
         "scenario_dom_matches_live_dom",
+        "keyed_scenario_root_is_isolated",
     ] {
         assert!(
             browser["checks"]
@@ -644,6 +657,158 @@ fn web_headless_accepts_keyed_scenario_with_empty_steps() {
     for expected in [
         "scenario_executes_in_chromium",
         "scenario_dom_matches_live_dom",
+    ] {
+        assert!(
+            browser["checks"]
+                .as_array()
+                .expect("browser checks")
+                .iter()
+                .any(|check| check["name"] == expected && check["status"] == "passed"),
+            "missing passing browser check {expected}"
+        );
+    }
+}
+
+/// An independent keyed page mounted before the scenario must not become the
+/// probe source; the live probe reads the scenario root and the scenario root is
+/// removed after the run.
+/// 场景前挂载的独立 keyed 页面不得成为探针来源；实时探针读取场景根节点，且
+/// 运行后场景根节点被移除。
+#[test]
+#[ignore = "launches headless Chromium; run with cargo test -p fino_counter --test web_browser -- --ignored"]
+fn web_headless_keyed_probe_ignores_independent_page() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let scenario_path = temporary.path().join("keyed-isolated.json");
+    let run_dir = temporary.path().join("keyed-isolated-web");
+    let scenario = serde_json::json!({
+        "schema": 1,
+        "name": "keyed/isolated-probe",
+        "mount": "keyed",
+        "environment": {
+            "viewport": [800, 600],
+            "dpr": 1.0,
+            "locale": "zh-CN",
+            "color_scheme": "dark",
+            "seed": 42,
+        },
+        "steps": [
+            {
+                "click": {
+                    "role": "button",
+                    "name": "Keyed next",
+                }
+            },
+            {
+                "assert_text": {
+                    "role": "button",
+                    "name": "Keyed host",
+                    "value": "HostNextA=0B=0C=0Tail",
+                }
+            },
+            { "capture": ["dom", "a11y", "reactive"] },
+        ],
+    });
+    fs::write(
+        &scenario_path,
+        serde_json::to_vec_pretty(&scenario).expect("scenario JSON"),
+    )
+    .expect("scenario file");
+
+    let output = run_web_scenario_with_mount(&scenario_path, &run_dir, Some("keyed"));
+    assert!(
+        output.status.success(),
+        "isolated keyed scenario failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).expect("scenario JSON");
+    assert_eq!(result["status"], "passed");
+    assert_eq!(result["steps"].as_array().map(Vec::len), Some(3));
+
+    let dom = inspect_artifact(&run_dir, SnapshotKind::Dom).expect("isolated DOM");
+    let rows: Vec<&str> = dom["nodes"]
+        .as_array()
+        .expect("DOM nodes")
+        .iter()
+        .filter_map(|node| node["attributes"]["aria-label"].as_str())
+        .filter(|label| label.starts_with("Row "))
+        .collect();
+    assert_eq!(rows, ["Row A", "Row B", "Row C"]);
+
+    let browser: Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("browser.json")).expect("browser checks"),
+    )
+    .expect("browser JSON");
+    assert_eq!(browser["status"], "passed");
+    for expected in [
+        "scenario_executes_in_chromium",
+        "scenario_dom_matches_live_dom",
+        "keyed_scenario_root_is_isolated",
+    ] {
+        assert!(
+            browser["checks"]
+                .as_array()
+                .expect("browser checks")
+                .iter()
+                .any(|check| check["name"] == expected && check["status"] == "passed"),
+            "missing passing browser check {expected}"
+        );
+    }
+}
+
+/// Two consecutive keyed scenario runs each dispose their own root and produce
+/// complete bundles without reading or accumulating the previous run.
+/// 连续两次 keyed 场景运行各自释放自己的根节点，生成完整 bundle，且不读取或
+/// 累积上一次运行。
+#[test]
+#[ignore = "launches headless Chromium; run with cargo test -p fino_counter --test web_browser -- --ignored"]
+fn web_headless_repeated_keyed_runs_do_not_accumulate_roots() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let scenario_path = temporary.path().join("keyed-repeat.json");
+    let run_dir = temporary.path().join("keyed-repeat-web");
+    let scenario = serde_json::json!({
+        "schema": 1,
+        "name": "keyed/repeated",
+        "mount": "keyed",
+        "environment": {
+            "viewport": [800, 600],
+            "dpr": 1.0,
+            "locale": "zh-CN",
+            "color_scheme": "dark",
+            "seed": 42,
+        },
+        "steps": [],
+    });
+    fs::write(
+        &scenario_path,
+        serde_json::to_vec_pretty(&scenario).expect("scenario JSON"),
+    )
+    .expect("scenario file");
+
+    let output = run_web_scenario_with_mount_env(
+        &scenario_path,
+        &run_dir,
+        Some("keyed"),
+        &[("FINO_WEB_KEYED_REPEAT", "1")],
+    );
+    assert!(
+        output.status.success(),
+        "repeated keyed scenario failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).expect("scenario JSON");
+    assert_eq!(result["status"], "passed");
+    assert_eq!(result["steps"].as_array().map(Vec::len), Some(0));
+
+    let browser: Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("browser.json")).expect("browser checks"),
+    )
+    .expect("browser JSON");
+    assert_eq!(browser["status"], "passed");
+    for expected in [
+        "scenario_executes_in_chromium",
+        "scenario_dom_matches_live_dom",
+        "keyed_scenario_root_is_isolated",
+        "keyed_repeated_runs_do_not_accumulate_roots",
     ] {
         assert!(
             browser["checks"]

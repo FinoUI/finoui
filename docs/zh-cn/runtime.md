@@ -116,6 +116,7 @@ let details = Show::mount(
 - 条件 Effect 或内容清理持有状态时，`Show::dispose` 也会记录请求，在下一个安全点释放范围与锚点，并在借用结束后处置 control Owner。父 Owner 清理走同一 pending 请求路径。
 - `Show` 内容 Owner 清理 panic 不会阻止节点释放或终止锚点清理。首个 payload 会保留，重复释放仍幂等。
 - 多节点 Show 内容构建器若在插入部分外部返回节点后 panic，回滚会按去重后的 created + returned 集合各释放一次（含重复与重叠），保留首个 payload，并用同一实际释放集合通知 keyed 释放观察器。
+- 嵌套 Show 在锚点对创建时就把起止锚点上报给 keyed 所有权索引。隐藏只释放内容；终止清理才释放锚点，并且只上报真正释放的节点，因此保留的 Show 仍拥有锚点，也不会重复释放。
 - 锚点只创建一次并保持稳定；静态兄弟及其 `NodeId` 绝不替换。
 - 条件 Effect 只在真正的 `false → true` 切换时创建子 Owner 与内容；写入相同值不执行操作。
 - `true → false` 时先释放子 Owner，停止事件分发并解绑 Effect 与监听，再从父节点释放范围。
@@ -160,17 +161,19 @@ let rows = For::mount(
 - For 条目释放、构建器回滚、已删除条目与终止清理共用同一条 Owner+节点终止路径：捕获 Owner 清理 panic，节点仍被分离并只释放一次，已有构建器/用户 payload 始终优先于清理或 release panic。Show 挂载回滚与活动范围释放使用同一规则。
 - `ForContext::on_dispose` 会延迟到条目构建结束，因此即使用户回调更早注册，监听与 Effect 清理也会先于用户 on_dispose 运行。
 - 不同 key 不得返回同一个外部节点。冲突会以 `UI_FOR_SHARED_NODE` 原子拒绝，保留既有所有者、NodeId 与 DOM；被拒绝的暂存条目只释放自身独有资源。重复 key 与共享节点错误的 `ForError::index` 都是被拒绝 key 在新请求列表中的位置。
-- 条目所有权包含 keyed 嵌套 Show 创建的 live 节点。嵌套范围释放时会移除对应记录，已释放节点不会永久留在所有权索引中。共享节点拒绝仍会跳过 retained 条目拥有的节点。
+- 条目所有权包含 keyed 嵌套 Show 创建的 live 节点与起止锚点。隐藏只移除已释放内容的记录，锚点仍归保留的 Show；终止清理在释放一次后同时移除内容与锚点。共享节点拒绝仍会跳过 retained 条目拥有的节点。
 - 所有权检查在后端提供稳定节点标识时使用索引；纯重排完全跳过所有权收集，有暂存条目时查找成本受已提交与暂存节点数约束。无标识后端回退到 `Eq` 比较。
 - 条目 Owner 与条目/列表锚点都在受保护事务内获取。锚点创建或插入失败会处置 Owner、释放部分锚点并保留后端 panic；初始列表/Show 锚点失败对 control Owner 做同样处理。放置阶段使用 retained key→旧位置映射，不再按 key 线性搜索。
 - 放置移动可回滚。后端 panic 会先恢复旧中段顺序、entries 与已提交 keys，再重新抛出；若回滚自身也 panic，列表进入终止清理并保留首个后端 payload。
 - `ForContext::show` 传入受限 `ForShowContext`，只能修改该嵌套范围创建的节点，且不暴露原始 Runtime。独立 `ShowContext::runtime()` 继续 public，供下游 Show 内容使用。
 - `RangeAnchor::create` 在创建或插入 panic 时释放部分锚点。`RangeAnchor::move_before` 对 `start` 自引用 no-op，并在首次后端操作前拒绝 `end` 或任一范围顶层节点作为参考。
+- Mock 与 Native 会在分离待移动节点前验证 `insert_before` 参考是目标父节点的子节点，因此非法参考会原子失败。Web 保持浏览器 `insertBefore` 语义，同样在变更前验证。
 - 每个新条目都在改动既有范围前完整构建。构建器 panic 时先释放该条目 Owner 及其跟踪的节点、Effect 与监听，再继续展开；已构建条目会被释放，上一次列表保持已提交。
 - 删除 key 时先释放条目 Owner，再释放其范围。写入已移除条目的 Signal 不再触达后端或请求帧。
 - 条目内通过条目 Effect 完成的 Signal 更新不会运行协调 Effect。
 - `For::dispose` 释放全部条目与列表锚点；重复释放与父 Owner 释放均幂等。
 - Mock、真实 Web DOM 与 Native 复用同一场景。Web 探针检查真实节点身份与 `insertBefore` 移动；Native 检查 arena 释放与释放后的绘制列表。
+- 每次场景调用拥有一个 Host，并在最终快照与结果写入后释放。因此重复 Web 运行会移除上一次的根节点；实时探针在 Owner 清理期间、根节点分离前运行，并且只读取本次调用自己的根节点。
 
 `RangeAnchor::move_before` 是整段移动的共享操作：起始锚点、外部节点、结束锚点，全部移动到同一个参考节点之前。
 

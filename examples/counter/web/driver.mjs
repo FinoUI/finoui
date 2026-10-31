@@ -430,6 +430,17 @@ try {
   await page.goto(`${origin}/index.html`);
   await page.waitForFunction(() => window.fino instanceof Object);
 
+  // Mounts an independent keyed page first so a scenario probe that scans the
+  // document instead of its own root would read the wrong host.
+  // 先挂载一个独立 keyed 页面，使扫描文档而非自身根节点的场景探针读到错误宿主。
+  if (isKeyed) {
+    await page.evaluate(() => {
+      const decoy = new window.fino.KeyedPage();
+      decoy.set_keys(JSON.stringify(['Decoy']));
+      window.__finoDecoyKeyed = decoy;
+    });
+  }
+
   let bundle;
   await runCheck('scenario_executes_in_chromium', async () => {
     const serialized = await page.evaluate(
@@ -454,11 +465,11 @@ try {
 
   await runCheck('scenario_dom_matches_live_dom', async () => {
     if (isShow) {
-      const live = await page.evaluate(() => ({
-        hostText: document.querySelector('button[aria-label="Show host"]')?.textContent,
-        action: document.querySelector('button[aria-label="Show action"]'),
-        innerHtmlSets: window.__finoInnerHtmlSets,
-      }));
+      const live = bundle.live_root;
+      const innerHtmlSets = await page.evaluate(() => window.__finoInnerHtmlSets);
+      assert(live, 'the scenario page must expose its live Show root probe');
+      assertEqual(live.schema, 1, 'Show live probe schema');
+      assert(live.mounted_in_body, 'the Show host is mounted directly in document.body');
       const dom = JSON.parse(bundle.artifacts['dom.json']);
       assertEqual(dom.roots.length, 1, 'Show DOM root count');
       const anchors = dom.nodes.filter((node) => node.kind === 'anchor');
@@ -467,9 +478,9 @@ try {
       const host = a11y.nodes.find((node) => node.name === 'Show host');
       assert(host, 'Show host must remain reachable');
       assertEqual(host.text, 'HostToggleTail', 'Show host text after hiding');
-      assertEqual(live.hostText, 'HostToggleTail', 'live Show host text');
-      assertEqual(live.action, null, 'removed Show action must be unreachable');
-      assertEqual(live.innerHtmlSets, 0, 'innerHTML assignments during Show scenario');
+      assertEqual(live.text, host.text, 'live Show host text matches a11y snapshot');
+      assert(!live.labels.includes('Show action'), 'removed Show action must be unreachable');
+      assertEqual(innerHtmlSets, 0, 'innerHTML assignments during Show scenario');
       assertEqual(pageErrors.length, 0, 'Show page errors');
       return;
     }
@@ -512,6 +523,9 @@ try {
       const a11y = JSON.parse(bundle.artifacts['a11y.json']);
       const host = a11y.nodes.find((node) => node.name === 'Keyed host');
       assert(host, 'keyed host must remain reachable');
+      const a11yRows = a11y.nodes
+        .filter((node) => typeof node.name === 'string' && node.name.startsWith('Row '))
+        .map((node) => node.name);
       assertEqual(live.host_text, host.text, 'live host text matches a11y snapshot');
       assertEqual(live.host_text, domHostText, 'live host text matches DOM snapshot');
       assertEqual(
@@ -519,15 +533,20 @@ try {
         domRows.join(','),
         'live row order matches DOM snapshot',
       );
+      assertEqual(
+        a11yRows.join(','),
+        live.rows.join(','),
+        'live row order matches a11y node order',
+      );
       assertEqual(innerHtmlSets, 0, 'innerHTML assignments during keyed scenario');
       assertEqual(pageErrors.length, 0, 'keyed page errors');
       return;
     }
-    const live = await page.evaluate(() => ({
-      text: document.querySelector('button')?.textContent,
-      inBody: document.querySelector('button')?.parentNode === document.body,
-      innerHtmlSets: window.__finoInnerHtmlSets,
-    }));
+    const live = bundle.live_root;
+    const innerHtmlSets = await page.evaluate(() => window.__finoInnerHtmlSets);
+    assert(live, 'the scenario page must expose its live counter root probe');
+    assertEqual(live.schema, 1, 'counter live probe schema');
+    assert(live.mounted_in_body, 'scenario counter lives on document.body');
     const dom = JSON.parse(bundle.artifacts['dom.json']);
     assertEqual(dom.roots.length, 1, 'DOM root count');
     const domText = dom.nodes
@@ -540,10 +559,67 @@ try {
     assertEqual(a11y.nodes.length, 1, 'accessibility node count');
     assertEqual(a11y.nodes[0].name, 'Increment counter', 'accessibility name');
     assertEqual(a11y.nodes[0].text, live.text, 'accessibility text against live DOM text');
-    assert(live.inBody, 'scenario counter lives on document.body');
-    assertEqual(live.innerHtmlSets, 0, 'innerHTML assignments during scenario');
+    assertEqual(innerHtmlSets, 0, 'innerHTML assignments during scenario');
     assertEqual(pageErrors.length, 0, 'page errors');
   });
+
+  if (isKeyed) {
+    await runCheck('keyed_scenario_root_is_isolated', async () => {
+      const state = await page.evaluate(() => ({
+        decoyPresent: Boolean(window.__finoDecoyKeyed),
+        keyedHosts: document.querySelectorAll('button[aria-label="Keyed host"]').length,
+      }));
+      assert(state.decoyPresent, 'the independent keyed page must stay mounted');
+      assertEqual(
+        state.keyedHosts,
+        1,
+        'the scenario host is disposed and only the independent page remains',
+      );
+    });
+
+    if (process.env.FINO_WEB_KEYED_REPEAT === '1') {
+      await runCheck('keyed_repeated_runs_do_not_accumulate_roots', async () => {
+        const repeated = JSON.parse(
+          await page.evaluate(
+            ({ scenario, runDirLabel }) =>
+              window.fino.run_keyed_scenario(scenario, `${runDirLabel}-repeat`),
+            { scenario, runDirLabel },
+          ),
+        );
+        assertEqual(repeated.result.status, 'passed', 'repeated scenario status');
+        assertEqual(repeated.result.backend, 'web-headless', 'repeated scenario backend');
+        assertEqual(
+          repeated.result.steps.length,
+          bundle.result.steps.length,
+          'repeated scenario step count',
+        );
+        assert(repeated.live_keyed, 'the repeated run must capture its own keyed probe');
+        assertEqual(
+          JSON.stringify(repeated.live_keyed),
+          JSON.stringify(bundle.live_keyed),
+          'both runs produce the same deterministic keyed probe',
+        );
+        for (const name of [
+          'result.json',
+          'dom.json',
+          'a11y.json',
+          'reactive.json',
+          'trace.json',
+        ]) {
+          assert(
+            Object.prototype.hasOwnProperty.call(repeated.artifacts, name),
+            `repeated run is missing ${name}`,
+          );
+        }
+        const state = await page.evaluate(() => ({
+          decoyPresent: Boolean(window.__finoDecoyKeyed),
+          keyedHosts: document.querySelectorAll('button[aria-label="Keyed host"]').length,
+        }));
+        assert(state.decoyPresent, 'the independent keyed page survives both runs');
+        assertEqual(state.keyedHosts, 1, 'repeated runs never accumulate scenario roots');
+      });
+    }
+  }
 
   // Reloads so the conformance sequence mounts into a clean body.
   // 重新加载，使一致性序列挂载到干净的 body。

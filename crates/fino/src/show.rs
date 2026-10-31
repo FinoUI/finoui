@@ -153,9 +153,20 @@ impl<B: DomBackend> fmt::Debug for RangeAnchor<B> {
     }
 }
 
-/// Release observer used by keyed nested Show ownership tracking.
-/// keyed 嵌套 Show 所有权跟踪使用的释放观察器。
-pub(crate) type ReleaseObserver<B> = Rc<dyn Fn(&[<B as DomBackend>::Node])>;
+/// Acquisition and release callbacks for keyed nested Show ownership tracking.
+/// keyed 嵌套 Show 所有权跟踪使用的获取与释放回调。
+///
+/// Anchors are reported when they are created and again when they are actually
+/// released, so the same live ownership index contains the range anchors as
+/// well as the content nodes.
+/// 锚点创建时与真正释放时都会上报，因此同一实时所有权索引同时包含范围锚点
+/// 与内容节点。
+pub(crate) type NodeBatchCallback<B> = Rc<dyn Fn(&[<B as DomBackend>::Node])>;
+
+pub(crate) struct RangeObserver<B: DomBackend> {
+    pub(crate) acquire: NodeBatchCallback<B>,
+    pub(crate) release: NodeBatchCallback<B>,
+}
 
 /// Borrowed mount coordinates shared by Show mount helpers.
 /// Show 挂载辅助函数共享的借用坐标。
@@ -351,8 +362,8 @@ impl<B: DomBackend + 'static> ShowContext<B> {
         )
     }
 
-    /// Mounts a nested Show with a release observer for keyed ownership.
-    /// 为 keyed 所有权挂载带释放观察器的嵌套 Show。
+    /// Mounts a nested Show with acquisition and release observers for keyed ownership.
+    /// 为 keyed 所有权挂载带获取与释放观察器的嵌套 Show。
     pub(crate) fn show_observed<C, F>(
         &mut self,
         parent: &B::Node,
@@ -360,7 +371,7 @@ impl<B: DomBackend + 'static> ShowContext<B> {
         name: &str,
         condition: C,
         mut content: F,
-        observer: ReleaseObserver<B>,
+        observer: RangeObserver<B>,
     ) -> Show<B>
     where
         C: Fn() -> bool + 'static,
@@ -468,13 +479,13 @@ impl<B: DomBackend + 'static> Show<B> {
         )
     }
 
-    /// Mounts a range with an optional release observer for keyed ownership.
-    /// 为 keyed 所有权挂载一个可带释放观察器的范围。
+    /// Mounts a range with acquisition and release observers for keyed ownership.
+    /// 为 keyed 所有权挂载带获取与释放观察器的范围。
     pub(crate) fn mount_many_observed<C, F>(
         mount: ShowMount<'_, B>,
         condition: C,
         content: F,
-        observer: ReleaseObserver<B>,
+        observer: RangeObserver<B>,
     ) -> Self
     where
         C: Fn() -> bool + 'static,
@@ -487,7 +498,7 @@ impl<B: DomBackend + 'static> Show<B> {
         mount: ShowMount<'_, B>,
         condition: C,
         content: F,
-        release_observer: Option<ReleaseObserver<B>>,
+        observer: Option<RangeObserver<B>>,
     ) -> Self
     where
         C: Fn() -> bool + 'static,
@@ -510,6 +521,9 @@ impl<B: DomBackend + 'static> Show<B> {
                 resume_unwind(payload);
             }
         };
+        if let Some(observer) = &observer {
+            (observer.acquire)(&[anchors.start.clone(), anchors.end.clone()]);
+        }
         let dispose_requested = Rc::new(Cell::new(false));
         let state = Rc::new(RefCell::new(ShowState {
             runtime: runtime.clone(),
@@ -523,7 +537,7 @@ impl<B: DomBackend + 'static> Show<B> {
             cleaned: false,
             dispose_requested: Rc::clone(&dispose_requested),
             control_dispose_pending: false,
-            release_observer,
+            observer,
         }));
 
         let cleanup_state = SendWrapper::new(Rc::downgrade(&state));
@@ -681,7 +695,7 @@ struct ShowState<B: DomBackend + 'static> {
     cleaned: bool,
     dispose_requested: Rc<Cell<bool>>,
     control_dispose_pending: bool,
-    release_observer: Option<ReleaseObserver<B>>,
+    observer: Option<RangeObserver<B>>,
 }
 
 impl<B: DomBackend + 'static> ShowState<B> {
@@ -758,8 +772,8 @@ impl<B: DomBackend + 'static> ShowState<B> {
                         unique.push(node);
                     }
                 }
-                if let Some(observer) = &self.release_observer {
-                    observer(&unique);
+                if let Some(observer) = &self.observer {
+                    (observer.release)(&unique);
                 }
                 if let Some(payload) =
                     terminate_owner_and_nodes(owner, unique, runtime, Some(payload))
@@ -781,8 +795,8 @@ impl<B: DomBackend + 'static> ShowState<B> {
                 .cloned()
                 .collect();
             let dispose = catch_unwind(AssertUnwindSafe(|| active.dispose(runtime))).err();
-            if let Some(observer) = &self.release_observer {
-                observer(&released);
+            if let Some(observer) = &self.observer {
+                (observer.release)(&released);
             }
             if let Some(payload) = dispose {
                 resume_unwind(payload);
@@ -804,12 +818,34 @@ impl<B: DomBackend + 'static> ShowState<B> {
         self.cleaned = true;
         let runtime = self.runtime.clone();
         let unmount = catch_unwind(AssertUnwindSafe(|| self.unmount_range(&runtime))).err();
-        let anchors =
-            catch_unwind(AssertUnwindSafe(|| self.anchors.remove_anchors(&runtime))).err();
+        let anchors = catch_unwind(AssertUnwindSafe(|| self.release_anchors(&runtime))).err();
         if let Some(payload) = unmount {
             resume_unwind(payload);
         }
         if let Some(payload) = anchors {
+            resume_unwind(payload);
+        }
+    }
+
+    /// Releases both anchors and reports exactly the nodes that were freed.
+    /// 释放两个锚点，并只上报真正被释放的节点。
+    fn release_anchors(&self, runtime: &Runtime<B>) {
+        let mut released = Vec::new();
+        let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
+        for anchor in [&self.anchors.end, &self.anchors.start] {
+            match catch_unwind(AssertUnwindSafe(|| runtime.backend_mut().release(anchor))) {
+                Ok(()) => released.push(anchor.clone()),
+                Err(payload) => {
+                    if first_panic.is_none() {
+                        first_panic = Some(payload);
+                    }
+                }
+            }
+        }
+        if let Some(observer) = &self.observer {
+            (observer.release)(&released);
+        }
+        if let Some(payload) = first_panic {
             resume_unwind(payload);
         }
     }

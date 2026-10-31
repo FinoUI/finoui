@@ -35,7 +35,7 @@ use crate::{
     dom_api::{Attribute, DomBackend, Event, EventContext, EventKind, Tag},
     reactive::Owner,
     runtime::Runtime,
-    show::{RangeAnchor, ReleaseObserver, Show, ShowContext, terminate_owner_and_nodes},
+    show::{RangeAnchor, RangeObserver, Show, ShowContext, terminate_owner_and_nodes},
     view::with_owner,
 };
 
@@ -285,12 +285,6 @@ impl<'a, B: DomBackend + 'static> ForShowContext<'a, B> {
             self.assert_owned(before);
         }
         let nested_nodes = Rc::clone(&self.nested_nodes);
-        let observer_nodes = Rc::clone(&self.nested_nodes);
-        let observer: ReleaseObserver<B> = Rc::new(move |released| {
-            observer_nodes
-                .borrow_mut()
-                .retain(|node| !released.iter().any(|released| released == node));
-        });
         self.inner.show_observed(
             parent,
             before,
@@ -300,7 +294,7 @@ impl<'a, B: DomBackend + 'static> ForShowContext<'a, B> {
                 let mut context = ForShowContext::new(inner, Rc::clone(&nested_nodes));
                 content(&mut context)
             },
-            observer,
+            nested_range_observer(Rc::clone(&self.nested_nodes)),
         )
     }
 
@@ -329,6 +323,34 @@ impl<B: DomBackend + 'static> fmt::Debug for ForShowContext<'_, B> {
             .debug_struct("ForShowContext")
             .finish_non_exhaustive()
     }
+}
+
+/// Builds the keyed ownership observer for one nested Show range.
+/// 为一个嵌套 Show 范围构建 keyed 所有权观察器。
+///
+/// Creation adds the nested anchors to the live index; release removes exactly
+/// the nodes the Show actually freed, so a hide keeps the anchors owned by the
+/// retained Show while terminal cleanup drops them once.
+/// 创建时把嵌套锚点加入实时索引；释放时只移除 Show 真正释放的节点，因此隐藏
+/// 时锚点仍归保留的 Show，终止清理时则只移除一次。
+fn nested_range_observer<B: DomBackend + 'static>(
+    nested_nodes: Rc<std::cell::RefCell<Vec<B::Node>>>,
+) -> RangeObserver<B> {
+    let acquire_nodes = Rc::clone(&nested_nodes);
+    let acquire = Rc::new(move |created: &[B::Node]| {
+        let mut tracked = acquire_nodes.borrow_mut();
+        for node in created {
+            if !tracked.iter().any(|existing| existing == node) {
+                tracked.push(node.clone());
+            }
+        }
+    });
+    let release = Rc::new(move |released: &[B::Node]| {
+        nested_nodes
+            .borrow_mut()
+            .retain(|node| !released.iter().any(|released| released == node));
+    });
+    RangeObserver { acquire, release }
 }
 
 impl<B: DomBackend + 'static> ForContext<B> {
@@ -483,12 +505,6 @@ impl<B: DomBackend + 'static> ForContext<B> {
             self.assert_owned(before);
         }
         let nested_nodes = Rc::clone(&self.nested_nodes);
-        let observer_nodes = Rc::clone(&self.nested_nodes);
-        let observer: ReleaseObserver<B> = Rc::new(move |released| {
-            observer_nodes
-                .borrow_mut()
-                .retain(|node| !released.iter().any(|released| released == node));
-        });
         self.inner.show_observed(
             parent,
             before,
@@ -498,7 +514,7 @@ impl<B: DomBackend + 'static> ForContext<B> {
                 let mut context = ForShowContext::new(inner, Rc::clone(&nested_nodes));
                 content(&mut context)
             },
-            observer,
+            nested_range_observer(Rc::clone(&self.nested_nodes)),
         )
     }
 }
@@ -528,10 +544,22 @@ impl<B: DomBackend + 'static, K> ForEntry<B, K> {
             owner,
             nodes: returned_nodes,
             created,
+            nested_nodes,
             ..
         } = self;
+        let nested = nested_nodes.borrow().clone();
         let mut nodes = created;
-        nodes.extend(returned_nodes);
+        for node in returned_nodes {
+            // Nested ranges release their own nodes and anchors through the
+            // owning Show when the item owner is disposed.
+            // 嵌套范围通过所属 Show 在条目 Owner 释放时回收自己的节点与锚点。
+            if nested.iter().any(|nested| nested == &node)
+                || nodes.iter().any(|existing| existing == &node)
+            {
+                continue;
+            }
+            nodes.push(node);
+        }
         if let Some(payload) = terminate_owner_and_nodes(owner, nodes, runtime, None) {
             resume_unwind(payload);
         }
@@ -1407,12 +1435,14 @@ fn validate_keys<K: Clone + Eq + std::hash::Hash>(keys: &[K]) -> Result<(), ForE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend_mock::MockBackend;
+    use crate::{backend_mock::MockBackend, headless::HeadlessBackend};
 
-    /// Nested-range ownership records are removed when the nested Show hides.
-    /// 嵌套 Show 隐藏时，其所有权记录会从条目跟踪器中移除。
+    /// Hiding a nested Show removes its content from the ownership index while
+    /// keeping the still-live range anchors owned by the retained Show.
+    /// 隐藏嵌套 Show 会从所有权索引移除其内容，但保留的 Show 仍持有仍存活的
+    /// 范围锚点。
     #[test]
-    fn nested_node_tracker_drops_released_nodes() {
+    fn nested_node_tracker_keeps_anchors_and_drops_released_content() {
         let runtime = Runtime::new(MockBackend::new());
         let owner = runtime.create_owner();
         let items = owner.signal_named("items", vec!["a".to_owned()]);
@@ -1450,18 +1480,31 @@ mod tests {
                 vec![item]
             },
         );
-        assert!(
-            !list.state.borrow().entries[0]
-                .nested_nodes
-                .borrow()
-                .is_empty()
+        assert_eq!(
+            list.state.borrow().entries[0].nested_nodes.borrow().len(),
+            4,
+            "the nested content and its anchor pair enter the live index"
         );
         visible.set(false);
+        let tracked = list.state.borrow().entries[0].nested_nodes.borrow().clone();
+        assert_eq!(
+            tracked.len(),
+            2,
+            "hiding keeps only the live anchor pair in the index"
+        );
+        let anchors: Vec<String> = runtime
+            .backend()
+            .dom_snapshot()
+            .nodes
+            .iter()
+            .filter(|node| node.kind == crate::headless::DomNodeKind::Anchor)
+            .map(|node| node.id.clone())
+            .collect();
         assert!(
-            list.state.borrow().entries[0]
-                .nested_nodes
-                .borrow()
-                .is_empty()
+            tracked
+                .iter()
+                .all(|node| anchors.contains(&format!("node-{}", node.0))),
+            "the retained entries are the anchors, not the released content"
         );
     }
 }

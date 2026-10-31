@@ -388,6 +388,17 @@ impl DomBackend for MockBackend {
             );
             ancestor = self.nodes.get(&node).and_then(MockNodeData::parent);
         }
+        // Validate the insertion reference before detaching the moving child.
+        // 在分离待移动子节点前先验证插入参考。
+        let Some(MockNodeData::Element { children, .. }) = self.nodes.get(parent) else {
+            panic!("insert parent must be an existing element");
+        };
+        if let Some(anchor) = anchor {
+            assert!(
+                children.iter().any(|candidate| candidate == anchor),
+                "insert anchor must be a child of the parent"
+            );
+        }
         if let Some(old_parent) = self.nodes.get(child).and_then(MockNodeData::parent)
             && let Some(MockNodeData::Element { children, .. }) = self.nodes.get_mut(&old_parent)
         {
@@ -755,6 +766,55 @@ mod tests {
         assert_eq!(backend.find_all(&selector("Root")).len(), 1);
         assert_eq!(backend.a11y_snapshot().nodes.len(), 1);
         assert_eq!(backend.dom_snapshot().nodes.len(), 2);
+    }
+
+    /// A reference outside the destination parent is rejected before the moving
+    /// child is detached, so the failed insert is atomic.
+    /// 目标父节点之外的参考会在分离待移动子节点前被拒绝，因此失败插入是原子的。
+    #[test]
+    fn inserting_before_a_foreign_reference_is_atomic() {
+        let mut backend = MockBackend::new();
+        let root = button(&mut backend, "Root");
+        let first = backend.create_text("first");
+        let second = backend.create_text("second");
+        backend.insert_before(&root, &first, None);
+        backend.insert_before(&root, &second, None);
+        let other = button(&mut backend, "Other");
+        let moving = backend.create_text("moving");
+        backend.insert_before(&other, &moving, None);
+        let foreign = backend.create_text("foreign");
+        backend.insert_before(&other, &foreign, None);
+
+        let snapshot = backend.dom_snapshot();
+        let operations = backend.operations().len();
+        let message = panic_message(catch_unwind(AssertUnwindSafe(|| {
+            backend.insert_before(&root, &moving, Some(&foreign));
+        })));
+        assert!(
+            message.contains("insert anchor must be a child of the parent"),
+            "{message}"
+        );
+        assert_eq!(
+            backend.operations().len(),
+            operations,
+            "the rejected insert performs no detach or insert"
+        );
+        assert_eq!(
+            backend.dom_snapshot(),
+            snapshot,
+            "storage, siblings, and the moving child stay unchanged"
+        );
+        assert_eq!(backend.text_content(&root).as_deref(), Some("firstsecond"));
+        assert_eq!(
+            backend.text_content(&other).as_deref(),
+            Some("movingforeign")
+        );
+
+        backend.insert_before(&root, &moving, Some(&second));
+        assert_eq!(
+            backend.text_content(&root).as_deref(),
+            Some("firstmovingsecond")
+        );
     }
 
     /// Rejects inserting an ancestor under its own descendant and keeps legal moves.

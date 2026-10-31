@@ -116,6 +116,7 @@ let details = Show::mount(
 - `Show::dispose` also records a request while the condition effect or content cleanup owns the state, then releases the range and anchors at the next safe point and disposes the control owner after the borrow. Parent-owner cleanup follows the same pending-request path.
 - `Show` content-owner cleanup panics do not prevent node release or terminal anchor cleanup. The first payload is preserved, and repeated disposal remains idempotent.
 - If a multi-node Show content builder inserts some external returned nodes before a later insertion panics, rollback detaches and releases the created plus returned nodes once each (including duplicates and overlaps), preserves the first payload, and notifies the keyed release observer with the same actual released set.
+- A nested Show reports its anchor pair to the keyed ownership index as soon as the pair is created. Hiding releases only the content; terminal cleanup releases the anchors and reports exactly the nodes it freed, so the retained Show still owns its anchors and no node is released twice.
 - The anchors are created once and stay stable. Static siblings and their `NodeId`s are never replaced.
 - The condition effect creates a child owner and content only on a real `false → true` transition; equal writes are no-ops.
 - On `true → false`, the child owner is disposed first, which stops event dispatch and releases effects and listeners, then the range is released from the parent.
@@ -160,17 +161,19 @@ let rows = For::mount(
 - For item dispose, builder rollback, removed entries, and terminal cleanup share one owner-and-node termination path: owner cleanup panics are captured, nodes are detached and released exactly once, and an earlier builder/user payload always wins over cleanup or release panics. Show mount rollback and active-range disposal use the same rule.
 - `ForContext::on_dispose` is deferred until item construction ends, so listener and effect cleanup runs before user on_dispose callbacks even when the callback was registered earlier.
 - Different keys must not return the same external node. Conflicts are rejected atomically with `UI_FOR_SHARED_NODE`, leaving retained owners, NodeIds, and DOM unchanged; rejected staged entries release only their unique resources. `ForError::index` is the rejected key's position in the requested new list for both duplicate-key and shared-node errors.
-- Item ownership includes live nodes created by nested keyed Shows. Nested-range release removes those records, so a released node cannot remain a permanent ownership entry. Shared-node rejection still skips nodes owned by retained entries.
+- Item ownership includes live nodes and the start/end anchors created by nested keyed Shows. Hiding removes only released content records and keeps the anchors owned by the retained Show; terminal cleanup removes both content and anchors after releasing them once. Shared-node rejection still skips nodes owned by retained entries.
 - Ownership checks use a stable backend node identity when available; pure reorder skips ownership collection entirely, and a staged update uses indexed lookup bounded by committed plus staged nodes. Backends without identity fall back to `Eq` comparisons.
 - Item owners and item/list anchors are acquired inside guarded transactions. A failed anchor create or insert disposes the owner and releases partial anchors while preserving the backend panic; initial list/Show anchor failures do the same for the control owner. Placement uses a retained key-to-old-position map rather than scanning by key.
 - Placement moves are rollback-safe. A backend panic restores the old middle order, entries, and committed keys before rethrowing; if rollback also panics, the list enters terminal cleanup and keeps the first backend payload.
 - `ForContext::show` passes a scoped `ForShowContext` that only mutates nodes created by that nested range and exposes no raw runtime. Standalone `ShowContext::runtime()` remains public for downstream Show content.
 - `RangeAnchor::create` releases partial anchors if creation or insertion panics. `RangeAnchor::move_before` treats `start` as a no-op and rejects `end` or any top-level range node as the reference before the first backend operation.
+- Mock and Native validate that an `insert_before` reference is a child of the destination parent before detaching the moving node, so an invalid reference fails atomically. Web keeps browser `insertBefore` semantics, which also validate before mutation.
 - Every new item is fully built before existing ranges change. A builder panic disposes that item owner and releases its tracked nodes, effects, and listeners before rethrowing; already-built items are released and the previous list stays committed.
 - Removing a key disposes the item owner first, then releases its range. Writing a removed item's signal no longer touches the backend or requests a frame.
 - Item-local signal updates through item effects do not run the reconciliation effect.
 - `For::dispose` releases every item and the list anchors; repeated disposal and parent-owner disposal are idempotent.
 - Mock, real Web DOM, and Native reuse the same scenario. The Web probe checks real node identity and `insertBefore` moves; Native checks arena release and display lists after disposal.
+- Each scenario invocation owns one host and disposes it after the final snapshots and result are written. Repeated Web runs therefore remove their previous roots, while live probes run during owner cleanup before the root is detached and stay scoped to that invocation's own root.
 
 `RangeAnchor::move_before` is the shared operation for a complete range: start anchor, external nodes, end anchor, all before one reference node.
 
