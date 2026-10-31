@@ -149,6 +149,9 @@ pub enum DomNodeKind {
     /// Text node.
     /// 文本节点。
     Text,
+    /// Invisible structural anchor for a dynamic range.
+    /// 动态范围的不可见结构锚点。
+    Anchor,
 }
 
 /// Stable logical DOM node without addresses or platform handles.
@@ -310,6 +313,9 @@ pub trait HeadlessBackend: DomBackend {
     /// Clones a registered listener for dispatch outside a backend borrow.
     /// 克隆已注册监听器，以便在后端借用之外分发。
     fn listener(&self, node: &Self::Node, event: EventKind) -> Option<EventListener>;
+    /// Returns the number of live listener registrations.
+    /// 返回仍存活的监听注册数量。
+    fn listener_count(&self) -> usize;
     /// Captures the logical DOM tree.
     /// 捕获逻辑 DOM 树。
     fn dom_snapshot(&self) -> DomSnapshot;
@@ -333,6 +339,9 @@ pub trait HeadlessBackend: DomBackend {
             nodes: &BTreeMap<&str, &DomNodeSnapshot>,
         ) -> Option<LogicalNodeSnapshot> {
             let node = nodes.get(id)?;
+            if node.kind == DomNodeKind::Anchor {
+                return None;
+            }
             Some(LogicalNodeSnapshot {
                 kind: node.kind,
                 tag: node.tag.clone(),
@@ -793,6 +802,10 @@ mod tests {
             self.0.create_text(value)
         }
 
+        fn create_anchor(&mut self) -> Self::Node {
+            self.0.create_anchor()
+        }
+
         fn insert_before(
             &mut self,
             parent: &Self::Node,
@@ -847,6 +860,10 @@ mod tests {
 
         fn listener(&self, node: &Self::Node, event: EventKind) -> Option<EventListener> {
             self.0.listener(node, event)
+        }
+
+        fn listener_count(&self) -> usize {
+            self.0.listener_count()
         }
 
         fn dom_snapshot(&self) -> DomSnapshot {

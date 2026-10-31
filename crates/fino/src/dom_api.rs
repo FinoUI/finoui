@@ -126,6 +126,9 @@ pub trait DomBackend {
     /// Creates a text node with initial static content.
     /// 创建带初始静态内容的文本节点。
     fn create_text(&mut self, value: &str) -> Self::Node;
+    /// Creates an invisible structural anchor for a dynamic range.
+    /// 为动态范围创建不可见的范围锚点。
+    fn create_anchor(&mut self) -> Self::Node;
     /// Inserts a child before an optional anchor without clearing siblings.
     /// 在可选锚点前插入子节点，不清空兄弟节点。
     fn insert_before(

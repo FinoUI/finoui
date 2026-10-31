@@ -44,6 +44,9 @@ enum NativeBackendOp {
     CreateText {
         node: u64,
     },
+    CreateAnchor {
+        node: u64,
+    },
     Insert {
         parent: u64,
         child: u64,
@@ -72,6 +75,7 @@ impl NativeBackendOp {
         match self {
             Self::CreateElement(_) => "create_element",
             Self::CreateText { .. } => "create_text",
+            Self::CreateAnchor { .. } => "create_anchor",
             Self::Insert { .. } => "insert",
             Self::Remove { .. } => "remove",
             Self::SetText { .. } => "set_text",
@@ -86,6 +90,7 @@ impl NativeBackendOp {
 enum NodeKind {
     Element(Tag),
     Text,
+    Anchor,
 }
 
 struct TextBinding {
@@ -383,6 +388,7 @@ impl NativeDom {
                         y = rect.bottom() + self.style.margin;
                     }
                 }
+                NodeKind::Anchor => {}
             }
         }
 
@@ -573,6 +579,7 @@ impl NativeDom {
         let (tag, text) = match data.kind {
             NodeKind::Element(Tag::Button) => (Some("button".to_owned()), None),
             NodeKind::Text => (None, data.text.as_ref().map(|text| text.spec.text.clone())),
+            NodeKind::Anchor => (None, None),
         };
         LayoutBoxSnapshot {
             id: format!("node-{}", data.stable_id),
@@ -631,6 +638,7 @@ impl NativeDom {
                 }
                 true
             }
+            NodeKind::Anchor => true,
         }
     }
 
@@ -695,6 +703,7 @@ impl NativeDom {
                 data.text.as_ref().map(|text| text.spec.text.clone()),
                 BTreeMap::new(),
             ),
+            NodeKind::Anchor => return None,
         };
         Some(LogicalNodeSnapshot {
             kind,
@@ -725,6 +734,16 @@ impl DomBackend for NativeDom {
         let node = self.allocate(NodeKind::Text, Some(TextBinding::new(value)));
         let stable = self.stable(node);
         self.emit(NativeBackendOp::CreateText { node: stable });
+        self.mark_structural_change();
+        node
+    }
+
+    /// Creates an invisible anchor that occupies a stable sibling position.
+    /// 创建一个占据稳定兄弟位置的不可见范围锚点。
+    fn create_anchor(&mut self) -> Self::Node {
+        let node = self.allocate(NodeKind::Anchor, None);
+        let stable = self.stable(node);
+        self.emit(NativeBackendOp::CreateAnchor { node: stable });
         self.mark_structural_change();
         node
     }
@@ -910,6 +929,10 @@ impl HeadlessBackend for NativeDom {
         NativeDom::listener(self, *node, event)
     }
 
+    fn listener_count(&self) -> usize {
+        NativeDom::listener_count(self)
+    }
+
     fn dom_snapshot(&self) -> DomSnapshot {
         let mut nodes: Vec<&NativeNode> = self.nodes.values().collect();
         nodes.sort_by_key(|node| node.stable_id);
@@ -953,6 +976,7 @@ impl HeadlessBackend for NativeDom {
                         node.text.as_ref().map(|text| text.spec.text.clone()),
                         BTreeMap::new(),
                     ),
+                    NodeKind::Anchor => (DomNodeKind::Anchor, None, None, BTreeMap::new()),
                 };
                 DomNodeSnapshot {
                     id: format!("node-{}", node.stable_id),

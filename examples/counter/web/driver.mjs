@@ -172,6 +172,11 @@ const webDir = path.resolve(webDirFrom(import.meta.url));
 const outDir = path.resolve(required('out'));
 const runDirLabel = required('run-dir-label');
 const scenarioPath = path.resolve(required('scenario'));
+const mount = args.get('mount') ?? 'counter';
+const isShow = mount === 'show';
+if (mount !== 'counter' && mount !== 'show') {
+  fail('UI_BROWSER_MOUNT', `unknown example mount ${mount}`);
+}
 const browserPath = args.get('browser');
 
 cleanOutDir(outDir);
@@ -415,8 +420,11 @@ try {
   let bundle;
   await runCheck('scenario_executes_in_chromium', async () => {
     const serialized = await page.evaluate(
-      ({ scenario, runDirLabel }) => window.fino.run_scenario(scenario, runDirLabel),
-      { scenario, runDirLabel },
+      ({ scenario, runDirLabel, isShow }) =>
+        isShow
+          ? window.fino.run_show_scenario(scenario, runDirLabel)
+          : window.fino.run_scenario(scenario, runDirLabel),
+      { scenario, runDirLabel, isShow },
     );
     bundle = JSON.parse(serialized);
     assert(bundle.result, 'the scenario must return a result');
@@ -431,6 +439,26 @@ try {
   });
 
   await runCheck('scenario_dom_matches_live_dom', async () => {
+    if (isShow) {
+      const live = await page.evaluate(() => ({
+        hostText: document.querySelector('button[aria-label="Show host"]')?.textContent,
+        action: document.querySelector('button[aria-label="Show action"]'),
+        innerHtmlSets: window.__finoInnerHtmlSets,
+      }));
+      const dom = JSON.parse(bundle.artifacts['dom.json']);
+      assertEqual(dom.roots.length, 1, 'Show DOM root count');
+      const anchors = dom.nodes.filter((node) => node.kind === 'anchor');
+      assertEqual(anchors.length, 2, 'Show anchor count');
+      const a11y = JSON.parse(bundle.artifacts['a11y.json']);
+      const host = a11y.nodes.find((node) => node.name === 'Show host');
+      assert(host, 'Show host must remain reachable');
+      assertEqual(host.text, 'HostToggleTail', 'Show host text after hiding');
+      assertEqual(live.hostText, 'HostToggleTail', 'live Show host text');
+      assertEqual(live.action, null, 'removed Show action must be unreachable');
+      assertEqual(live.innerHtmlSets, 0, 'innerHTML assignments during Show scenario');
+      assertEqual(pageErrors.length, 0, 'Show page errors');
+      return;
+    }
     const live = await page.evaluate(() => ({
       text: document.querySelector('button')?.textContent,
       inBody: document.querySelector('button')?.parentNode === document.body,
@@ -461,6 +489,7 @@ try {
   let conformance;
   let detachReinsert;
   let remount;
+  let showConformance;
   await runCheck('conformance_reports_shared_runtime_stats', async () => {
     const serialized = await page.evaluate(() => window.fino.run_conformance());
     conformance = JSON.parse(serialized);
@@ -510,6 +539,27 @@ try {
     assertEqual(detachReinsert.operations.remove, 1, 'detach probe remove operations');
   });
 
+  await runCheck('show_ranges_match_shared_semantics', async () => {
+    const serialized = await page.evaluate(() => window.fino.run_show_conformance_probe());
+    showConformance = JSON.parse(serialized);
+    assertEqual(showConformance.schema, 1, 'Show conformance schema');
+    assertEqual(showConformance.backend, 'web-headless', 'Show conformance backend');
+    assertEqual(showConformance.status, 'passed', 'Show conformance status');
+    assertEqual(showConformance.violations.length, 0, 'Show conformance violations');
+    assertEqual(showConformance.initial_tree.roots.length, 1, 'Show initial roots');
+    assertEqual(showConformance.hidden_tree.roots.length, 1, 'Show hidden roots');
+    assertEqual(showConformance.final_tree.roots.length, 0, 'Show final roots');
+    assertEqual(showConformance.checkpoints.hidden.action_matches, 0, 'hidden action matches');
+    assertEqual(showConformance.checkpoints.restored.action_matches, 1, 'restored action matches');
+    assertEqual(showConformance.checkpoints.hidden.listeners, 1, 'hidden listeners');
+    assertEqual(showConformance.checkpoints.restored.listeners, 2, 'restored listeners');
+    assert(showConformance.static_ids_stable, 'static Show ids stay stable');
+    assert(showConformance.stale_write_is_noop, 'removed dependencies do not reach the DOM');
+    assertEqual(showConformance.operations.create_anchor, 2, 'Show create_anchor operations');
+    assertEqual(showConformance.operations.remove, 5, 'Show remove operations');
+    assertEqual(showConformance.operations.unlisten, 3, 'Show unlisten operations');
+  });
+
   await runCheck('web_remount_restores_reachability', async () => {
     const serialized = await page.evaluate(() => window.fino.run_remount_probe());
     remount = JSON.parse(serialized);
@@ -543,6 +593,10 @@ try {
     `${JSON.stringify(remount, null, 2)}\n`,
   );
   fs.writeFileSync(
+    path.join(outDir, 'show_conformance.json'),
+    `${JSON.stringify(showConformance, null, 2)}\n`,
+  );
+  fs.writeFileSync(
     path.join(outDir, 'browser.json'),
     `${JSON.stringify({ schema: 1, backend: 'web-headless', status: 'passed', checks }, null, 2)}\n`,
   );
@@ -558,6 +612,7 @@ try {
         'conformance.json',
         'detach_reinsert.json',
         'remount.json',
+        'show_conformance.json',
       ],
     })}\n`,
   );

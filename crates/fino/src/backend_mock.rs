@@ -38,6 +38,9 @@ pub enum BackendOp {
     /// Creates one text node.
     /// 创建一个文本节点。
     CreateText,
+    /// Creates one invisible range anchor.
+    /// 创建一个不可见的范围锚点。
+    CreateAnchor,
     /// Inserts without clearing a parent.
     /// 插入节点且不清空父节点。
     Insert,
@@ -82,6 +85,7 @@ impl BackendOp {
         match self {
             Self::CreateElement(_) => "create_element",
             Self::CreateText => "create_text",
+            Self::CreateAnchor => "create_anchor",
             Self::Insert => "insert",
             Self::SetText { .. } => "set_text",
             Self::SetAttribute { .. } => "set_attribute",
@@ -104,6 +108,9 @@ enum MockNodeData {
         value: String,
         parent: Option<MockNode>,
     },
+    Anchor {
+        parent: Option<MockNode>,
+    },
 }
 
 impl MockNodeData {
@@ -111,7 +118,9 @@ impl MockNodeData {
     /// 读取统一父节点字段，不暴露节点种类的内部表示。
     fn parent(&self) -> Option<MockNode> {
         match self {
-            Self::Element { parent, .. } | Self::Text { parent, .. } => *parent,
+            Self::Element { parent, .. } | Self::Text { parent, .. } | Self::Anchor { parent } => {
+                *parent
+            }
         }
     }
 
@@ -119,7 +128,9 @@ impl MockNodeData {
     /// 在插入或分离时为任意节点种类更新父节点关系。
     fn set_parent(&mut self, new_parent: Option<MockNode>) {
         match self {
-            Self::Element { parent, .. } | Self::Text { parent, .. } => *parent = new_parent,
+            Self::Element { parent, .. } | Self::Text { parent, .. } | Self::Anchor { parent } => {
+                *parent = new_parent;
+            }
         }
     }
 }
@@ -198,6 +209,7 @@ impl MockBackend {
                 }
                 true
             }
+            Some(MockNodeData::Anchor { .. }) => true,
             None => false,
         }
     }
@@ -265,6 +277,7 @@ impl MockBackend {
                 attributes: BTreeMap::new(),
                 children: Vec::new(),
             }),
+            MockNodeData::Anchor { .. } => None,
         }
     }
 }
@@ -300,6 +313,17 @@ impl DomBackend for MockBackend {
         );
         self.roots.insert(node);
         self.operations.push(BackendOp::CreateText);
+        node
+    }
+
+    /// Creates an invisible anchor that participates only in sibling order.
+    /// 创建一个只参与兄弟顺序的不可见范围锚点。
+    fn create_anchor(&mut self) -> Self::Node {
+        let node = self.allocate_node();
+        self.nodes
+            .insert(node, MockNodeData::Anchor { parent: None });
+        self.roots.insert(node);
+        self.operations.push(BackendOp::CreateAnchor);
         node
     }
 
@@ -475,6 +499,12 @@ impl HeadlessBackend for MockBackend {
         self.append_text(*node, &mut output).then_some(output)
     }
 
+    /// Returns the number of live listener registrations.
+    /// 返回仍存活的监听注册数量。
+    fn listener_count(&self) -> usize {
+        self.listeners.len()
+    }
+
     /// Finds a matching callback without retaining a backend borrow during dispatch.
     /// 查找匹配回调，使事件分发期间无需保持后端借用。
     fn listener(&self, node: &Self::Node, event: EventKind) -> Option<EventListener> {
@@ -545,6 +575,14 @@ impl HeadlessBackend for MockBackend {
                         Vec::new(),
                         None,
                         Some(value.clone()),
+                        BTreeMap::new(),
+                    ),
+                    MockNodeData::Anchor { parent } => common(
+                        DomNodeKind::Anchor,
+                        *parent,
+                        Vec::new(),
+                        None,
+                        None,
                         BTreeMap::new(),
                     ),
                 }

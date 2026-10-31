@@ -24,6 +24,7 @@ use crate::{
 pub struct WebNode {
     node: Node,
     tag: Option<Tag>,
+    anchor: bool,
 }
 
 impl PartialEq for WebNode {
@@ -55,6 +56,7 @@ pub struct WebListener(u64);
 enum WebBackendOp {
     CreateElement(Tag),
     CreateText,
+    CreateAnchor,
     Insert,
     SetText {
         node: u64,
@@ -77,6 +79,7 @@ impl WebBackendOp {
         match self {
             Self::CreateElement(_) => "create_element",
             Self::CreateText => "create_text",
+            Self::CreateAnchor => "create_anchor",
             Self::Insert => "insert",
             Self::SetText { .. } => "set_text",
             Self::SetAttribute { .. } => "set_attribute",
@@ -158,9 +161,9 @@ impl DomBackend {
 
     /// Assigns a stable creation-order identifier to one real browser node.
     /// 为一个真实浏览器节点分配稳定的创建顺序标识。
-    fn allocate_node(&mut self, node: Node, tag: Option<Tag>) -> WebNode {
+    fn allocate_node(&mut self, node: Node, tag: Option<Tag>, anchor: bool) -> WebNode {
         self.next_node += 1;
-        let handle = WebNode { node, tag };
+        let handle = WebNode { node, tag, anchor };
         self.nodes.push(NodeRecord {
             id: self.next_node,
             node: handle.clone(),
@@ -277,6 +280,9 @@ impl DomBackend {
     /// 把一个可达真实节点投影为不含句柄的逻辑树节点。
     fn logical_node(&self, node: &WebNode) -> Option<LogicalNodeSnapshot> {
         self.record_id(&node.node)?;
+        if node.anchor {
+            return None;
+        }
         match node.tag {
             Some(Tag::Button) => {
                 let element = Self::element(&node.node);
@@ -321,7 +327,7 @@ impl crate::dom_api::DomBackend for DomBackend {
             .document
             .create_element(name)
             .expect("creating a supported element must succeed");
-        let handle = self.allocate_node(element.unchecked_into(), Some(tag));
+        let handle = self.allocate_node(element.unchecked_into(), Some(tag), false);
         self.emit(WebBackendOp::CreateElement(tag));
         handle
     }
@@ -330,8 +336,17 @@ impl crate::dom_api::DomBackend for DomBackend {
     /// 创建带初始内容的真实文本节点。
     fn create_text(&mut self, value: &str) -> Self::Node {
         let text = self.document.create_text_node(value);
-        let handle = self.allocate_node(text.unchecked_into(), None);
+        let handle = self.allocate_node(text.unchecked_into(), None, false);
         self.emit(WebBackendOp::CreateText);
+        handle
+    }
+
+    /// Creates an empty text node used only as an invisible range anchor.
+    /// 创建只作为不可见范围锚点的空文本节点。
+    fn create_anchor(&mut self) -> Self::Node {
+        let text = self.document.create_text_node("");
+        let handle = self.allocate_node(text.unchecked_into(), None, true);
+        self.emit(WebBackendOp::CreateAnchor);
         handle
     }
 
@@ -511,6 +526,12 @@ impl HeadlessBackend for DomBackend {
         }))
     }
 
+    /// Returns the number of live listener registrations.
+    /// 返回仍存活的监听注册数量。
+    fn listener_count(&self) -> usize {
+        self.listeners.len()
+    }
+
     /// Serializes the real tree with stable creation-order identifiers.
     /// 使用稳定创建顺序标识序列化真实树。
     fn dom_snapshot(&self) -> DomSnapshot {
@@ -532,26 +553,30 @@ impl HeadlessBackend for DomBackend {
                     .iter()
                     .filter_map(|child| self.node_id_string(child))
                     .collect();
-                let (kind, tag, text, attributes) = match node.tag {
-                    Some(Tag::Button) => {
-                        let element = Self::element(&node.node);
-                        let mut attributes = BTreeMap::new();
-                        if let Some(value) = element.get_attribute("aria-label") {
-                            attributes.insert("aria-label".to_owned(), value);
+                let (kind, tag, text, attributes) = if node.anchor {
+                    (DomNodeKind::Anchor, None, None, BTreeMap::new())
+                } else {
+                    match node.tag {
+                        Some(Tag::Button) => {
+                            let element = Self::element(&node.node);
+                            let mut attributes = BTreeMap::new();
+                            if let Some(value) = element.get_attribute("aria-label") {
+                                attributes.insert("aria-label".to_owned(), value);
+                            }
+                            (
+                                DomNodeKind::Element,
+                                Some("button".to_owned()),
+                                None,
+                                attributes,
+                            )
                         }
-                        (
-                            DomNodeKind::Element,
-                            Some("button".to_owned()),
+                        None => (
+                            DomNodeKind::Text,
                             None,
-                            attributes,
-                        )
+                            Some(node.node.node_value().unwrap_or_default()),
+                            BTreeMap::new(),
+                        ),
                     }
-                    None => (
-                        DomNodeKind::Text,
-                        None,
-                        Some(node.node.node_value().unwrap_or_default()),
-                        BTreeMap::new(),
-                    ),
                 };
                 DomNodeSnapshot {
                     id: format!("node-{}", record.id),

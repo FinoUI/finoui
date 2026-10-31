@@ -35,9 +35,26 @@ struct DriverCheck {
     message: Option<String>,
 }
 
-/// Builds the wasm bundle, runs the unchanged scenario in Chromium, and returns its result.
-/// 构建 wasm 包，在 Chromium 中运行未修改的场景，并返回其结果。
+/// Builds the wasm bundle, runs the unchanged counter scenario in Chromium, and returns its result.
+/// 构建 wasm 包，在 Chromium 中运行未修改的计数器场景，并返回其结果。
 pub fn run_web_scenario(scenario_path: &Path, out: &Path) -> Result<ScenarioResult, ToolError> {
+    run_web_scenario_with_mount(scenario_path, out, None)
+}
+
+/// Runs the same browser pipeline with the example's explicit Show mount.
+/// 使用示例显式提供的 Show mount 运行同一浏览器流水线。
+pub fn run_web_show_scenario(
+    scenario_path: &Path,
+    out: &Path,
+) -> Result<ScenarioResult, ToolError> {
+    run_web_scenario_with_mount(scenario_path, out, Some("show"))
+}
+
+fn run_web_scenario_with_mount(
+    scenario_path: &Path,
+    out: &Path,
+    mount: Option<&str>,
+) -> Result<ScenarioResult, ToolError> {
     let example_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace = example_dir
         .parent()
@@ -85,6 +102,9 @@ pub fn run_web_scenario(scenario_path: &Path, out: &Path) -> Result<ScenarioResu
         .arg(&pkg_dir)
         .arg("--run-dir-label")
         .arg(out.as_os_str());
+    if let Some(mount) = mount {
+        command.arg("--mount").arg(mount);
+    }
     if let Some(browser) = env::var_os("FINO_CHROMIUM") {
         command.arg("--browser").arg(browser);
     }

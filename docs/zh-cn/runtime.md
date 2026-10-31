@@ -93,7 +93,32 @@ fn counter() -> View {
 
 `View::mount` 安装组件 Owner，只调用一次构建闭包，挂载静态模板，然后把事件与 Effect 绑定到已有节点。闭包内的 `signal()` 通过该 Owner 解析。被多个生成闭包捕获的 Signal 会分别克隆进各闭包，因此组件不会重新执行，点击只更新目标绑定。
 
-`view!` 直接下沉为 `View`，调用点不需要 `runtime` 或 `owner`。Host 使用 `fino::view::mount_component`（构造前工作可用 `with_owner`），使 `signal()` 能取得组件 Owner。不支持的标签、事件、属性以及非闭包动态值会在对应源码 Span 上产生编译错误；`trybuild` 固定这些诊断。完整 Tailwind-like class 子集、`Show`、`For`、完整 RSX 与热重载仍不在范围内。
+`view!` 直接下沉为 `View`，调用点不需要 `runtime` 或 `owner`。Host 使用 `fino::view::mount_component`（构造前工作可用 `with_owner`），使 `signal()` 能取得组件 Owner。不支持的标签、事件、属性以及非闭包动态值会在对应源码 Span 上产生编译错误；`trybuild` 固定这些诊断。完整 Tailwind-like class 子集、完整 RSX `Show`／`For` 语法与热重载仍不在范围内。
+
+### 手工 Show 范围
+
+M1 通过手工 API 增加结构响应式；完整 RSX `Show` 语法仍不在范围内。`fino::show::Show` 挂载一对锚点，并在两者之间持有一个条件范围：
+
+```rust
+let details = Show::mount(
+    runtime,
+    owner,
+    &button,
+    Some(&tail),
+    "show/details",
+    move || visible.get(),
+    move |runtime, child| details_button(runtime, child, count.clone()),
+);
+owner.keep_alive(details);
+```
+
+- 锚点只创建一次并保持稳定；静态兄弟及其 `NodeId` 绝不替换。
+- 条件 Effect 只在真正的 `false → true` 切换时创建子 Owner 与内容；写入相同值不执行操作。
+- `true → false` 时先释放子 Owner，停止事件分发并解绑 Effect 与监听，再从父节点分离内容节点。
+- 被移除作用域不保留任何存活 Effect、监听或帧请求；之后写入其 Signal 不会触达后端。
+- 嵌套 `Show` Owner 递归释放，重复调用 `Show::dispose` 或 Owner 释放均幂等。
+- 动态范围由父 Owner 持有；丢弃返回句柄不会卸载它。调用 `Show::dispose` 可提前释放。
+- `RangeAnchor` 暴露起止锚点句柄，供后续 `For` 与 keyed 范围能力复用。
 
 ## 统一 DOM API
 

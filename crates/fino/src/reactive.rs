@@ -308,6 +308,16 @@ impl Owner {
         }
     }
 
+    /// Creates an owner nested under this one, sharing the same diagnostics registry.
+    /// 创建嵌套在该 Owner 下并共享同一诊断注册表的 Owner。
+    pub fn child(&self) -> Self {
+        Self {
+            inner: self.inner.child(),
+            registry: Rc::clone(&self.registry),
+            disposed: Rc::new(Cell::new(false)),
+        }
+    }
+
     /// Creates a signal owned by this owner.
     /// 创建由该 Owner 管理的 Signal。
     pub fn signal<T: 'static>(&self, value: T) -> Signal<T> {
@@ -408,6 +418,20 @@ impl Owner {
         self.registry
             .borrow()
             .snapshot(component_executions, self.is_disposed())
+    }
+
+    /// Keeps one value alive until this owner is disposed.
+    /// 让一个值存活到该 Owner 被释放。
+    ///
+    /// The value is dropped on the owner's thread during normal cleanup, so
+    /// non-`Send` UI handles can follow the owner without becoming global state.
+    /// 值会在 Owner 线程的正常清理期间释放，因此非 `Send` UI 句柄可以跟随
+    /// Owner 生命周期，而不会变成全局状态。
+    pub fn keep_alive<T: 'static>(&self, value: T) {
+        let value = SendWrapper::new(RefCell::new(Some(value)));
+        self.register_cleanup(move || {
+            let _ = value.take();
+        });
     }
 
     pub(crate) fn register_cleanup(&self, cleanup: impl FnOnce() + Send + Sync + 'static) {

@@ -17,6 +17,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::{
     runner::{mount_counter, mount_counter_with_state},
+    show::{mount_show, run_show_conformance},
     web::new_host,
 };
 
@@ -86,6 +87,28 @@ pub fn run_conformance() -> Result<String, JsValue> {
     let host = new_host(Environment::default());
     let report = crate::conformance::run_conformance(host)
         .map_err(|message| tool_error("UI_CONFORMANCE", message))?;
+    let violations = report.validate();
+    let status = if violations.is_empty() {
+        "passed"
+    } else {
+        "failed"
+    };
+    let mut value = serde_json::to_value(&report)
+        .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))?;
+    value["status"] = serde_json::Value::String(status.to_owned());
+    value["violations"] = serde_json::to_value(&violations)
+        .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))?;
+    serde_json::to_string(&value)
+        .map_err(|error| tool_error("UI_CONFORMANCE_SERIALIZATION", error.to_string()))
+}
+
+/// Runs the shared manual Show sequence against the real browser DOM.
+/// 针对真实浏览器 DOM 运行共享手工 Show 序列。
+#[wasm_bindgen]
+pub fn run_show_conformance_probe() -> Result<String, JsValue> {
+    let host = new_host(Environment::default());
+    let report =
+        run_show_conformance(host).map_err(|message| tool_error("UI_SHOW_CONFORMANCE", message))?;
     let violations = report.validate();
     let status = if violations.is_empty() {
         "passed"
@@ -196,10 +219,44 @@ pub fn run_scenario(scenario_json: &str, run_dir: &str) -> Result<String, JsValu
     .map_err(|error| tool_error("UI_ARTIFACT_SERIALIZATION", error.to_string()))
 }
 
+/// Runs the unchanged Show scenario against the real DOM inside the browser.
+/// 在浏览器内针对真实 DOM 运行未修改的 Show 场景。
+#[wasm_bindgen]
+pub fn run_show_scenario(scenario_json: &str, run_dir: &str) -> Result<String, JsValue> {
+    let scenario: Scenario = serde_json::from_str(scenario_json)
+        .map_err(|error| tool_error("UI_SCENARIO_INVALID_JSON", error.to_string()))?;
+    let host = new_host(scenario.environment.clone());
+    let run = run_on_host_collect(&scenario, Path::new(run_dir), host, mount_show_on_body)
+        .map_err(tool_error_value)?;
+
+    let artifacts = run
+        .artifacts
+        .into_iter()
+        .map(|(path, bytes)| {
+            String::from_utf8(bytes)
+                .map(|contents| (path, contents))
+                .map_err(|error| tool_error("UI_ARTIFACT_SERIALIZATION", error.to_string()))
+        })
+        .collect::<Result<BTreeMap<_, _>, JsValue>>()?;
+    serde_json::to_string(&ScenarioBundle {
+        result: run.result,
+        artifacts,
+    })
+    .map_err(|error| tool_error("UI_ARTIFACT_SERIALIZATION", error.to_string()))
+}
+
 /// Mounts the shared counter and attaches its root to `document.body`.
 /// 挂载共享计数器并把其根节点附加到 `document.body`。
 fn mount_on_body(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
     let root = mount_counter(runtime, owner);
+    runtime.backend_mut().mount_to_body(&root);
+    root
+}
+
+/// Mounts the manual Show probe and attaches its root to `document.body`.
+/// 挂载手工 Show 探针并把其根节点附加到 `document.body`。
+fn mount_show_on_body(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
+    let root = mount_show(runtime, owner);
     runtime.backend_mut().mount_to_body(&root);
     root
 }

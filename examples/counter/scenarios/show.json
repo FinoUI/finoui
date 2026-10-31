@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "name": "show/conditionals",
+  "mount": "show",
+  "environment": {
+    "viewport": [800, 600],
+    "dpr": 1.0,
+    "locale": "zh-CN",
+    "color_scheme": "dark",
+    "seed": 42
+  },
+  "steps": [
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Show host",
+        "value": "HostToggleTail"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Show toggle"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Show action",
+        "value": "Value: 0"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Show host",
+        "value": "HostToggleValue: 0Tail"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Show action"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Show action",
+        "value": "Value: 1"
+      }
+    },
+    {
+      "click": {
+        "role": "button",
+        "name": "Show toggle"
+      }
+    },
+    {
+      "assert_text": {
+        "role": "button",
+        "name": "Show host",
+        "value": "HostToggleTail"
+      }
+    },
+    {
+      "advance_frames": 1
+    },
+    {
+      "capture": ["dom", "a11y", "reactive"]
+    }
+  ]
+}
