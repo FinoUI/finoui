@@ -7,7 +7,15 @@ use std::{
     process::{Command, Output},
 };
 
-use fino::{headless::SnapshotKind, inspect::inspect_artifact};
+use fino::{
+    backend_mock::MockBackend,
+    headless::{Environment, HeadlessHost, SnapshotKind},
+    inspect::inspect_artifact,
+};
+use fino_counter::{
+    conformance::{ConformanceReport, DetachReinsertResult, run_detach_reinsert},
+    runner::run_mock_conformance,
+};
 use serde_json::Value;
 
 /// Builds the example binary command used by browser acceptance tests.
@@ -87,6 +95,9 @@ fn web_headless_runs_the_same_scenario_with_real_dom_probes() {
         "tab_order_reaches_button",
         "scenario_executes_in_chromium",
         "scenario_dom_matches_live_dom",
+        "conformance_reports_shared_runtime_stats",
+        "detach_reinsert_matches_shared_semantics",
+        "web_remount_restores_reachability",
     ] {
         assert!(
             checks
@@ -95,6 +106,38 @@ fn web_headless_runs_the_same_scenario_with_real_dom_probes() {
             "missing passing browser check {expected}"
         );
     }
+
+    let mut web: ConformanceReport = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("conformance.json")).expect("conformance file"),
+    )
+    .expect("conformance JSON");
+    let mock = run_mock_conformance().expect("mock conformance");
+    assert_eq!(web.backend, "web-headless");
+    web.backend = mock.backend.clone();
+    assert_eq!(
+        web, mock,
+        "Web and Mock must agree on trees, events, operations, and shared counters"
+    );
+
+    let mut web_detach: DetachReinsertResult = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("detach_reinsert.json")).expect("detach file"),
+    )
+    .expect("detach JSON");
+    let mock_host = HeadlessHost::new(MockBackend::new(), Environment::default());
+    let mock_detach = run_detach_reinsert(mock_host).expect("mock detach probe");
+    web_detach.backend = mock_detach.backend.clone();
+    assert_eq!(
+        web_detach, mock_detach,
+        "Web and Mock must retain and reinsert the same child node"
+    );
+
+    let remount: Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("remount.json")).expect("remount file"),
+    )
+    .expect("remount JSON");
+    assert_eq!(remount["removed_matches"], 0);
+    assert_eq!(remount["remounted_matches"], 1);
+    assert_eq!(remount["remounted_tree_roots"], 1);
 }
 
 /// Proves a failed rerun removes stale captures without deleting unrelated files.

@@ -20,6 +20,9 @@ pub mod headless;
 /// Read-only structured artifact inspection.
 /// 只读结构化产物检查。
 pub mod inspect;
+/// Shared runtime metrics across Mock, Web, and Native backends.
+/// 跨 Mock、Web 与 Native 后端共享的运行指标。
+pub mod metrics;
 /// Native DOM, text, layout, offscreen, and winit/wgpu host.
 /// 原生 DOM、文本、布局、离屏与 winit/wgpu Host。
 #[cfg(feature = "native")]

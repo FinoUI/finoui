@@ -31,6 +31,23 @@ CPU frame time / GPU frame time
 
 优化必须依据这些计数和真实帧时间，不能只依据文本测量微基准。
 
+### 运行时统计
+
+`fino::metrics::RuntimeStats` 是一致性测试与 CI 产物共用的跨后端结构：
+
+```text
+component_executions
+effect_executions
+backend_set_text
+nodes_created
+nodes_removed
+shaped_texts
+layout_nodes
+frames_requested
+```
+
+`HeadlessHost::runtime_stats()` 与 `WindowContext::runtime_stats()` 把响应式执行计数与后端计数合并。Mock 与 Web 不拥有原生文本或帧调度，因此其 `shaped_texts`、`layout_nodes` 与 `frames_requested` 为零；Native 报告真实的 shaping、布局盒与合并帧请求工作量。`BackendStats` 从规范化操作日志推导 `backend_set_text`、`nodes_created` 与 `nodes_removed`，所以每个后端统计的是同一组操作名。
+
 ## 测试体系
 
 ### 响应式单元测试
@@ -57,6 +74,15 @@ CPU frame time / GPU frame time
 ```
 
 比较规范化后的逻辑树、事件结果与操作次数，不比较平台特有节点句柄。
+
+计数器示例拥有共享序列与稳定报告。Mock 与 Native 通过 Cargo 输出报告；浏览器驱动为 Web 写入同一份报告：
+
+```bash
+cargo run -p fino_counter -- conformance --backend mock --format json
+cargo run -p fino_counter -- conformance --backend native-offscreen --format json
+```
+
+报告包含 `tree` 与 `final_tree`（`LogicalTreeSnapshot`）、无障碍投影、点击结果、`checkpoints` 与 `final_stats`（`RuntimeStats`）、规范化 `operations`，以及 100 次增量的 `batch` 结果。所有映射使用稳定键顺序，schema 中不出现平台句柄。`conformance` 命令会校验已实现的契约字段，在 JSON 与人类可读输出中打印 `status` 与 `violations`，任一字段校验失败时以非零状态退出。
 
 ### 文本与布局测试
 

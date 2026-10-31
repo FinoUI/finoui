@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     dom_api::{DomBackend, Event, EventContext, EventKind, EventListener, Role, Selector},
+    metrics::{BackendStats, RuntimeStats},
     reactive::{Owner, ReactiveSnapshot},
     runtime::Runtime,
 };
@@ -231,6 +232,39 @@ pub struct A11ySnapshot {
     pub nodes: Vec<A11yNodeSnapshot>,
 }
 
+/// Backend-neutral logical node without ids, addresses, or platform handles.
+/// 不含 ID、地址或平台句柄的后端无关逻辑节点。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LogicalNodeSnapshot {
+    /// Node kind.
+    /// 节点种类。
+    pub kind: DomNodeKind,
+    /// Element tag, when applicable.
+    /// 适用时的元素标签。
+    pub tag: Option<String>,
+    /// Text content for text nodes.
+    /// 文本节点的文本内容。
+    pub text: Option<String>,
+    /// Stable attribute mapping.
+    /// 稳定属性映射。
+    pub attributes: BTreeMap<String, String>,
+    /// Children in committed order.
+    /// 按提交顺序排列的子节点。
+    pub children: Vec<LogicalNodeSnapshot>,
+}
+
+/// Versioned reachable logical tree used by cross-backend conformance.
+/// 跨后端一致性检查使用的版本化可达逻辑树。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LogicalTreeSnapshot {
+    /// Snapshot schema version.
+    /// 快照 schema 版本。
+    pub schema: u32,
+    /// Attached roots in stable creation order.
+    /// 按稳定创建顺序排列的已挂载根节点。
+    pub roots: Vec<LogicalNodeSnapshot>,
+}
+
 /// One structured trace event with no wall-clock timestamp.
 /// 不含实际时间戳的单条结构化 trace 事件。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -285,6 +319,72 @@ pub trait HeadlessBackend: DomBackend {
     /// Returns normalized structured operations in stable order.
     /// 按稳定顺序返回规范化结构化操作。
     fn operation_log(&self) -> Vec<BackendOperation>;
+    /// Captures the reachable logical tree without platform handles.
+    /// 捕获不含平台句柄的可达逻辑树。
+    ///
+    /// The default projects the backend's existing DOM snapshot so older
+    /// implementations keep compiling with a truthful tree. Backends with more
+    /// precise reachability rules override it.
+    /// 默认投影后端已有的 DOM 快照，使旧实现继续编译并得到真实树；
+    /// 具有更精确可达规则的后端会覆盖它。
+    fn logical_tree(&self) -> LogicalTreeSnapshot {
+        fn build(
+            id: &str,
+            nodes: &BTreeMap<&str, &DomNodeSnapshot>,
+        ) -> Option<LogicalNodeSnapshot> {
+            let node = nodes.get(id)?;
+            Some(LogicalNodeSnapshot {
+                kind: node.kind,
+                tag: node.tag.clone(),
+                text: node.text.clone(),
+                attributes: node.attributes.clone(),
+                children: node
+                    .children
+                    .iter()
+                    .filter_map(|child| build(child, nodes))
+                    .collect(),
+            })
+        }
+
+        let snapshot = self.dom_snapshot();
+        let nodes: BTreeMap<&str, &DomNodeSnapshot> = snapshot
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node))
+            .collect();
+        LogicalTreeSnapshot {
+            schema: 1,
+            roots: snapshot
+                .roots
+                .iter()
+                .filter_map(|root| build(root, &nodes))
+                .collect(),
+        }
+    }
+    /// Derives shared counters from the normalized operation log.
+    /// 从规范化操作日志推导共享计数。
+    fn operation_stats(&self) -> BackendStats {
+        let mut stats = BackendStats::default();
+        for operation in self.operation_log() {
+            match operation.operation.as_str() {
+                "create_element" | "create_text" => stats.nodes_created += 1,
+                "remove" => stats.nodes_removed += 1,
+                "set_text" => stats.backend_set_text += 1,
+                _ => {}
+            }
+        }
+        stats
+    }
+    /// Returns backend-side runtime counters; platform extras default to zero.
+    /// 返回后端侧运行时计数；平台特有计数默认为零。
+    fn backend_stats(&self) -> BackendStats {
+        self.operation_stats()
+    }
+    /// Takes one pending coalesced frame request when the backend schedules frames.
+    /// 后端调度帧时取走一个待处理的合并帧请求。
+    fn take_frame_request(&self) -> bool {
+        false
+    }
     /// Captures real layout state when the backend supports it.
     /// 后端支持时捕获真实布局状态。
     fn layout_snapshot(&mut self) -> Option<Value> {
@@ -538,6 +638,22 @@ impl<B: HeadlessBackend + 'static> HeadlessHost<B> {
             .snapshot_with_component_executions(self.runtime.component_executions().get())
     }
 
+    /// Returns the unified runtime counters for the current host instance.
+    /// 返回当前 Host 实例的统一运行时计数。
+    pub fn runtime_stats(&self) -> RuntimeStats {
+        let reactive = self.reactive_snapshot();
+        let effect_executions = reactive
+            .effects
+            .iter()
+            .map(|effect| effect.executions)
+            .sum();
+        RuntimeStats::from_parts(
+            reactive.component_executions,
+            effect_executions,
+            self.runtime.backend().backend_stats(),
+        )
+    }
+
     /// Returns acceptance counters for the current host instance.
     /// 返回当前 Host 实例的验收计数。
     pub fn execution_counters(&self) -> ExecutionCounters {
@@ -652,5 +768,116 @@ impl<B: HeadlessBackend + 'static> HeadlessHost<B> {
             kind: kind.to_owned(),
             details,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend_mock::{MockBackend, MockListener, MockNode};
+    use crate::dom_api::{Attribute, Tag};
+
+    /// Mimics a downstream backend written before `logical_tree` existed.
+    /// 模拟在 `logical_tree` 出现前编写的下游后端。
+    struct LegacyBackend(MockBackend);
+
+    impl DomBackend for LegacyBackend {
+        type Node = MockNode;
+        type Listener = MockListener;
+
+        fn create_element(&mut self, tag: Tag) -> Self::Node {
+            self.0.create_element(tag)
+        }
+
+        fn create_text(&mut self, value: &str) -> Self::Node {
+            self.0.create_text(value)
+        }
+
+        fn insert_before(
+            &mut self,
+            parent: &Self::Node,
+            child: &Self::Node,
+            anchor: Option<&Self::Node>,
+        ) {
+            self.0.insert_before(parent, child, anchor);
+        }
+
+        fn remove(&mut self, node: &Self::Node) {
+            self.0.remove(node);
+        }
+
+        fn set_text(&mut self, node: &Self::Node, value: &str) {
+            self.0.set_text(node, value);
+        }
+
+        fn set_attribute(&mut self, node: &Self::Node, name: Attribute, value: Option<&str>) {
+            self.0.set_attribute(node, name, value);
+        }
+
+        fn listen(
+            &mut self,
+            node: &Self::Node,
+            event: EventKind,
+            listener: EventListener,
+        ) -> Self::Listener {
+            self.0.listen(node, event, listener)
+        }
+
+        fn unlisten(&mut self, listener: Self::Listener) {
+            self.0.unlisten(listener);
+        }
+    }
+
+    impl HeadlessBackend for LegacyBackend {
+        fn backend_name(&self) -> &'static str {
+            self.0.backend_name()
+        }
+
+        fn supports_snapshot(&self, kind: SnapshotKind) -> bool {
+            self.0.supports_snapshot(kind)
+        }
+
+        fn find_all(&self, selector: &Selector) -> Vec<Self::Node> {
+            self.0.find_all(selector)
+        }
+
+        fn text_content(&self, node: &Self::Node) -> Option<String> {
+            self.0.text_content(node)
+        }
+
+        fn listener(&self, node: &Self::Node, event: EventKind) -> Option<EventListener> {
+            self.0.listener(node, event)
+        }
+
+        fn dom_snapshot(&self) -> DomSnapshot {
+            self.0.dom_snapshot()
+        }
+
+        fn a11y_snapshot(&self) -> A11ySnapshot {
+            self.0.a11y_snapshot()
+        }
+
+        fn operation_log(&self) -> Vec<BackendOperation> {
+            self.0.operation_log()
+        }
+    }
+
+    /// Keeps downstream source compatibility without faking an empty tree.
+    /// 保持下游源码兼容，同时不伪造空树。
+    #[test]
+    fn legacy_backend_receives_a_default_logical_tree() {
+        let mut backend = LegacyBackend(MockBackend::new());
+        let button = backend.create_element(Tag::Button);
+        backend.set_attribute(&button, Attribute::AriaLabel, Some("Legacy"));
+        let text = backend.create_text("legacy");
+        backend.insert_before(&button, &text, None);
+
+        let tree = backend.logical_tree();
+
+        assert_eq!(tree.schema, 1);
+        assert_eq!(tree.roots.len(), 1);
+        assert_eq!(tree.roots[0].tag.as_deref(), Some("button"));
+        assert_eq!(tree.roots[0].children.len(), 1);
+        assert_eq!(tree.roots[0].children[0].text.as_deref(), Some("legacy"));
     }
 }

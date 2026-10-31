@@ -44,9 +44,12 @@ PointerInput { window, position }
 
 空白或仅无障碍写入不请求帧。写入相同文本是空操作。一帧呈现前重复请求会合并为一次。
 
+`NativeDom::set_button_color` 是纯绘制变化：它请求绘制，但不触发 shaping 或布局。`WindowContext::runtime_stats()` 暴露单个窗口的共享 `RuntimeStats`，包含真实的 `shaped_texts`、`layout_nodes` 与合并后的 `frames_requested`。仅宽度变化会为可见文本重跑行布局，但不会重新 shaping 未变化内容。
+
 ## 生命周期
 
 - `resize` 更新逻辑视口、使布局失效，并保留 DOM 与 count。
+- `remove` 只分离选中节点。后代、generational 句柄与监听保持有效，因此同一子树可以重新插入。
 - `SurfaceLost` 只释放 GPU 状态。DOM、已 shaping 文本、布局、焦点与信号都保留。
 - 重建 Surface 时从共享 adapter 与 device 重新配置。
 - 关闭窗口只释放对应 `WindowContext`、窗口 Owner、监听与 Surface。

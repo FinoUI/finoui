@@ -7,12 +7,24 @@
   </head>
   <body>
     <script type="module">
-      import init, { CounterPage, run_scenario } from "./pkg/fino_counter.js";
+      import init, {
+        CounterPage,
+        run_conformance,
+        run_detach_reinsert_probe,
+        run_remount_probe,
+        run_scenario,
+      } from "./pkg/fino_counter.js";
 
       // The JavaScript caller owns the page object; no global current page is assumed.
       // 页面对象由 JavaScript 调用方持有，框架不假设存在全局当前页面。
       window.finoReady = init().then(() => {
-        window.fino = { CounterPage, run_scenario };
+        window.fino = {
+          CounterPage,
+          run_conformance,
+          run_detach_reinsert_probe,
+          run_remount_probe,
+          run_scenario,
+        };
       });
     </script>
   </body>

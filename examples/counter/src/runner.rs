@@ -9,11 +9,12 @@ use fino::{
     backend_mock::MockBackend,
     dom_api::{Role, Selector},
     headless::{Environment, ExecutionCounters, HeadlessError, HeadlessHost},
+    metrics::RuntimeStats,
     scenario::{self, Scenario, ScenarioResult, Status, ToolError},
 };
 use serde::Serialize;
 
-use crate::mount_counter;
+use crate::{conformance::ConformanceReport, mount_counter};
 
 /// One counter smoke-check result.
 /// 单项计数器冒烟检查结果。
@@ -49,6 +50,9 @@ pub struct CounterCheckReport {
     /// Acceptance counters after the smoke check.
     /// 冒烟检查后的验收计数。
     pub counters: ExecutionCounters,
+    /// Unified runtime counters after the smoke check.
+    /// 冒烟检查后的统一运行时计数。
+    pub runtime_stats: RuntimeStats,
 }
 
 /// Runs the counter's initial-text and consecutive-click checks.
@@ -79,7 +83,24 @@ pub fn check_counter() -> CounterCheckReport {
         },
         checks,
         counters: host.execution_counters(),
+        runtime_stats: host.runtime_stats(),
     }
+}
+
+/// Runs the shared conformance sequence on the deterministic mock backend.
+/// 在确定性 Mock 后端运行共享一致性序列。
+pub fn run_mock_conformance() -> Result<ConformanceReport, String> {
+    let host = HeadlessHost::new(MockBackend::new(), Environment::default());
+    crate::conformance::run_conformance(host)
+}
+
+/// Runs the shared conformance sequence on the native offscreen backend.
+/// 在原生离屏后端运行共享一致性序列。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_native_offscreen_conformance() -> Result<ConformanceReport, String> {
+    let backend = offscreen_backend(Size::new(800.0, 600.0), 1.0);
+    let host = HeadlessHost::new(backend, Environment::default());
+    crate::conformance::run_conformance(host)
 }
 
 /// Runs a scenario with the counter mount supplied explicitly to the generic library.

@@ -18,8 +18,9 @@ use crate::{
     dom_api::{Attribute, DomBackend, EventKind, EventListener, Role, Selector, Tag},
     headless::{
         A11yNodeSnapshot, A11ySnapshot, BackendOperation, DomNodeKind, DomNodeSnapshot,
-        DomSnapshot, HeadlessBackend, SnapshotKind,
+        DomSnapshot, HeadlessBackend, LogicalNodeSnapshot, LogicalTreeSnapshot, SnapshotKind,
     },
+    metrics::BackendStats,
     text::{ShapedText, TextConstraints, TextEngine, TextLayout, TextSpec},
 };
 
@@ -148,6 +149,9 @@ pub struct NativeDom {
     last_layout: Option<LayoutSnapshot>,
     last_display_list: Option<DisplayList>,
     style: ButtonStyle,
+    button_color: Color,
+    shaped_texts: u64,
+    layout_nodes: u64,
 }
 
 impl NativeDom {
@@ -215,6 +219,9 @@ impl NativeDom {
             last_layout: None,
             last_display_list: None,
             style: ButtonStyle::default(),
+            button_color: Color::rgba(0.14, 0.16, 0.21, 1.0),
+            shaped_texts: 0,
+            layout_nodes: 0,
         }
     }
 
@@ -253,6 +260,16 @@ impl NativeDom {
         self.layout_dirty = true;
         self.damage = Damage::full();
         self.signals.mark_layout_dirty();
+    }
+
+    /// Updates the button fill color and requests paint without layout or shaping.
+    /// 更新按钮填充色，并只请求绘制，不触发布局或 shaping。
+    pub fn set_button_color(&mut self, color: Color) {
+        if color == self.button_color {
+            return;
+        }
+        self.button_color = color;
+        self.signals.mark_paint_dirty();
     }
 
     /// Returns the stable creation-order identifier for a live node.
@@ -369,6 +386,7 @@ impl NativeDom {
             }
         }
 
+        self.layout_nodes += boxes.len() as u64;
         let dirty_nodes = std::mem::take(&mut self.dirty_nodes);
         for node in dirty_nodes {
             if let Some(rect) = self.bounds.get(&node).copied() {
@@ -415,12 +433,7 @@ impl NativeDom {
             let Some(bounds) = self.bounds.get(&root).copied() else {
                 continue;
             };
-            list.push(context.rect(
-                root,
-                node.stable_id,
-                bounds,
-                Color::rgba(0.14, 0.16, 0.21, 1.0),
-            ));
+            list.push(context.rect(root, node.stable_id, bounds, self.button_color));
             for child in &node.children {
                 let Some(child_node) = self.nodes.get(*child) else {
                     continue;
@@ -536,7 +549,10 @@ impl NativeDom {
         }
 
         if binding.shaped.is_none() {
+            let shape_calls_before = engine.borrow().stats().shape_calls;
             binding.shaped = Some(engine.borrow_mut().shape(&binding.spec));
+            let shape_calls_after = engine.borrow().stats().shape_calls;
+            self.shaped_texts += shape_calls_after - shape_calls_before;
         }
         let shaped = binding
             .shaped
@@ -640,17 +656,6 @@ impl NativeDom {
         nodes
     }
 
-    /// Removes a subtree and invalidates every released generational handle.
-    /// 删除子树，并让所有已释放的 generational 句柄失效。
-    fn erase_subtree(&mut self, node: NodeId) {
-        let Some(data) = self.nodes.remove(node) else {
-            return;
-        };
-        for child in data.children {
-            self.erase_subtree(child);
-        }
-    }
-
     fn emit(&mut self, operation: NativeBackendOp) {
         self.operations.push(BackendOperation {
             operation: operation.operation().to_owned(),
@@ -663,6 +668,45 @@ impl NativeDom {
             .get(node)
             .map(|data| data.stable_id)
             .expect("node must exist")
+    }
+
+    /// Projects one reachable node into a handle-free logical tree.
+    /// 把一个可达节点投影为不含句柄的逻辑树节点。
+    fn logical_node(&self, node: NodeId) -> Option<LogicalNodeSnapshot> {
+        let data = self.nodes.get(node)?;
+        let (kind, tag, text, attributes) = match data.kind {
+            NodeKind::Element(Tag::Button) => (
+                DomNodeKind::Element,
+                Some("button".to_owned()),
+                None,
+                data.attributes
+                    .iter()
+                    .map(|(name, value)| {
+                        let name = match name {
+                            Attribute::AriaLabel => "aria-label",
+                        };
+                        (name.to_owned(), value.clone())
+                    })
+                    .collect(),
+            ),
+            NodeKind::Text => (
+                DomNodeKind::Text,
+                None,
+                data.text.as_ref().map(|text| text.spec.text.clone()),
+                BTreeMap::new(),
+            ),
+        };
+        Some(LogicalNodeSnapshot {
+            kind,
+            tag,
+            text,
+            attributes,
+            children: data
+                .children
+                .iter()
+                .filter_map(|child| self.logical_node(*child))
+                .collect(),
+        })
     }
 }
 
@@ -740,6 +784,8 @@ impl DomBackend for NativeDom {
         self.mark_structural_change();
     }
 
+    /// Detaches only the selected node while keeping descendants and handle storage alive.
+    /// 仅分离选中节点，同时保留后代与句柄存储。
     fn remove(&mut self, node: &Self::Node) {
         let Some(data) = self.nodes.get(*node) else {
             return;
@@ -751,9 +797,10 @@ impl DomBackend for NativeDom {
             parent_data.children.retain(|candidate| candidate != node);
         }
         self.roots.retain(|root| root != node);
-        self.erase_subtree(*node);
-        self.listeners
-            .retain(|_, registration| self.nodes.contains_key(registration.node));
+        self.nodes
+            .get_mut(*node)
+            .expect("removed node must exist")
+            .parent = None;
         self.emit(NativeBackendOp::Remove { node: stable });
         self.mark_structural_change();
     }
@@ -967,6 +1014,36 @@ impl HeadlessBackend for NativeDom {
         self.operations.clone()
     }
 
+    /// Adds native text, layout, and frame work to the shared operation counters.
+    /// 把原生文本、布局与帧工作量加入共享操作计数。
+    fn backend_stats(&self) -> BackendStats {
+        let mut stats = self.operation_stats();
+        stats.shaped_texts = self.shaped_texts;
+        stats.layout_nodes = self.layout_nodes;
+        stats.frames_requested = self.signals.frame_requests();
+        stats
+    }
+
+    /// Takes the pending native frame request so later work can be attributed separately.
+    /// 取走待处理的原生帧请求，便于独立归因后续工作。
+    fn take_frame_request(&self) -> bool {
+        NativeDom::take_frame_request(self)
+    }
+
+    /// Serializes only attached native nodes and never exposes generational handles.
+    /// 仅序列化已挂载原生节点，绝不暴露 generational 句柄。
+    fn logical_tree(&self) -> LogicalTreeSnapshot {
+        let mut roots = self.roots.clone();
+        roots.sort_by_key(|node| self.nodes.get(*node).map(|data| data.stable_id));
+        LogicalTreeSnapshot {
+            schema: 1,
+            roots: roots
+                .into_iter()
+                .filter_map(|root| self.logical_node(root))
+                .collect(),
+        }
+    }
+
     fn layout_snapshot(&mut self) -> Option<Value> {
         let snapshot = self.layout(WindowConstraints::new(self.window, self.viewport));
         Some(json!(snapshot))
@@ -1002,23 +1079,68 @@ mod tests {
         (button, prefix, value)
     }
 
-    /// A released generational handle never resolves to a replacement node.
-    /// 已释放的 generational 句柄绝不会解析到替代节点。
+    /// Detaching a parent keeps descendant handles alive so they can be reinserted.
+    /// 分离父节点会保留后代句柄，使其可以重新插入。
     #[test]
-    fn released_node_ids_do_not_alias_replacements() {
+    fn removing_a_parent_keeps_descendant_handles_and_reinserts() {
         let mut dom = dom();
-        let old = dom.create_text("old");
-        let old_stable = dom.stable_id(old).expect("stable id");
-        dom.remove(&old);
-        assert!(!dom.contains(old));
-        let replacement = dom.create_text("new");
-        assert_ne!(old, replacement);
-        assert_ne!(some_stable(&dom, replacement), old_stable);
-        assert_eq!(dom.text_content(old), None);
+        let (button, prefix, value) = button_with_text(&mut dom);
+        let stable = (
+            dom.stable_id(button).expect("button id"),
+            dom.stable_id(prefix).expect("prefix id"),
+            dom.stable_id(value).expect("value id"),
+        );
+
+        dom.remove(&button);
+
+        assert!(dom.contains(button), "detached parent handle stays valid");
+        assert!(dom.contains(prefix), "descendant prefix stays alive");
+        assert!(dom.contains(value), "descendant value stays alive");
+        assert_eq!(
+            dom.text_content(button).as_deref(),
+            Some("Count: 0"),
+            "detached subtree remains readable"
+        );
+        assert!(
+            dom.find_all(&selector()).is_empty(),
+            "detached root is unreachable"
+        );
+
+        let wrapper = dom.create_element(Tag::Button);
+        dom.insert_before(&wrapper, &button, None);
+        assert_eq!(dom.stable_id(button), Some(stable.0));
+        assert_eq!(dom.stable_id(prefix), Some(stable.1));
+        assert_eq!(dom.stable_id(value), Some(stable.2));
+        assert_eq!(
+            dom.text_content(wrapper).as_deref(),
+            Some("Count: 0"),
+            "reinserted parent becomes reachable with its children"
+        );
+        assert_eq!(dom.find_all(&selector()), vec![button]);
     }
 
-    fn some_stable(dom: &NativeDom, node: NodeId) -> u64 {
-        dom.stable_id(node).expect("stable id")
+    /// Detaching one child leaves siblings attached and allows the same child back.
+    /// 分离单个子节点会保留兄弟节点，并允许同一子节点重新插入。
+    #[test]
+    fn removing_a_child_allows_reinsertion_without_losing_siblings() {
+        let mut dom = dom();
+        let (button, prefix, value) = button_with_text(&mut dom);
+
+        dom.remove(&value);
+        assert!(dom.contains(value), "detached child handle stays valid");
+        assert_eq!(dom.text_content(button).as_deref(), Some("Count: "));
+
+        dom.insert_before(&button, &value, None);
+        assert_eq!(dom.text_content(button).as_deref(), Some("Count: 0"));
+        assert!(dom.contains(prefix));
+        assert_eq!(dom.find_all(&selector()), vec![button]);
+    }
+
+    fn selector() -> Selector {
+        Selector {
+            role: Role::Button,
+            name: "Increment counter".to_owned(),
+        }
     }
 
     /// Text content changes reshape one node; width-only changes reuse shaping.
@@ -1124,6 +1246,117 @@ mod tests {
         let committed = dom.signals().snapshot();
         assert_eq!(committed.layout_generation, 2);
         assert!(!committed.layout_dirty);
+    }
+
+    /// Paint-only and width-only changes keep shaping stable while layout stays observable.
+    /// 仅绘制与仅宽度变化保持 shaping 稳定，同时布局工作量仍可观测。
+    #[test]
+    fn backend_stats_separate_paint_from_text_and_layout_work() {
+        let mut dom = dom();
+        let (_button, _prefix, value) = button_with_text(&mut dom);
+        let created = dom.backend_stats();
+        assert_eq!(created.nodes_created, 3);
+        assert_eq!(created.backend_set_text, 0);
+        assert_eq!(created.shaped_texts, 0);
+        assert_eq!(created.layout_nodes, 0);
+
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let laid_out = dom.backend_stats();
+        assert_eq!(laid_out.shaped_texts, 2);
+        assert_eq!(laid_out.layout_nodes, 3);
+        let _ = dom.take_frame_request();
+
+        // A color change only requests paint; it must not shape or lay out text.
+        // 颜色变化只请求绘制，不得 shaping 或布局文本。
+        dom.set_button_color(Color::rgba(0.2, 0.3, 0.4, 1.0));
+        let painted = dom.backend_stats();
+        assert_eq!(painted.shaped_texts, laid_out.shaped_texts);
+        assert_eq!(painted.layout_nodes, laid_out.layout_nodes);
+        assert_eq!(painted.frames_requested, laid_out.frames_requested + 1);
+        dom.set_button_color(Color::rgba(0.2, 0.3, 0.4, 1.0));
+        assert_eq!(
+            dom.backend_stats().frames_requested,
+            painted.frames_requested,
+            "the same color is a no-op"
+        );
+        dom.paint(dom.window(), dom.viewport());
+        let after_paint = dom.backend_stats();
+        assert_eq!(after_paint.shaped_texts, painted.shaped_texts);
+        assert_eq!(after_paint.layout_nodes, painted.layout_nodes);
+
+        // A width change re-lays out both visible text nodes without reshaping either.
+        // 宽度变化会重新布局两个可见文本节点，但不会重新 shaping。
+        dom.set_viewport(Size::new(900.0, 600.0), 1.0);
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let resized = dom.backend_stats();
+        assert_eq!(resized.shaped_texts, after_paint.shaped_texts);
+        assert_eq!(resized.layout_nodes, after_paint.layout_nodes + 3);
+
+        // A numeric text change keeps node counts stable and shapes only that node.
+        // 数字文本变化保持节点数稳定，并且只 shaping 该节点。
+        dom.set_text(&value, "1");
+        let changed = dom.backend_stats();
+        assert_eq!(changed.nodes_created, created.nodes_created);
+        assert_eq!(changed.nodes_removed, created.nodes_removed);
+        assert_eq!(changed.backend_set_text, 1);
+        assert_eq!(changed.shaped_texts, resized.shaped_texts);
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        assert_eq!(
+            dom.backend_stats().shaped_texts,
+            resized.shaped_texts + 1,
+            "only the changed text reshapes"
+        );
+    }
+
+    /// Shaping counters follow engine cache misses, not invalidation attempts.
+    /// Shaping 计数跟随引擎缓存未命中，而不是失效尝试。
+    #[test]
+    fn shaped_texts_only_count_cache_misses() {
+        let mut dom = dom();
+        let (_button, _prefix, value) = button_with_text(&mut dom);
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let initial = dom.backend_stats().shaped_texts;
+        assert_eq!(initial, 2);
+
+        dom.set_text(&value, "1");
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let changed = dom.backend_stats().shaped_texts;
+        assert_eq!(changed, initial + 1, "new text requires one shape");
+
+        // Returning to cached text invalidates the binding but hits the engine cache.
+        // 回到缓存文本会使绑定失效，但命中引擎缓存。
+        dom.set_text(&value, "0");
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let cached = dom.backend_stats().shaped_texts;
+        assert_eq!(
+            cached, changed,
+            "cache hits must not increment shaped_texts"
+        );
+
+        let before = dom.backend_stats();
+        dom.set_text(&value, "0");
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        assert_eq!(
+            dom.backend_stats(),
+            before,
+            "repeating the same text is a no-op"
+        );
+    }
+
+    /// Writing the same text does not commit or request a frame.
+    /// 写入相同文本不会提交，也不会请求帧。
+    #[test]
+    fn same_text_is_a_backend_no_op() {
+        let mut dom = dom();
+        let (_button, _prefix, value) = button_with_text(&mut dom);
+        dom.layout(WindowConstraints::new(dom.window(), dom.viewport()));
+        let _ = dom.take_frame_request();
+        let before = dom.backend_stats();
+
+        dom.set_text(&value, "0");
+
+        assert_eq!(dom.backend_stats(), before);
+        assert!(!dom.frame_request_pending());
     }
 
     /// Layout and display-list snapshots contain real window-tagged geometry.

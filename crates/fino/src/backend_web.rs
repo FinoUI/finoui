@@ -11,7 +11,7 @@ use crate::{
     dom_api::{Attribute, Event, EventContext, EventKind, EventListener, Role, Selector, Tag},
     headless::{
         A11yNodeSnapshot, A11ySnapshot, BackendOperation, DomNodeKind, DomNodeSnapshot,
-        DomSnapshot, HeadlessBackend, SnapshotKind,
+        DomSnapshot, HeadlessBackend, LogicalNodeSnapshot, LogicalTreeSnapshot, SnapshotKind,
     },
 };
 
@@ -90,6 +90,9 @@ impl WebBackendOp {
 struct NodeRecord {
     id: u64,
     node: WebNode,
+    /// Detached nodes stay alive but leave the reachable logical tree.
+    /// 已分离节点仍然存活，但离开可达逻辑树。
+    removed: bool,
 }
 
 struct ListenerRegistration {
@@ -138,12 +141,13 @@ impl DomBackend {
         }
     }
 
-    /// Attaches a backend-created root to `document.body`.
-    /// 把后端创建的根节点挂载到 `document.body`。
-    pub fn mount_to_body(&self, node: &WebNode) {
+    /// Attaches a backend-created root to `document.body` and restores reachability.
+    /// 把后端创建的根节点挂载到 `document.body`，并恢复可达性。
+    pub fn mount_to_body(&mut self, node: &WebNode) {
         self.body
             .append_child(&node.node)
             .expect("mounting the counter on document.body must succeed");
+        self.set_removed(&node.node, false);
     }
 
     /// Returns the number of live listener registrations.
@@ -160,8 +164,20 @@ impl DomBackend {
         self.nodes.push(NodeRecord {
             id: self.next_node,
             node: handle.clone(),
+            removed: false,
         });
         handle
+    }
+
+    /// Records whether a tracked node is detached from the reachable tree.
+    /// 记录受跟踪节点是否已从可达树中分离。
+    fn set_removed(&mut self, node: &Node, removed: bool) {
+        for record in &mut self.nodes {
+            if record.node.node.is_same_node(Some(node)) {
+                record.removed = removed;
+                return;
+            }
+        }
     }
 
     /// Looks up the stable identifier by comparing real DOM node identity.
@@ -191,17 +207,18 @@ impl DomBackend {
             .collect()
     }
 
-    /// Collects tracked roots: nodes whose real parent is not a tracked node.
-    /// 收集受跟踪的根：真实父节点不是受跟踪节点的节点。
+    /// Collects tracked roots: attached nodes whose real parent is not tracked.
+    /// 收集受跟踪的根：已挂载且真实父节点不是受跟踪节点的节点。
     fn roots(&self) -> Vec<WebNode> {
         self.nodes
             .iter()
             .filter(|record| {
-                record
-                    .node
-                    .node
-                    .parent_node()
-                    .is_none_or(|parent| self.record_id(&parent).is_none())
+                !record.removed
+                    && record
+                        .node
+                        .node
+                        .parent_node()
+                        .is_none_or(|parent| self.record_id(&parent).is_none())
             })
             .map(|record| record.node.clone())
             .collect()
@@ -255,6 +272,39 @@ impl DomBackend {
     fn emit(&mut self, operation: WebBackendOp) {
         self.operations.push(operation);
     }
+
+    /// Projects one reachable real node into a handle-free logical tree.
+    /// 把一个可达真实节点投影为不含句柄的逻辑树节点。
+    fn logical_node(&self, node: &WebNode) -> Option<LogicalNodeSnapshot> {
+        self.record_id(&node.node)?;
+        match node.tag {
+            Some(Tag::Button) => {
+                let element = Self::element(&node.node);
+                let mut attributes = BTreeMap::new();
+                if let Some(value) = element.get_attribute("aria-label") {
+                    attributes.insert("aria-label".to_owned(), value);
+                }
+                Some(LogicalNodeSnapshot {
+                    kind: DomNodeKind::Element,
+                    tag: Some("button".to_owned()),
+                    text: None,
+                    attributes,
+                    children: Self::child_nodes(&node.node)
+                        .iter()
+                        .filter_map(|child| self.record(child))
+                        .filter_map(|child| self.logical_node(&child))
+                        .collect(),
+                })
+            }
+            None => Some(LogicalNodeSnapshot {
+                kind: DomNodeKind::Text,
+                tag: None,
+                text: Some(node.node.node_value().unwrap_or_default()),
+                attributes: BTreeMap::new(),
+                children: Vec::new(),
+            }),
+        }
+    }
 }
 
 impl crate::dom_api::DomBackend for DomBackend {
@@ -301,17 +351,19 @@ impl crate::dom_api::DomBackend for DomBackend {
             .node
             .insert_before(&child.node, anchor.map(|anchor| &anchor.node))
             .expect("inserting a tracked node must not violate the DOM hierarchy");
+        self.set_removed(&child.node, false);
         self.emit(WebBackendOp::Insert);
     }
 
-    /// Detaches only the selected real node.
-    /// 仅分离选定的真实节点。
+    /// Detaches only the selected real node and removes it from the reachable tree.
+    /// 仅分离选定的真实节点，并把它移出可达树。
     fn remove(&mut self, node: &Self::Node) {
         if let Some(parent) = node.node.parent_node() {
             parent
                 .remove_child(&node.node)
                 .expect("removing a tracked child must succeed");
         }
+        self.set_removed(&node.node, true);
         self.emit(WebBackendOp::Remove);
     }
 
@@ -322,6 +374,9 @@ impl crate::dom_api::DomBackend for DomBackend {
             node.tag.is_none() && self.record_id(&node.node).is_some(),
             "set_text requires a tracked text node"
         );
+        if node.node.node_value().as_deref() == Some(value) {
+            return;
+        }
         node.node.set_node_value(Some(value));
         self.emit(WebBackendOp::SetText {
             node: self.record_id(&node.node).expect("tracked text node"),
@@ -550,6 +605,19 @@ impl HeadlessBackend for DomBackend {
                 details: serde_json::to_value(operation).unwrap_or(serde_json::Value::Null),
             })
             .collect()
+    }
+
+    /// Serializes only reachable real nodes and never exposes browser handles.
+    /// 仅序列化可达真实节点，绝不暴露浏览器句柄。
+    fn logical_tree(&self) -> LogicalTreeSnapshot {
+        LogicalTreeSnapshot {
+            schema: 1,
+            roots: self
+                .roots()
+                .iter()
+                .filter_map(|root| self.logical_node(root))
+                .collect(),
+        }
     }
 }
 

@@ -31,6 +31,23 @@ Memory used by nodes, text caches, and offscreen textures
 
 Optimization decisions use these counters and real frame times, not text-measurement microbenchmarks alone.
 
+### Runtime statistics
+
+`fino::metrics::RuntimeStats` is the shared cross-backend structure used by conformance tests and CI artifacts:
+
+```text
+component_executions
+effect_executions
+backend_set_text
+nodes_created
+nodes_removed
+shaped_texts
+layout_nodes
+frames_requested
+```
+
+`HeadlessHost::runtime_stats()` and `WindowContext::runtime_stats()` combine reactive execution counts with backend counters. Mock and Web report `shaped_texts`, `layout_nodes`, and `frames_requested` as zero because they do not own native text or frame scheduling; Native reports real shaping, layout-box, and coalesced frame-request work. `BackendStats` derives `backend_set_text`, `nodes_created`, and `nodes_removed` from the normalized operation log, so every backend counts the same verbs.
+
 ## Test strategy
 
 ### Reactive unit tests
@@ -57,6 +74,15 @@ Create structure
 ```
 
 Compare normalized logical trees, event results, and operation counts. Platform-specific node handles are excluded.
+
+The counter example owns the shared sequence and its stable report. Mock and Native print it through Cargo; the browser driver writes the same report for Web:
+
+```bash
+cargo run -p fino_counter -- conformance --backend mock --format json
+cargo run -p fino_counter -- conformance --backend native-offscreen --format json
+```
+
+The report contains `tree` and `final_tree` (`LogicalTreeSnapshot`), an accessibility projection, click results, `checkpoints` and `final_stats` (`RuntimeStats`), normalized `operations`, and the 100-increment `batch` result. All maps use stable key ordering and no platform handle appears in the schema. The `conformance` command validates the implemented contract fields, prints `status` and `violations` in JSON and human output, and exits non-zero when any of those fields fails.
 
 ### Text and layout tests
 
