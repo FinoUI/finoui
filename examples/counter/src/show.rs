@@ -317,7 +317,7 @@ impl ShowConformanceReport {
             &mut violations,
             "nodes_removed",
             self.final_stats.nodes_removed,
-            7 + loops * 2,
+            11 + loops * 4,
         );
         check(
             &mut violations,
@@ -359,7 +359,7 @@ impl ShowConformanceReport {
             &mut violations,
             "remove",
             self.operations.get("remove").copied().unwrap_or(0),
-            1,
+            5 + loops * 2,
         );
         check(
             &mut violations,

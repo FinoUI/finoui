@@ -718,7 +718,7 @@ impl KeyedConformanceReport {
             &mut violations,
             "final_stats.nodes_removed",
             self.final_stats.nodes_removed,
-            35,
+            67,
         );
         if self.disposed_tree.roots.len() != 1 {
             push(
@@ -794,7 +794,7 @@ pub fn expected_phase_operations(name: &str) -> BTreeMap<String, u64> {
         "swap" => &[("insert", 3)],
         "reverse" => &[("insert", 12)],
         "rotation" => &[("insert", 3)],
-        "delete" => &[("release", 4), ("unlisten", 1)],
+        "delete" => &[("release", 4), ("remove", 4), ("unlisten", 1)],
         "replace" => &[
             ("create_anchor", 2),
             ("create_element", 1),
@@ -802,12 +802,13 @@ pub fn expected_phase_operations(name: &str) -> BTreeMap<String, u64> {
             ("insert", 4),
             ("listen", 1),
             ("release", 4),
+            ("remove", 4),
             ("set_attribute", 1),
             ("set_text", 1),
             ("unlisten", 1),
         ],
         "equal_write" => &[],
-        "clear" => &[("release", 16), ("unlisten", 4)],
+        "clear" => &[("release", 16), ("remove", 16), ("unlisten", 4)],
         "readd" => &[
             ("create_anchor", 4),
             ("create_element", 2),
@@ -835,7 +836,7 @@ pub fn expected_operations() -> BTreeMap<String, u64> {
         ("insert", 59),
         ("listen", 9),
         ("release", 34),
-        ("remove", 1),
+        ("remove", 33),
         ("set_attribute", 10),
         ("set_text", 9),
         ("unlisten", 9),

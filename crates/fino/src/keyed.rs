@@ -35,7 +35,7 @@ use crate::{
     dom_api::{Attribute, DomBackend, Event, EventContext, EventKind, Tag},
     reactive::Owner,
     runtime::Runtime,
-    show::{RangeAnchor, Show, ShowContext},
+    show::{RangeAnchor, Show, ShowContext, release_after_detach},
     view::with_owner,
 };
 
@@ -315,23 +315,9 @@ impl<B: DomBackend + 'static, K> ForEntry<B, K> {
     /// 先停止条目 Owner，再释放全部已创建节点与外部节点。
     fn dispose(self, runtime: &Runtime<B>) {
         self.owner.dispose();
-        let mut released: Vec<B::Node> = Vec::new();
-        for node in self.created.iter().rev() {
-            if released.iter().any(|released| released == node) {
-                continue;
-            }
-            runtime.backend_mut().release(node);
-            released.push(node.clone());
-        }
-        for node in &self.nodes {
-            if self.created.iter().any(|created| created == node)
-                || released.iter().any(|released| released == node)
-            {
-                continue;
-            }
-            runtime.backend_mut().release(node);
-            released.push(node.clone());
-        }
+        let mut nodes = self.created;
+        nodes.extend(self.nodes);
+        release_after_detach(runtime, &nodes);
     }
 
     /// Moves the complete item range before one reference node.
@@ -730,9 +716,7 @@ impl<B: DomBackend + 'static, K: Clone + Eq + std::hash::Hash + 'static> ForStat
             Err(payload) => {
                 let created = context.inner.take_created();
                 owner.dispose();
-                for node in created.iter().rev() {
-                    self.runtime.backend_mut().release(node);
-                }
+                release_after_detach(&self.runtime, &created);
                 resume_unwind(payload);
             }
         }

@@ -120,6 +120,32 @@ impl<B: DomBackend> fmt::Debug for RangeAnchor<B> {
     }
 }
 
+/// Detaches tracked nodes from each other, then releases each unique node once.
+/// 先把受跟踪节点彼此分离，再对每个唯一节点释放一次。
+///
+/// `remove` stays non-destructive; `release` stays terminal. Detaching first
+/// prevents a recursive parent release from freeing a descendant that is still
+/// in the tracked list and would otherwise be released a second time.
+/// `remove` 仍只做非破坏性分离，`release` 仍是终止释放。先分离可避免父节点
+/// 递归释放已经跟踪、随后又会被再次释放的后代。
+pub(crate) fn release_after_detach<B: DomBackend + 'static>(
+    runtime: &Runtime<B>,
+    nodes: &[B::Node],
+) {
+    let mut unique: Vec<B::Node> = Vec::new();
+    for node in nodes {
+        if !unique.iter().any(|existing| existing == node) {
+            unique.push(node.clone());
+        }
+    }
+    for node in &unique {
+        runtime.backend_mut().remove(node);
+    }
+    for node in &unique {
+        runtime.backend_mut().release(node);
+    }
+}
+
 /// Transactional construction context for one [`Show`] content mount.
 /// 一次 [`Show`] 内容挂载使用的事务性构建上下文。
 ///
@@ -421,22 +447,9 @@ impl<B: DomBackend + 'static> ActiveRange<B> {
     /// 在释放节点与保留句柄前先停止子 Owner。
     fn dispose(self, runtime: &Runtime<B>) {
         self.owner.dispose();
-        let mut released: Vec<B::Node> = Vec::new();
-        for node in self.created.iter().rev() {
-            if released.iter().any(|released| released == node) {
-                continue;
-            }
-            runtime.backend_mut().release(node);
-            released.push(node.clone());
-        }
-        for node in &self.nodes {
-            if self.created.iter().any(|created| created == node)
-                || released.iter().any(|released| released == node)
-            {
-                continue;
-            }
-            runtime.backend_mut().release(node);
-        }
+        let mut nodes = self.created;
+        nodes.extend(self.nodes);
+        release_after_detach(runtime, &nodes);
     }
 }
 
@@ -506,9 +519,7 @@ impl<B: DomBackend + 'static> ShowState<B> {
             Err(payload) => {
                 let created = std::mem::take(&mut context.created);
                 owner.dispose();
-                for node in created.iter().rev() {
-                    runtime.backend_mut().release(node);
-                }
+                release_after_detach(runtime, &created);
                 resume_unwind(payload);
             }
         }

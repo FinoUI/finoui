@@ -592,7 +592,7 @@ try {
     assertEqual(showConformance.operations.create_anchor, 2, 'Show create_anchor operations');
     assert(showConformance.storage_stable, 'Show storage does not grow across toggles');
     assertEqual(showConformance.storage_loops, 10, 'Show storage loop count');
-    assertEqual(showConformance.operations.remove, 1, 'Show remove operations');
+    assertEqual(showConformance.operations.remove, 25, 'Show remove operations');
     assertEqual(showConformance.operations.release, 26, 'Show release operations');
     assertEqual(showConformance.operations.unlisten, 13, 'Show unlisten operations');
   });
@@ -619,7 +619,7 @@ try {
     assertEqual(keyedConformance.operations.create_anchor, 18, 'keyed create_anchor');
     assertEqual(keyedConformance.operations.insert, 59, 'keyed insert moves');
     assertEqual(keyedConformance.operations.release, 34, 'keyed releases');
-    assertEqual(keyedConformance.operations.remove, 1, 'keyed host remove');
+    assertEqual(keyedConformance.operations.remove, 33, 'keyed detach and host remove');
     assertEqual(keyedConformance.local_update.reconcile_delta, 0, 'item updates skip reconciliation');
   });
 

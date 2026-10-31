@@ -24,6 +24,13 @@ fn text(backend: &mut MockBackend, parent: &MockNode, value: &str) -> MockNode {
     node
 }
 
+fn strict_text(runtime: &Runtime<StrictBackend>, parent: &MockNode, value: &str) -> MockNode {
+    let mut backend = runtime.backend_mut();
+    let node = backend.create_text(value);
+    backend.insert_before(parent, &node, None);
+    node
+}
+
 fn keys(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
@@ -462,8 +469,8 @@ fn keyed_for_disposes_removed_items_and_whole_list_once() {
     );
     assert_eq!(
         runtime.backend().operations().len(),
-        before_dispose + 4 + 2 + 1,
-        "one item unlistens and releases four nodes, then the list releases two anchors"
+        before_dispose + 1 + 4 + 4 + 2,
+        "one item unlistens, detaches and releases four nodes, then the list releases two anchors"
     );
     let state = runtime.backend().dom_snapshot();
     assert!(!state.roots.is_empty());
@@ -885,8 +892,8 @@ fn keyed_for_disposes_nested_item_owners() {
     stale.set(9);
     assert_eq!(
         runtime.backend().operations().len(),
-        before + 4,
-        "removing the item releases text, element, and two anchors exactly once"
+        before + 8,
+        "removing the item detaches and releases text, element, and two anchors exactly once"
     );
 }
 
@@ -1443,6 +1450,190 @@ fn keyed_for_releases_duplicate_external_roots_once() {
         runtime.backend().inner().dom_snapshot().nodes.len(),
         2,
         "only the static root and tail remain stored"
+    );
+    owner.dispose();
+}
+
+/// Panic rollback detaches parent and child before release, preserving the
+/// original builder panic for both creation orders.
+/// panic 回滚在释放前分离父子节点，并在两种创建顺序下都保留原始构建器 panic。
+#[test]
+fn keyed_for_panic_rollback_preserves_payload_for_both_creation_orders() {
+    for parent_first in [true, false] {
+        let runtime = Runtime::new(StrictBackend::new());
+        let owner = runtime.create_owner();
+        let root = runtime.backend_mut().create_element(Tag::Button);
+        let tail = strict_text(&runtime, &root, "Tail");
+        let items = keys(&["a"]);
+        let message = format!("builder order parent_first={parent_first}");
+        let expected = message.clone();
+        let failure = catch_unwind(AssertUnwindSafe(|| {
+            let _ = For::mount(
+                &runtime,
+                &owner,
+                &root,
+                Some(&tail),
+                "keyed/strict-panic",
+                move || items.clone(),
+                move |context: &mut ForContext<StrictBackend>, _key| {
+                    let (parent, child) = if parent_first {
+                        let parent = context.create_element(Tag::Button);
+                        let child = context.create_text("child");
+                        (parent, child)
+                    } else {
+                        let child = context.create_text("child");
+                        let parent = context.create_element(Tag::Button);
+                        (parent, child)
+                    };
+                    context.insert_before(&parent, &child, None);
+                    panic!("{message}");
+                },
+            );
+        }));
+        let payload = failure.expect_err("builder panic must propagate");
+        let actual = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| {
+                payload
+                    .downcast_ref::<&str>()
+                    .map(|value| (*value).to_owned())
+            })
+            .unwrap_or_default();
+        assert_eq!(actual, expected, "the original builder panic is preserved");
+        assert_eq!(
+            runtime.backend().inner().dom_snapshot().nodes.len(),
+            2,
+            "no tracked node survives rollback"
+        );
+        assert_eq!(
+            runtime
+                .backend()
+                .inner()
+                .dom_snapshot()
+                .nodes
+                .iter()
+                .filter(|node| node.kind == DomNodeKind::Anchor)
+                .count(),
+            0
+        );
+    }
+}
+
+/// Terminal For disposal also detaches child-before-parent creation order before
+/// releasing each node once.
+/// 终止 For 释放同样会先分离“子先于父创建”的节点，再逐节点释放一次。
+#[test]
+fn keyed_for_child_before_parent_dispose_is_single_release() {
+    let runtime = Runtime::new(StrictBackend::new());
+    let owner = runtime.create_owner();
+    let items = owner.signal_named("keyed/items", keys(&["a"]));
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = strict_text(&runtime, &root, "Tail");
+    let list = {
+        let read_items = items.clone();
+        For::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "keyed/strict-terminal",
+            move || read_items.get(),
+            |context: &mut ForContext<StrictBackend>, _key| {
+                let child = context.create_text("child");
+                let parent = context.create_element(Tag::Button);
+                context.insert_before(&parent, &child, None);
+                vec![parent]
+            },
+        )
+    };
+    list.dispose();
+    list.dispose();
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot().nodes.len(),
+        2,
+        "only the static root and tail remain stored"
+    );
+    owner.dispose();
+}
+
+/// Show rollback detaches tracked content before releasing it and preserves the
+/// original builder panic.
+/// Show 回滚在释放前分离受跟踪内容，并保留原始构建器 panic。
+#[test]
+fn show_panic_rollback_preserves_payload_with_child_before_parent() {
+    let runtime = Runtime::new(StrictBackend::new());
+    let owner = runtime.create_owner();
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = strict_text(&runtime, &root, "Tail");
+    let failure = catch_unwind(AssertUnwindSafe(|| {
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/strict-panic",
+            || true,
+            |context: &mut fino::show::ShowContext<StrictBackend>| {
+                let child = context.create_text("child");
+                let parent = context.create_element(Tag::Button);
+                context.insert_before(&parent, &child, None);
+                panic!("show builder child first");
+            },
+        );
+    }));
+    let payload = failure.expect_err("Show builder panic must propagate");
+    let actual = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(actual, "show builder child first");
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot().nodes.len(),
+        2,
+        "Show anchors and content are released after the failed mount"
+    );
+}
+
+/// Show terminal disposal detaches child-before-parent content before release.
+/// Show 终止释放会先分离“子先于父创建”的内容，再释放。
+#[test]
+fn show_child_before_parent_dispose_is_single_release() {
+    let runtime = Runtime::new(StrictBackend::new());
+    let owner = runtime.create_owner();
+    let visible = owner.signal_named("show/strict-visible", true);
+    let root = runtime.backend_mut().create_element(Tag::Button);
+    let tail = strict_text(&runtime, &root, "Tail");
+    let show = {
+        let visible = visible.clone();
+        Show::mount(
+            &runtime,
+            &owner,
+            &root,
+            Some(&tail),
+            "show/strict-terminal",
+            move || visible.get(),
+            |context: &mut fino::show::ShowContext<StrictBackend>| {
+                let child = context.create_text("child");
+                let parent = context.create_element(Tag::Button);
+                context.insert_before(&parent, &child, None);
+                parent
+            },
+        )
+    };
+    visible.set(false);
+    assert!(!show.is_mounted());
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot().nodes.len(),
+        4,
+        "the static root, tail, and Show anchors remain"
+    );
+    show.dispose();
+    assert_eq!(
+        runtime.backend().inner().dom_snapshot().nodes.len(),
+        2,
+        "Show disposal releases its anchors after the content"
     );
     owner.dispose();
 }

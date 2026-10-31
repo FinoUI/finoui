@@ -150,6 +150,7 @@ let rows = For::mount(
 - 重排使用 `insert_before` 移动受影响范围（含锚点）。前缀、后缀与 LIS 稳定范围原地不动；父节点、静态兄弟与 For 锚点绝不清空或重建，也绝不写入 `innerHTML`。
 - `ForContext` 的变更只能作用于本条创建节点。`insert_before`、`set_text`、`set_attribute` 与 `listen` 会在变更前拒绝外部已挂载节点，上下文也不暴露共享 Runtime。条目 Effect 接收受限的 `ForEffectContext`，只提供条目内的 `set_text`、`set_attribute` 与 `insert_before`，不暴露原始后端借用。
 - 嵌套 `Show` 挂载同样具有事务性。首次内容或条件 panic 会在重新抛出前释放 Show 锚点与 Owner；后续内容 panic 会保留锚点与活跃 Effect，使重试可以成功。
+- panic 回滚与终止释放会先用 `remove` 分离每个受跟踪节点，再对每个唯一节点释放一次。`remove` 仍只做分离，`release` 仍是终止操作，因此“父先创建”与“子先创建”的顺序都不会重复释放跟踪后代。
 - 每个新条目都在改动既有范围前完整构建。构建器 panic 时先释放该条目 Owner 及其跟踪的节点、Effect 与监听，再继续展开；已构建条目会被释放，上一次列表保持已提交。
 - 删除 key 时先释放条目 Owner，再释放其范围。写入已移除条目的 Signal 不再触达后端或请求帧。
 - 条目内通过条目 Effect 完成的 Signal 更新不会运行协调 Effect。
