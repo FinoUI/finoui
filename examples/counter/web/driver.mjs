@@ -446,9 +446,8 @@ try {
     assert(Array.isArray(bundle.result.steps), 'the scenario must return ordered steps');
     assertEqual(bundle.result.backend, 'web-headless', 'scenario backend');
     assert(
-      bundle.result.steps.length >= 1 &&
-        bundle.result.steps.length <= scenarioDocument.steps.length,
-      'the scenario must report at least one executed step and no more than its protocol steps',
+      bundle.result.steps.length <= scenarioDocument.steps.length,
+      'the scenario must not report more steps than its protocol steps',
     );
     assertEqual(bundle.result.counters.component_executions, 1, 'scenario component executions');
   });

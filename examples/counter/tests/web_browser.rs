@@ -560,3 +560,98 @@ fn web_headless_accepts_keyed_scenario_with_clear_final_state() {
         );
     }
 }
+
+/// A keyed scenario with zero protocol steps is valid and must still produce a
+/// passed result plus the initial snapshots and browser artifacts.
+/// keyed 场景允许零协议步骤，仍须生成 passed 结果、初始快照与浏览器产物。
+#[test]
+#[ignore = "launches headless Chromium; run with cargo test -p fino_counter --test web_browser -- --ignored"]
+fn web_headless_accepts_keyed_scenario_with_empty_steps() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let scenario_path = temporary.path().join("keyed-empty.json");
+    let run_dir = temporary.path().join("keyed-empty-web");
+    let scenario = serde_json::json!({
+        "schema": 1,
+        "name": "keyed/empty-steps",
+        "mount": "keyed",
+        "environment": {
+            "viewport": [800, 600],
+            "dpr": 1.0,
+            "locale": "zh-CN",
+            "color_scheme": "dark",
+            "seed": 42,
+        },
+        "steps": [],
+    });
+    fs::write(
+        &scenario_path,
+        serde_json::to_vec_pretty(&scenario).expect("scenario JSON"),
+    )
+    .expect("scenario file");
+
+    let output = run_web_scenario_with_mount(&scenario_path, &run_dir, Some("keyed"));
+    assert!(
+        output.status.success(),
+        "empty-step keyed scenario failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).expect("scenario JSON");
+    assert_eq!(result["status"], "passed");
+    assert_eq!(result["backend"], "web-headless");
+    assert_eq!(result["steps"].as_array().map(Vec::len), Some(0));
+    assert_eq!(result["counters"]["component_executions"], 1);
+
+    for name in [
+        "result.json",
+        "dom.json",
+        "a11y.json",
+        "reactive.json",
+        "trace.json",
+        "browser.json",
+        "keyed_conformance.json",
+    ] {
+        assert!(
+            run_dir.join(name).is_file(),
+            "missing empty-step artifact {name}"
+        );
+    }
+    let dom = inspect_artifact(&run_dir, SnapshotKind::Dom).expect("empty-step DOM");
+    assert_eq!(dom["roots"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        dom["nodes"]
+            .as_array()
+            .expect("DOM nodes")
+            .iter()
+            .filter(|node| node["kind"] == "anchor")
+            .count(),
+        2,
+        "an empty list keeps only the list anchor pair"
+    );
+    let a11y = inspect_artifact(&run_dir, SnapshotKind::A11y).expect("empty-step a11y");
+    let host = a11y["nodes"]
+        .as_array()
+        .expect("a11y nodes")
+        .iter()
+        .find(|node| node["name"] == "Keyed host")
+        .expect("keyed host");
+    assert_eq!(host["text"], "HostNextTail");
+
+    let browser: Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("browser.json")).expect("browser checks"),
+    )
+    .expect("browser JSON");
+    assert_eq!(browser["status"], "passed");
+    for expected in [
+        "scenario_executes_in_chromium",
+        "scenario_dom_matches_live_dom",
+    ] {
+        assert!(
+            browser["checks"]
+                .as_array()
+                .expect("browser checks")
+                .iter()
+                .any(|check| check["name"] == expected && check["status"] == "passed"),
+            "missing passing browser check {expected}"
+        );
+    }
+}
