@@ -22,6 +22,57 @@ use crate::{
     web::new_host,
 };
 
+thread_local! {
+    /// Live keyed scenario probe captured before the scenario host is dropped.
+    /// 场景 Host 被释放前捕获的 keyed 实时探针。
+    static LIVE_KEYED: RefCell<Option<LiveKeyedProbe>> = const { RefCell::new(None) };
+}
+
+/// Live DOM state of the current keyed scenario page at capture time.
+/// 捕获时当前 keyed 场景页面的实时 DOM 状态。
+#[derive(Clone, Debug, Serialize)]
+struct LiveKeyedProbe {
+    schema: u32,
+    mounted_in_body: bool,
+    host_text: String,
+    rows: Vec<String>,
+}
+
+fn read_live_keyed_probe() -> LiveKeyedProbe {
+    let document = web_sys::window().and_then(|window| window.document());
+    let body = document.as_ref().and_then(|document| document.body());
+    let host = document.as_ref().and_then(|document| {
+        document
+            .query_selector("body > button[aria-label=\"Keyed host\"]")
+            .ok()
+            .flatten()
+    });
+    let mounted_in_body = host
+        .as_ref()
+        .is_some_and(|host| body.as_ref().is_some_and(|body| body.contains(Some(host))));
+    let host_text = host
+        .as_ref()
+        .and_then(|host| host.text_content())
+        .unwrap_or_default();
+    let rows = host
+        .as_ref()
+        .and_then(|host| host.query_selector_all("button[aria-label^=\"Row \"]").ok())
+        .map(|nodes| {
+            (0..nodes.length())
+                .filter_map(|index| nodes.item(index))
+                .filter_map(|node| node.dyn_ref::<web_sys::Element>().cloned())
+                .filter_map(|element| element.get_attribute("aria-label"))
+                .collect()
+        })
+        .unwrap_or_default();
+    LiveKeyedProbe {
+        schema: 1,
+        mounted_in_body,
+        host_text,
+        rows,
+    }
+}
+
 /// One mounted counter page with handles only to its own runtime.
 /// 一个已挂载的计数器页面，只持有自己 Runtime 的句柄。
 ///
@@ -366,6 +417,8 @@ pub fn run_detach_reinsert_probe() -> Result<String, JsValue> {
 struct ScenarioBundle {
     result: ScenarioResult,
     artifacts: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_keyed: Option<LiveKeyedProbe>,
 }
 
 /// Runs the unchanged JSON scenario against the real DOM inside the browser.
@@ -390,6 +443,7 @@ pub fn run_scenario(scenario_json: &str, run_dir: &str) -> Result<String, JsValu
     serde_json::to_string(&ScenarioBundle {
         result: run.result,
         artifacts,
+        live_keyed: None,
     })
     .map_err(|error| tool_error("UI_ARTIFACT_SERIALIZATION", error.to_string()))
 }
@@ -416,6 +470,7 @@ pub fn run_show_scenario(scenario_json: &str, run_dir: &str) -> Result<String, J
     serde_json::to_string(&ScenarioBundle {
         result: run.result,
         artifacts,
+        live_keyed: None,
     })
     .map_err(|error| tool_error("UI_ARTIFACT_SERIALIZATION", error.to_string()))
 }
@@ -427,8 +482,15 @@ pub fn run_keyed_scenario(scenario_json: &str, run_dir: &str) -> Result<String, 
     let scenario: Scenario = serde_json::from_str(scenario_json)
         .map_err(|error| tool_error("UI_SCENARIO_INVALID_JSON", error.to_string()))?;
     let host = new_host(scenario.environment.clone());
-    let run = run_on_host_collect(&scenario, Path::new(run_dir), host, mount_keyed_on_body)
-        .map_err(tool_error_value)?;
+    LIVE_KEYED.with(|slot| *slot.borrow_mut() = None);
+    let run = run_on_host_collect(
+        &scenario,
+        Path::new(run_dir),
+        host,
+        mount_keyed_on_body_with_probe,
+    )
+    .map_err(tool_error_value)?;
+    let live_keyed = LIVE_KEYED.with(|slot| slot.borrow_mut().take());
 
     let artifacts = run
         .artifacts
@@ -442,6 +504,7 @@ pub fn run_keyed_scenario(scenario_json: &str, run_dir: &str) -> Result<String, 
     serde_json::to_string(&ScenarioBundle {
         result: run.result,
         artifacts,
+        live_keyed,
     })
     .map_err(|error| tool_error("UI_ARTIFACT_SERIALIZATION", error.to_string()))
 }
@@ -468,6 +531,21 @@ fn mount_keyed_on_body(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebN
     let root = mount_keyed_root(runtime, owner);
     runtime.backend_mut().mount_to_body(&root);
     root
+}
+
+/// Mounts the keyed probe and captures its live DOM before host disposal.
+/// 挂载 keyed 探针，并在 Host 释放前捕获其实时 DOM。
+fn mount_keyed_on_body_with_probe(runtime: &mut Runtime<DomBackend>, owner: &Owner) -> WebNode {
+    let capture_owner = owner.child();
+    capture_owner.on_dispose(|| {
+        let probe = read_live_keyed_probe();
+        LIVE_KEYED.with(|slot| *slot.borrow_mut() = Some(probe));
+    });
+    // Keep the capture owner strongly alive until the host owner cleans its
+    // children; a parent only stores weak child references.
+    // 保持捕获 Owner 强引用直到 Host Owner 清理子节点；父 Owner 只保存弱子引用。
+    owner.keep_alive(capture_owner);
+    mount_keyed_on_body(runtime, owner)
 }
 
 /// Builds a serialized `ToolError` JavaScript exception for browser callers.

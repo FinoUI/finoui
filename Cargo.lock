@@ -660,6 +660,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "wasm-bindgen",
+ "web-sys",
  "wgpu",
  "winit",
 ]

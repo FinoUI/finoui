@@ -474,17 +474,52 @@ try {
       return;
     }
     if (isKeyed) {
-      const live = await page.evaluate(() => ({
-        innerHtmlSets: window.__finoInnerHtmlSets,
-      }));
+      const live = bundle.live_keyed;
+      const innerHtmlSets = await page.evaluate(() => window.__finoInnerHtmlSets);
+      assert(live, 'the scenario page must expose its live keyed probe');
+      assertEqual(live.schema, 1, 'keyed live probe schema');
+      assert(live.mounted_in_body, 'the keyed host is mounted directly in document.body');
       const dom = JSON.parse(bundle.artifacts['dom.json']);
       assertEqual(dom.roots.length, 1, 'keyed DOM root count');
       const ids = dom.nodes.map((node) => node.id);
       assertEqual(new Set(ids).size, ids.length, 'keyed DOM ids are unique');
+      const byId = new Map(dom.nodes.map((node) => [node.id, node]));
+      const domHost = dom.nodes.find(
+        (node) => node.attributes['aria-label'] === 'Keyed host',
+      );
+      assert(domHost, 'the keyed host must be present in the DOM snapshot');
+      const textOf = (id) => {
+        const node = byId.get(id);
+        if (!node) {
+          return '';
+        }
+        if (node.kind === 'text') {
+          return node.text ?? '';
+        }
+        return (node.children ?? []).map(textOf).join('');
+      };
+      const rowsOf = (id) => {
+        const node = byId.get(id);
+        if (!node) {
+          return [];
+        }
+        const label = node.attributes?.['aria-label'];
+        const own = label?.startsWith('Row ') ? [label] : [];
+        return own.concat(...(node.children ?? []).map(rowsOf));
+      };
+      const domHostText = textOf(domHost.id);
+      const domRows = rowsOf(domHost.id);
       const a11y = JSON.parse(bundle.artifacts['a11y.json']);
       const host = a11y.nodes.find((node) => node.name === 'Keyed host');
       assert(host, 'keyed host must remain reachable');
-      assertEqual(live.innerHtmlSets, 0, 'innerHTML assignments during keyed scenario');
+      assertEqual(live.host_text, host.text, 'live host text matches a11y snapshot');
+      assertEqual(live.host_text, domHostText, 'live host text matches DOM snapshot');
+      assertEqual(
+        live.rows.join(','),
+        domRows.join(','),
+        'live row order matches DOM snapshot',
+      );
+      assertEqual(innerHtmlSets, 0, 'innerHTML assignments during keyed scenario');
       assertEqual(pageErrors.length, 0, 'keyed page errors');
       return;
     }
